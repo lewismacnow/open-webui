@@ -21,18 +21,13 @@ from open_webui.routers.retrieval import (
     BatchProcessFilesForm,
 )
 from open_webui.storage.provider import Storage
-
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.utils.auth import get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
-
-
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.models.models import Models, ModelForm
 
-
 log = logging.getLogger(__name__)
-
 router = APIRouter()
 
 ############################
@@ -41,15 +36,12 @@ router = APIRouter()
 
 PAGE_ITEM_COUNT = 30
 
-
 class KnowledgeAccessResponse(KnowledgeUserResponse):
     write_access: Optional[bool] = False
-
 
 class KnowledgeAccessListResponse(BaseModel):
     items: list[KnowledgeAccessResponse]
     total: int
-
 
 @router.get("/", response_model=KnowledgeAccessListResponse)
 async def get_knowledge_bases(page: Optional[int] = 1, user=Depends(get_verified_user)):
@@ -62,7 +54,6 @@ async def get_knowledge_bases(page: Optional[int] = 1, user=Depends(get_verified
         groups = Groups.get_groups_by_member_id(user.id)
         if groups:
             filter["group_ids"] = [group.id for group in groups]
-
         filter["user_id"] = user.id
 
     result = Knowledges.search_knowledge_bases(
@@ -82,7 +73,6 @@ async def get_knowledge_bases(page: Optional[int] = 1, user=Depends(get_verified
         ],
         total=result.total,
     )
-
 
 @router.get("/search", response_model=KnowledgeAccessListResponse)
 async def search_knowledge_bases(
@@ -105,7 +95,6 @@ async def search_knowledge_bases(
         groups = Groups.get_groups_by_member_id(user.id)
         if groups:
             filter["group_ids"] = [group.id for group in groups]
-
         filter["user_id"] = user.id
 
     result = Knowledges.search_knowledge_bases(
@@ -125,7 +114,6 @@ async def search_knowledge_bases(
         ],
         total=result.total,
     )
-
 
 @router.get("/search/files", response_model=KnowledgeFileListResponse)
 async def search_knowledge_files(
@@ -149,11 +137,9 @@ async def search_knowledge_files(
 
     return Knowledges.search_knowledge_files(filter=filter, skip=skip, limit=limit)
 
-
 ############################
 # CreateNewKnowledge
 ############################
-
 
 @router.post("/create", response_model=Optional[KnowledgeResponse])
 async def create_new_knowledge(
@@ -189,11 +175,9 @@ async def create_new_knowledge(
             detail=ERROR_MESSAGES.FILE_EXISTS,
         )
 
-
 ############################
 # ReindexKnowledgeFiles
 ############################
-
 
 @router.post("/reindex", response_model=bool)
 async def reindex_knowledge_files(request: Request, user=Depends(get_verified_user)):
@@ -252,16 +236,13 @@ async def reindex_knowledge_files(request: Request, user=Depends(get_verified_us
     log.info(f"Reindexing completed.")
     return True
 
-
 ############################
 # GetKnowledgeById
 ############################
 
-
 class KnowledgeFilesResponse(KnowledgeResponse):
     files: Optional[list[FileMetadataResponse]] = None
     write_access: Optional[bool] = False
-
 
 @router.get("/{id}", response_model=Optional[KnowledgeFilesResponse])
 async def get_knowledge_by_id(id: str, user=Depends(get_verified_user)):
@@ -273,7 +254,6 @@ async def get_knowledge_by_id(id: str, user=Depends(get_verified_user)):
             or knowledge.user_id == user.id
             or has_access(user.id, "read", knowledge.access_control)
         ):
-
             return KnowledgeFilesResponse(
                 **knowledge.model_dump(),
                 write_access=(
@@ -287,11 +267,9 @@ async def get_knowledge_by_id(id: str, user=Depends(get_verified_user)):
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-
 ############################
 # UpdateKnowledgeById
 ############################
-
 
 @router.post("/{id}/update", response_model=Optional[KnowledgeFilesResponse])
 async def update_knowledge_by_id(
@@ -341,11 +319,9 @@ async def update_knowledge_by_id(
             detail=ERROR_MESSAGES.ID_TAKEN,
         )
 
-
 ############################
 # GetKnowledgeFilesById
 ############################
-
 
 @router.get("/{id}/files", response_model=KnowledgeFileListResponse)
 async def get_knowledge_files_by_id(
@@ -357,7 +333,6 @@ async def get_knowledge_files_by_id(
     page: Optional[int] = 1,
     user=Depends(get_verified_user),
 ):
-
     knowledge = Knowledges.get_knowledge_by_id(id=id)
     if not knowledge:
         raise HTTPException(
@@ -390,19 +365,23 @@ async def get_knowledge_files_by_id(
     if direction:
         filter["direction"] = direction
 
-    return Knowledges.search_files_by_id(
+    response = Knowledges.search_files_by_id(
         id, user.id, filter=filter, skip=skip, limit=limit
     )
 
+    if view_option == "metadata_only":
+        for item in response.items:
+            if item.data:
+                item.data.pop("content", None)
+
+    return response
 
 ############################
 # AddFileToKnowledge
 ############################
 
-
 class KnowledgeFileIdForm(BaseModel):
     file_id: str
-
 
 @router.post("/{id}/file/add", response_model=Optional[KnowledgeFilesResponse])
 def add_file_to_knowledge_by_id(
@@ -470,7 +449,6 @@ def add_file_to_knowledge_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-
 @router.post("/{id}/file/update", response_model=Optional[KnowledgeFilesResponse])
 def update_file_from_knowledge_by_id(
     request: Request,
@@ -532,11 +510,9 @@ def update_file_from_knowledge_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-
 ############################
 # RemoveFileFromKnowledge
 ############################
-
 
 @router.post("/{id}/file/remove", response_model=Optional[KnowledgeFilesResponse])
 def remove_file_from_knowledge_by_id(
@@ -612,11 +588,9 @@ def remove_file_from_knowledge_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-
 ############################
 # DeleteKnowledgeById
 ############################
-
 
 @router.delete("/{id}/delete", response_model=bool)
 async def delete_knowledge_by_id(id: str, user=Depends(get_verified_user)):
@@ -675,11 +649,9 @@ async def delete_knowledge_by_id(id: str, user=Depends(get_verified_user)):
     result = Knowledges.delete_knowledge_by_id(id=id)
     return result
 
-
 ############################
 # ResetKnowledgeById
 ############################
-
 
 @router.post("/{id}/reset", response_model=Optional[KnowledgeResponse])
 async def reset_knowledge_by_id(id: str, user=Depends(get_verified_user)):
@@ -709,11 +681,9 @@ async def reset_knowledge_by_id(id: str, user=Depends(get_verified_user)):
     knowledge = Knowledges.reset_knowledge_by_id(id=id)
     return knowledge
 
-
 ############################
 # AddFilesToKnowledge
 ############################
-
 
 @router.post("/{id}/files/batch/add", response_model=Optional[KnowledgeFilesResponse])
 async def add_files_to_knowledge_batch(
