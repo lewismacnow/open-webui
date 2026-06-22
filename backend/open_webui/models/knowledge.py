@@ -105,12 +105,20 @@ class KnowledgeFile(Base):
     directory_id = Column(Text, ForeignKey('knowledge_directory.id', ondelete='SET NULL'), nullable=True)
     user_id = Column(Text, nullable=False)
 
+    # Per-(knowledge_base, file) embedding state. A link is created at upload
+    # time as 'pending'; a durable worker embeds it into the KB collection and
+    # flips it to 'completed' (or 'failed' + error). Legacy rows are backfilled
+    # to 'completed' by the migration.
+    status = Column(Text, nullable=True)  # pending | processing | completed | failed
+    error = Column(Text, nullable=True)
+
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
 
     __table_args__ = (
         UniqueConstraint('knowledge_id', 'file_id', name='uq_knowledge_file_knowledge_file'),
         Index('ix_knowledge_file_directory_id', 'directory_id'),
+        Index('ix_knowledge_file_status', 'status'),
     )
 
 
@@ -120,6 +128,9 @@ class KnowledgeFileModel(BaseModel):
     file_id: str
     directory_id: Optional[str] = None
     user_id: str
+
+    status: Optional[str] = None
+    error: Optional[str] = None
 
     created_at: int  # timestamp in epoch
     updated_at: int  # timestamp in epoch
@@ -169,6 +180,10 @@ class KnowledgeForm(BaseModel):
 
 class FileUserResponse(FileModelResponse):
     user: Optional[UserResponse] = None
+    # Per-KB embedding state from the knowledge_file link (pending |
+    # processing | completed | failed). None for legacy rows.
+    embedding_status: Optional[str] = None
+    embedding_error: Optional[str] = None
 
 
 class KnowledgeListResponse(BaseModel):
@@ -533,7 +548,7 @@ class KnowledgeTable:
         try:
             async with get_async_db_context(db) as db:
                 stmt = (
-                    select(File, User)
+                    select(File, User, KnowledgeFile.status, KnowledgeFile.error)
                     .join(KnowledgeFile, File.id == KnowledgeFile.file_id)
                     .outerjoin(User, User.id == KnowledgeFile.user_id)
                     .filter(KnowledgeFile.knowledge_id == knowledge_id)
@@ -602,11 +617,13 @@ class KnowledgeTable:
                 items = result.all()
 
                 files = []
-                for file, user in items:
+                for file, user, embedding_status, embedding_error in items:
                     files.append(
                         FileUserResponse(
                             **FileModel.model_validate(file).model_dump(),
                             user=(UserResponse(**UserModel.model_validate(user).model_dump()) if user else None),
+                            embedding_status=embedding_status,
+                            embedding_error=embedding_error,
                         )
                     )
 
@@ -649,14 +666,35 @@ class KnowledgeTable:
         except Exception:
             return []
 
+    async def get_file_by_hash_in_knowledge(
+        self, knowledge_id: str, file_hash: str, db: Optional[AsyncSession] = None
+    ) -> Optional[FileModel]:
+        """Return an existing file in the knowledge base whose raw-bytes hash
+        (meta.file_hash) matches, or None. Used to reject duplicate-by-content
+        uploads before they are vectorised/linked."""
+        if not file_hash:
+            return None
+        try:
+            files = await self.get_files_by_id(knowledge_id, db=db)
+            for file in files:
+                if (file.meta or {}).get('file_hash') == file_hash:
+                    return file
+            return None
+        except Exception:
+            return None
+
     async def add_file_to_knowledge_by_id(
         self,
         knowledge_id: str,
         file_id: str,
         user_id: str,
         directory_id: Optional[str] = None,
+        status: str = 'completed',
         db: Optional[AsyncSession] = None,
     ) -> Optional[KnowledgeFileModel]:
+        # status defaults to 'completed' to preserve the behaviour of callers
+        # that embed before linking; the async-ingestion path passes 'pending'
+        # so the durable embedding worker can pick the link up.
         async with get_async_db_context(db) as db:
             knowledge_file = KnowledgeFileModel(
                 **{
@@ -665,6 +703,8 @@ class KnowledgeTable:
                     'file_id': file_id,
                     'directory_id': directory_id,
                     'user_id': user_id,
+                    'status': status,
+                    'error': None,
                     'created_at': int(time.time()),
                     'updated_at': int(time.time()),
                 }
@@ -681,6 +721,138 @@ class KnowledgeTable:
                     return None
             except Exception:
                 return None
+
+    async def claim_next_pending_embedding(
+        self, db: Optional[AsyncSession] = None
+    ) -> Optional[KnowledgeFileModel]:
+        """Atomically claim the oldest 'pending' link, flipping it to
+        'processing', and return it. Returns None when the queue is empty.
+
+        The UPDATE...WHERE status='pending' guard makes the claim safe even if
+        more than one worker/process runs concurrently — only one claim wins a
+        given row.
+        """
+        async with get_async_db_context(db) as db:
+            try:
+                result = await db.execute(
+                    select(KnowledgeFile)
+                    .filter(KnowledgeFile.status == 'pending')
+                    .order_by(KnowledgeFile.created_at.asc())
+                    .limit(1)
+                )
+                row = result.scalars().first()
+                if not row:
+                    return None
+
+                claim = await db.execute(
+                    update(KnowledgeFile)
+                    .where(KnowledgeFile.id == row.id, KnowledgeFile.status == 'pending')
+                    .values(status='processing', error=None, updated_at=int(time.time()))
+                )
+                await db.commit()
+                if claim.rowcount == 0:
+                    # Lost the race to another worker; let the loop try again.
+                    return None
+                await db.refresh(row)
+                return KnowledgeFileModel.model_validate(row)
+            except Exception:
+                await db.rollback()
+                return None
+
+    async def set_embedding_status(
+        self,
+        knowledge_id: str,
+        file_id: str,
+        status: str,
+        error: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
+    ) -> bool:
+        async with get_async_db_context(db) as db:
+            try:
+                await db.execute(
+                    update(KnowledgeFile)
+                    .where(
+                        KnowledgeFile.knowledge_id == knowledge_id,
+                        KnowledgeFile.file_id == file_id,
+                    )
+                    .values(status=status, error=error, updated_at=int(time.time()))
+                )
+                await db.commit()
+                return True
+            except Exception:
+                await db.rollback()
+                return False
+
+    async def get_embedding_progress(
+        self, knowledge_id: str, db: Optional[AsyncSession] = None
+    ) -> dict:
+        """Return per-status counts for a knowledge base, e.g.
+        {'pending': 3, 'processing': 1, 'completed': 120, 'failed': 2, 'total': 126}.
+        """
+        counts = {'pending': 0, 'processing': 0, 'completed': 0, 'failed': 0}
+        async with get_async_db_context(db) as db:
+            try:
+                result = await db.execute(
+                    select(KnowledgeFile.status, func.count())
+                    .filter(KnowledgeFile.knowledge_id == knowledge_id)
+                    .group_by(KnowledgeFile.status)
+                )
+                for status_value, count in result.all():
+                    # Legacy rows may have a NULL status — treat as completed.
+                    key = status_value or 'completed'
+                    counts[key] = counts.get(key, 0) + count
+            except Exception:
+                pass
+        counts['total'] = sum(counts.values())
+        return counts
+
+    async def requeue_stale_processing_embeddings(
+        self, db: Optional[AsyncSession] = None
+    ) -> int:
+        """Reset any links left in 'processing' (across all KBs) back to
+        'pending'. Called once at worker startup: a 'processing' row means a
+        worker claimed it but the process died mid-embed, so nothing would ever
+        re-drive it. Returns the number of rows reset.
+
+        Caveat: with multiple backend processes/replicas this also resets rows
+        another live worker is mid-flight on; the embed simply runs again
+        (re-embedding the same file_id is allowed and content-hash dedupe
+        guards the rest).
+        """
+        async with get_async_db_context(db) as db:
+            try:
+                result = await db.execute(
+                    update(KnowledgeFile)
+                    .where(KnowledgeFile.status == 'processing')
+                    .values(status='pending', updated_at=int(time.time()))
+                )
+                await db.commit()
+                return result.rowcount or 0
+            except Exception:
+                await db.rollback()
+                return 0
+
+    async def requeue_failed_embeddings(
+        self, knowledge_id: str, db: Optional[AsyncSession] = None
+    ) -> int:
+        """Reset all 'failed' links in a KB back to 'pending' so the worker
+        retries them. Returns the number of rows re-queued.
+        """
+        async with get_async_db_context(db) as db:
+            try:
+                result = await db.execute(
+                    update(KnowledgeFile)
+                    .where(
+                        KnowledgeFile.knowledge_id == knowledge_id,
+                        KnowledgeFile.status == 'failed',
+                    )
+                    .values(status='pending', error=None, updated_at=int(time.time()))
+                )
+                await db.commit()
+                return result.rowcount or 0
+            except Exception:
+                await db.rollback()
+                return 0
 
     async def has_file(self, knowledge_id: str, file_id: str, db: Optional[AsyncSession] = None) -> bool:
         """Check whether a file belongs to a knowledge base."""
