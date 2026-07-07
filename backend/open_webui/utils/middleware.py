@@ -111,6 +111,7 @@ from open_webui.utils.misc import (
     strip_empty_content_blocks,
 )
 from open_webui.utils.payload import apply_system_prompt_to_body, resolve_system_prompt
+from open_webui.utils.vision_rag import process_image_rag
 from open_webui.utils.plugin import load_function_module_by_id
 from open_webui.utils.response import merge_usage, normalize_usage
 from open_webui.utils.sanitize import sanitize_code
@@ -2360,21 +2361,30 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             if 'files' in folder.data:
                 # Defensive: filter to entries the caller can still read.
                 allowed_files = await get_accessible_folder_files(folder.data['files'], user)
-                if metadata.get('params', {}).get('function_calling') == 'legacy':
-                    form_data['files'] = [
-                        *allowed_files,
-                        *form_data.get('files', []),
-                    ]
-                else:
-                    # Native FC: skip RAG injection, builtin tools
-                    # will read folder knowledge from metadata.
-                    metadata['folder_knowledge'] = allowed_files
+                # Inject folder knowledge for RAG on every query regardless of
+                # function-calling mode (consistent with model-attached knowledge
+                # below). Upstream gated this on `== 'legacy'`, which skipped
+                # auto-RAG in default/native modes.
+                form_data['files'] = [
+                    *allowed_files,
+                    *form_data.get('files', []),
+                ]
+                # Also expose to builtin knowledge tools for follow-up searches.
+                metadata['folder_knowledge'] = allowed_files
 
     # Model "Knowledge" handling
     user_message = get_last_user_message(form_data['messages'])
     model_knowledge = model.get('info', {}).get('meta', {}).get('knowledge', False)
 
-    if model_knowledge and metadata.get('params', {}).get('function_calling') == 'legacy':
+    # Inject model-attached knowledge unconditionally so RAG runs on every query
+    # for models that have a knowledge base attached, regardless of function-calling
+    # mode (default/native/legacy). Upstream gates this on `function_calling == 'legacy'`,
+    # which means default & native modes only expose knowledge as an optional builtin
+    # tool the model may never call — so RAG silently never runs. Dropping the gate
+    # guarantees auto-RAG. (chat_completion_files_handler below runs whenever the
+    # file_context capability is on, which is the default.) The builtin knowledge
+    # tools remain available for the model to do follow-up searches if it needs to.
+    if model_knowledge:
         await event_emitter(
             {
                 'type': 'status',
@@ -2787,6 +2797,18 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 except Exception as e:
                     log.exception(e)
 
+    # Vision Image RAG: if the last user message contains images and a vision
+    # model is available (the chatting model when it is vision-capable, else the
+    # admin-configured 'rag.vision.support_model'), describe the image and
+    # replace the image parts with that description. This MUST run before
+    # chat_completion_files_handler below so the description feeds RAG query
+    # generation, and it lets non-vision models use images via the global model.
+    # Best-effort: on any failure the normal chat flow continues unaffected.
+    try:
+        await process_image_rag(request, form_data, metadata, user, model, event_emitter)
+    except Exception as e:
+        log.exception(e)
+
     # Check if file context extraction is enabled for this model (default True)
     file_context_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('file_context', True)
 
@@ -2814,6 +2836,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     metadata['sources'] = sources[:] if sources else []
 
     # If context is not empty, insert it into the messages
+    # Re-read the last user message: Vision Image RAG (above) may have replaced
+    # an image-only message with a text description, so the `prompt` captured
+    # earlier could be empty and would silently drop the retrieved sources.
+    prompt = get_last_user_message(form_data['messages'])
     if sources and prompt:
         form_data['messages'] = await apply_source_context_to_messages(request, form_data['messages'], sources, prompt)
 
