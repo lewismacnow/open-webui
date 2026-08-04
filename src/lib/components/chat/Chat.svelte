@@ -2890,7 +2890,8 @@
 				if (
 					hasImages &&
 					!(model.info?.meta?.capabilities?.vision ?? true) &&
-					!imageGenerationEnabled
+					!imageGenerationEnabled &&
+					!($config?.features?.enable_vision_support)
 				) {
 					toast.error(
 						$i18n.t('Model {{modelName}} is not vision capable', {
