@@ -2885,6 +2885,7 @@ async def get_app_config(request: Request):
         'rag.file.max_count',
         'file.image_compression_width',
         'file.image_compression_height',
+        'rag.vision.support_model',
         'user.permissions',
         'ui.pending_user_overlay_title',
         'ui.pending_user_overlay_content',
@@ -2951,6 +2952,9 @@ async def get_app_config(request: Request):
                     'enable_google_drive_integration': config.get('google_drive.enable'),
                     'enable_onedrive_integration': config.get('onedrive.enable'),
                     'enable_memories': config.get('memories.enable'),
+                    # Fork: expose vision support availability so the frontend doesn't
+                    # block image uploads for non-vision models when a fallback is configured.
+                    'enable_vision_support': bool(config.get('rag.vision.support_model')),
                     **(
                         {
                             'enable_onedrive_personal': ENABLE_ONEDRIVE_PERSONAL,

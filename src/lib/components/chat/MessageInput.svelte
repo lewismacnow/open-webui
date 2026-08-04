@@ -896,11 +896,11 @@
 				return;
 			}
 
-			if (file['type'].startsWith('image/')) {
-				if (visionCapableModels.length === 0) {
-					toast.error($i18n.t('Selected model(s) do not support image inputs'));
-					return;
-				}
+		if (file['type'].startsWith('image/')) {
+			if (visionCapableModels.length === 0 && !($config?.features?.enable_vision_support)) {
+				toast.error($i18n.t('Selected model(s) do not support image inputs'));
+				return;
+			}
 
 				const compressImageHandler = async (imageUrl, settings = {}, config = {}) => {
 					// Quick shortcut so we don’t do unnecessary work.
