@@ -83,6 +83,7 @@ from open_webui.env import (
     ENABLE_COMPRESSION_MIDDLEWARE,
     ENABLE_CUSTOM_MODEL_FALLBACK,
     ENABLE_EASTER_EGGS,
+    ENABLE_PLUGINS,
     EXTERNAL_PWA_MANIFEST_URL,
     # OAuth Back-Channel Logout
     ENABLE_OAUTH_BACKCHANNEL_LOGOUT,
@@ -153,6 +154,7 @@ from open_webui.routers import (
     knowledge,
     memories,
     models,
+    notifications,
     notes,
     ollama,
     openai,
@@ -218,7 +220,16 @@ from open_webui.utils.chat import (
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
+from open_webui.utils.chat_id import (
+    get_temporary_chat_session_id,
+    is_saved_chat_id,
+    is_temporary_chat_id,
+)
+from open_webui.utils.chat_variables import (
+    normalize_chat_variables,
+)
 from open_webui.utils.embeddings import generate_embeddings
+from open_webui.utils.json_response import apply_orjson_http_json
 from open_webui.utils.logger import start_logger
 from open_webui.utils.middleware import (
     background_tasks_handler,
@@ -226,6 +237,7 @@ from open_webui.utils.middleware import (
     process_chat_payload,
     process_chat_response,
 )
+from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils.models import (
     check_model_access,
     get_all_base_models,
@@ -247,7 +259,7 @@ from open_webui.utils.oauth import (
 from open_webui.utils.plugin import install_tool_and_function_dependencies
 from open_webui.utils.redis import get_redis_client
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
-from open_webui.utils.session_pool import get_session
+from open_webui.utils.session_pool import cleanup_response, get_session, stream_wrapper
 from open_webui.utils.tools import set_terminal_servers, set_tool_servers
 
 if SAFE_MODE:
@@ -256,6 +268,16 @@ if SAFE_MODE:
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
+
+
+async def emit_chat_list_event(metadata: dict, chat_id: str):
+    if not is_saved_chat_id(chat_id):
+        return
+
+    event_emitter = await get_event_emitter(metadata, update_db=False)
+    if event_emitter:
+        folder_id = metadata.get('folder_id') or await Chats.get_chat_folder_id(chat_id, metadata.get('user_id'))
+        await event_emitter({'type': 'chat:list', 'data': {'chat_id': chat_id, 'folder_id': folder_id}})
 
 
 class SPAStaticFiles(StaticFiles):
@@ -278,6 +300,168 @@ class CORSStaticFiles(StaticFiles):
         response = await super().get_response(path, scope)
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response
+
+
+# ----------------------------------------------------------------------------
+# API Tools (server-side tool execution) — reference schema for documentation.
+#
+# These Pydantic models are NOT used as response_model anywhere; the chat
+# completion endpoint returns a dynamic OpenAI-compatible response whose
+# shape depends on the request. They exist purely as self-documenting
+# references for the custom ``x_open_webui`` extension emitted by the API
+# Tools wrappers:
+#
+#   * **Per-event progress** (``XOpenWebUIToolEvent``):
+#     - Streaming (``stream: true``): carried as ``x_open_webui.tool_event``
+#       (singular) on individual ``chat.completion.chunk`` objects.
+#     - Non-streaming (``stream: false``): aggregated into the
+#       ``x_open_webui.tool_events`` array (plural) on the final
+#       ``chat.completion`` response.
+#
+#   * **Aggregated turn summary** (``XOpenWebUISource``,
+#     ``XOpenWebUIToolUsedEntry``):
+#     - Streaming: terminal summary chunk just before ``[DONE]``, carrying
+#       ``x_open_webui.sources`` and ``x_open_webui.tools_used``.
+#     - Non-streaming: ``sources`` and ``tools_used`` as top-level fields
+#       alongside ``tool_events`` on the ``chat.completion`` response.
+#     - Only emitted when at least one of ``sources`` or ``tools_used``
+#       is non-empty.
+#
+# The actual emitted payloads are plain ``dict``\ s; these models mirror
+# their shape so future maintainers can see the contract at a glance.
+# ----------------------------------------------------------------------------
+class XOpenWebUIToolEvent(BaseModel):
+    """Custom, optional extension to OpenAI chat completion objects.
+
+    Emitted only on outputs produced while API Tools are executing server-side.
+
+    * **Streaming** (``stream: true``): carried as ``x_open_webui.tool_event``
+      (singular) on individual ``chat.completion.chunk`` objects.
+    * **Non-streaming** (``stream: false``): carried as elements of the
+      ``x_open_webui.tool_events`` (plural) array on the final
+      ``chat.completion`` response object.
+
+    Compliant OpenAI clients ignore unknown top-level keys, so the response
+    remains valid for non-custom consumers. Custom clients should branch on
+    ``event["type"]`` to render progress UI.
+    """
+
+    type: str
+    """One of ``tool_call_start``, ``tool_call_end``, ``tool_error``,
+    ``tool_loop_max_iterations``."""
+
+    tool_call_id: str
+    """The upstream provider's tool call id (e.g. ``call_abc123``)."""
+
+    tool_name: str
+    """Name of the tool being invoked (e.g. ``web_search``)."""
+
+    iteration: int
+    """1-based index of the current tool-execution loop iteration."""
+
+    timestamp: str
+    """ISO-8601 UTC timestamp of the event."""
+
+    arguments: dict | None = None
+    """Parsed tool arguments. Present on ``tool_call_start``,
+    ``tool_call_end``, and ``tool_error`` (to allow summary builders
+    to produce ``tools_used`` entries from end events alone)."""
+
+    result_summary: str | None = None
+    """Truncated tool result (max 500 chars). Present on ``tool_call_end``
+    and ``tool_error``."""
+
+    error: str | None = None
+    """Error message. Present on ``tool_error`` only."""
+
+    files: list[dict] | None = None
+    """Structured file objects (``[{type: 'image'|'audio'|'data',
+    url|content: ...}]``). Present on ``tool_call_end`` only, when the tool
+    returned files. **Omitted entirely from the payload when empty**
+    (not serialized as ``[]``)."""
+
+    embeds: list[str] | None = None
+    """HTML strings or URLs to render as iframe embeds. Present on
+    ``tool_call_end`` only, when the tool returned embeds. **Omitted
+    entirely from the payload when empty** (not serialized as ``[]``)."""
+
+    citations: list[dict] | None = None
+    """Citation source objects (``{source, document, metadata}``) for tools
+    such as ``search_web``, ``fetch_url``, ``view_file``,
+    ``view_knowledge_file``, and ``query_knowledge_files``. Present on
+    ``tool_call_end`` only, when the tool returned citations. **Omitted
+    entirely from the payload when empty** (not serialized as ``[]``)."""
+
+
+# ----------------------------------------------------------------------------
+# API Tools aggregated summary models — ``x_open_webui.sources`` and
+# ``x_open_webui.tools_used``. These appear in a **terminal summary chunk**
+# (streaming, before ``[DONE]``) or as top-level fields on the non-streaming
+# ``chat.completion`` response. Only emitted when non-empty.
+#
+# Like ``XOpenWebUIToolEvent`` above, these are NOT used as
+# ``response_model`` — they are plain ``dict`` schemas documented here for
+# maintainability.
+# ----------------------------------------------------------------------------
+class XOpenWebUISource(BaseModel):
+    """A single citation source entry in ``x_open_webui.sources``.
+
+    Combines RAG file/knowledge retrieval results with tool-execution
+    citations (``search_web``, ``fetch_url``, knowledge tools).
+    """
+
+    source: dict
+    """Source descriptor::
+
+        {"id": "file-abc or collection-id", "name": "Display name",
+         "type": "file | collection | web_search | ...",
+         "url": "https://..."  // optional}
+    """
+
+    document: list[str]
+    """Relevant text snippets (one string per chunk)."""
+
+    metadata: list[dict]
+    """Per-chunk metadata::
+
+        [{"source": "citation_id", "name": "label override",
+          "file_id": "...", "page": 3, "url": "..."}, ...]
+    """
+
+    distances: list[float] | None = None
+    """Optional relevance scores, one per chunk (e.g. cosine distance)."""
+
+
+class XOpenWebUIToolUsedEntry(BaseModel):
+    """A single tool-execution summary entry in ``x_open_webui.tools_used``.
+
+    One entry per tool call executed during the turn. Provides enough
+    information for a client to render a "Tools used this turn" UI.
+    """
+
+    tool_name: str
+    """Name of the executed tool (e.g. ``web_search``)."""
+
+    tool_call_id: str
+    """The upstream provider's tool call id (e.g. ``call_abc123``)."""
+
+    arguments: dict
+    """The arguments the model provided for this tool call."""
+
+    result_summary: str
+    """Truncated result string (max 500 characters)."""
+
+    status: str
+    """``success`` or ``error``."""
+
+    iteration: int
+    """1-based index of the tool-execution loop iteration."""
+
+    timestamp: str
+    """ISO-8601 UTC timestamp of when the tool call completed."""
+
+    error: str | None = None
+    """Error message. Present only when ``status`` is ``"error"``."""
 
 
 if LOG_FORMAT != 'json':
@@ -319,8 +503,9 @@ async def lifespan(app: FastAPI):
     await migrate_legacy_webhook_config()
     await publish_event(app, EVENTS.SYSTEM_STARTUP_STARTED, source='system')
 
+    license_task = None
     if LICENSE_KEY:
-        get_license_data(app, LICENSE_KEY)
+        license_task = asyncio.create_task(asyncio.to_thread(get_license_data, app, LICENSE_KEY))
 
     # Create admin account from env vars if specified and no users exist
     if WEBUI_ADMIN_EMAIL and WEBUI_ADMIN_PASSWORD:
@@ -414,6 +599,14 @@ async def lifespan(app: FastAPI):
             log.warning(f'Failed to initialize terminal servers at startup: {e}')
 
     # Mark application as ready to accept traffic from a startup perspective.
+    if license_task:
+        try:
+            await asyncio.wait_for(asyncio.shield(license_task), timeout=2)
+        except asyncio.TimeoutError:
+            log.warning('License data retrieval is still pending; continuing startup without it')
+        except Exception as e:
+            log.warning(f'License data retrieval failed during startup: {e}')
+
     app.state.startup_complete = True
     await publish_event(app, EVENTS.SYSTEM_STARTUP_COMPLETED, source='system')
 
@@ -431,6 +624,10 @@ async def lifespan(app: FastAPI):
 
     await publish_event(app, EVENTS.SYSTEM_SHUTDOWN_COMPLETED, source='system')
 
+
+# Opt-in (ENABLE_ORJSON): orjson for request-body parsing and JSONResponse bodies;
+# response_model routes keep FastAPI's Pydantic fast path either way.
+apply_orjson_http_json()
 
 app = FastAPI(
     title='Open WebUI',
@@ -710,6 +907,25 @@ app.state.speech_speaker_embeddings_dataset = None
 app.state.MODELS = MODELS
 
 # Add the middleware to the app
+try:
+    audit_level = AuditLevel(AUDIT_LOG_LEVEL)
+except ValueError as e:
+    logger.error(f'Invalid audit level: {AUDIT_LOG_LEVEL}. Error: {e}')
+    audit_level = AuditLevel.NONE
+
+# Added before CompressMiddleware so audit sits inside compression and
+# captures response bodies before they are compressed (last added runs
+# outermost).
+if audit_level != AuditLevel.NONE:
+    app.add_middleware(
+        AuditLoggingMiddleware,
+        audit_level=audit_level,
+        excluded_paths=AUDIT_EXCLUDED_PATHS,
+        included_paths=AUDIT_INCLUDED_PATHS,
+        audit_get_requests=ENABLE_AUDIT_GET_REQUESTS,
+        max_body_size=MAX_BODY_LOG_SIZE,
+    )
+
 if ENABLE_COMPRESSION_MIDDLEWARE:
     app.add_middleware(CompressMiddleware)
 
@@ -764,6 +980,7 @@ app.include_router(notes.router, prefix='/api/v1/notes', tags=['notes'])
 
 
 app.include_router(models.router, prefix='/api/v1/models', tags=['models'])
+app.include_router(notifications.router, prefix='/api/v1/notifications', tags=['notifications'])
 app.include_router(knowledge.router, prefix='/api/v1/knowledge', tags=['knowledge'])
 app.include_router(prompts.router, prefix='/api/v1/prompts', tags=['prompts'])
 app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
@@ -787,21 +1004,6 @@ if ENABLE_SCIM:
     app.include_router(scim.router, prefix='/api/v1/scim/v2', tags=['scim'])
 
 
-try:
-    audit_level = AuditLevel(AUDIT_LOG_LEVEL)
-except ValueError as e:
-    logger.error(f'Invalid audit level: {AUDIT_LOG_LEVEL}. Error: {e}')
-    audit_level = AuditLevel.NONE
-
-if audit_level != AuditLevel.NONE:
-    app.add_middleware(
-        AuditLoggingMiddleware,
-        audit_level=audit_level,
-        excluded_paths=AUDIT_EXCLUDED_PATHS,
-        included_paths=AUDIT_INCLUDED_PATHS,
-        audit_get_requests=ENABLE_AUDIT_GET_REQUESTS,
-        max_body_size=MAX_BODY_LOG_SIZE,
-    )
 ##################################
 #
 # Chat Endpoints
@@ -814,12 +1016,20 @@ if audit_level != AuditLevel.NONE:
 async def get_models(request: Request, refresh: bool = False, user=Depends(get_verified_user)):
     all_models = await get_all_models(request, refresh=refresh, user=user)
 
-    models = []
-    for model in all_models:
-        # Filter out filter pipelines
-        if 'pipeline' in model and model['pipeline'].get('type', None) == 'filter':
-            continue
+    # Filter out filter pipelines
+    models = [
+        model for model in all_models if not ('pipeline' in model and model['pipeline'].get('type', None) == 'filter')
+    ]
 
+    # Chat requests resolve models by ID from request.app.state.MODELS, where
+    # duplicate IDs collapse to the last model. Return the same effective list.
+    models = list({model['id']: model for model in models}.values())
+
+    # Access-filter first so the per-model payload work below only runs for
+    # models the caller can actually see.
+    models = await get_filtered_models(models, user)
+
+    for model in models:
         # Remove profile image URL to reduce payload size
         if model.get('info', {}).get('meta', {}).get('profile_image_url'):
             model['info']['meta'].pop('profile_image_url', None)
@@ -833,13 +1043,6 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
         except Exception as e:
             log.debug(f'Error processing model tags: {e}')
             model['tags'] = []
-            pass
-
-        models.append(model)
-
-    # Chat requests resolve models by ID from request.app.state.MODELS, where
-    # duplicate IDs collapse to the last model. Return the same effective list.
-    models = list({model['id']: model for model in models}.values())
 
     model_order_list = await Config.get('ui.model_order_list')
     if model_order_list:
@@ -852,11 +1055,10 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
             )
         )
 
-    models = await get_filtered_models(models, user)
-
-    log.debug(
-        f'/api/models returned filtered models accessible to the user: {json.dumps([model.get("id") for model in models])}'
-    )
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            f'/api/models returned filtered models accessible to the user: {json.dumps([model.get("id") for model in models])}'
+        )
     return {'data': models}
 
 
@@ -868,12 +1070,6 @@ async def get_base_models(request: Request, user=Depends(get_admin_user)):
 
 class ModelUnloadForm(BaseModel):
     model: str
-
-
-def strip_provider_model_prefix(model_id: str, prefix_id: str | None) -> str:
-    if prefix_id and model_id.startswith(f'{prefix_id}.'):
-        return model_id[len(f'{prefix_id}.') :]
-    return model_id
 
 
 @app.post('/api/models/unload')
@@ -1017,13 +1213,594 @@ async def embeddings(request: Request, form_data: dict, user=Depends(get_verifie
     return await generate_embeddings(request, form_data, user)
 
 
-@app.post('/api/chat/completions')
-@app.post('/api/v1/chat/completions')  # Experimental: Compatibility with OpenAI API
+_API_TOOLS_500_RESPONSES = {
+    'description': 'API Tools internal error (rare). Indicates a backend bug, '
+    'not caller error. Both codes are documented below.',
+    'content': {
+        'application/json': {
+            'examples': {
+                'api_tools_stream_init_failed': {
+                    'summary': 'Failed to initialize streaming tool execution',
+                    'value': {
+                        'error': {
+                            'message': 'Failed to initialize streaming tool execution.',
+                            'type': 'internal_error',
+                            'param': None,
+                            'code': 'api_tools_stream_init_failed',
+                        }
+                    },
+                },
+                'api_tools_aggregation_failed': {
+                    'summary': 'Failed during non-streaming aggregation',
+                    'value': {
+                        'error': {
+                            'message': 'Failed to aggregate tool execution into a non-streaming response.',
+                            'type': 'internal_error',
+                            'param': None,
+                            'code': 'api_tools_aggregation_failed',
+                        }
+                    },
+                },
+            }
+        }
+    },
+}
+
+
+async def _set_direct_model(request: Request, model_item: dict, user) -> None:
+    model_meta = (model_item.get('info') or {}).get('meta') or {}
+    knowledge_items = model_meta.get('knowledge')
+    if knowledge_items:
+        from open_webui.utils.access_control.files import get_accessible_folder_files
+
+        model_meta['knowledge'] = await get_accessible_folder_files(knowledge_items, user)
+    request.state.direct = True
+    request.state.model = model_item
+
+
+@app.post(
+    '/api/chat/completions',
+    responses={500: _API_TOOLS_500_RESPONSES},
+)
+@app.post(
+    '/api/v1/chat/completions',  # Experimental: Compatibility with OpenAI API
+    responses={500: _API_TOOLS_500_RESPONSES},
+)
 async def chat_completion(
     request: Request,
     form_data: dict,
     user=Depends(get_verified_user),
 ):
+    """OpenAI-compatible chat completion endpoint (streaming or single-shot).
+
+    Accepts an OpenAI-style [Chat Completion](https://platform.openai.com/docs/api-reference/chat/create)
+    payload, resolves the matching model, applies pipeline / outlet / inlet
+    filters, and dispatches to the appropriate backend (Ollama, OpenAI-compatible
+    providers, pipelines, arena models, etc.). Returns either a
+    `chat.completion` object or a SSE stream of `chat.completion.chunk` objects.
+
+    This same handler backs both routes:
+
+    * `POST /api/chat/completions` — native Open WebUI clients.
+    * `POST /api/v1/chat/completions` — experimental, drop-in compatible with
+      the OpenAI API path.
+
+    ---
+    ## API Tools (server-side tool execution)
+
+    **API Tools** lets an API caller opt a model into executing its attached
+    tools server-side, mirroring how the Open WebUI frontend handles tools.
+    When enabled for a model, the server — not the client — receives tool
+    calls from the LLM, runs them, feeds results back, and continues the
+    conversation, looping until the model produces a final answer or the
+    iteration cap (`CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS`) is reached.
+    Progress is surfaced to the client via the custom `x_open_webui`
+    extension field — either as **`x_open_webui.tool_event`** (singular)
+    chunks interleaved with a streaming content stream, or aggregated into
+    **`x_open_webui.tool_events`** (plural) on a single non-streaming
+    response. See [Streaming modes](#streaming-modes) below.
+
+    ### Prerequisites
+
+    All of the following must be true for API Tools to activate on a request:
+
+    1. **Global config `chat.api_tools.enabled`** is `True`.
+       Admins can set this via the DB config or the `CHAT_API_TOOLS_ENABLED=True`
+       environment variable. **Default: `False`.**
+    2. **The model has the `api_tools` capability** — set
+       `info.meta.capabilities.api_tools: true` on the model (e.g. via the
+       model editor at `/workspace/models/edit`). **Default: `False`.**
+    3. **`function_calling != 'legacy'`** — set on the model params or in the
+       request `params.function_calling` field. Anything other than `'legacy'`
+       qualifies; the default is `'native'`.
+
+    Additionally, the request must originate from a **stateless API caller**
+    (no UI `session_id`). UI calls always go through the regular frontend
+    tool-execution path and never activate API Tools.
+
+    When active, the server **auto-resolves** `info.meta.toolIds` (user-installed
+    Tools) and `info.meta.terminalId` (terminal / MCP tool server) on the
+    caller's behalf — API callers do not need to send `tool_ids` in the body.
+
+    ### What tools are exposed
+
+    For privacy (API keys are often shared across users), the **builtin tool
+    set exposed via API is restricted to an allowlist**:
+
+    | Builtin tool      | Exposed via API Tools |
+    | ----------------- | --------------------- |
+    | `time`            | Yes                   |
+    | `knowledge`       | Yes                   |
+    | `web_search`      | Yes                   |
+    | All others        | **No**                |
+
+    Personal-data tools (memory, chats, channels, notes, automations,
+    calendar, etc.) are **never** exposed via API Tools and cannot leak
+    across shared API keys.
+
+    On top of the builtin allowlist:
+
+    * **User-installed Tools** attached to the model via `info.meta.toolIds`
+      are executed (subject to the user's normal Tool permissions).
+    * **MCP / Terminal tool servers** are additionally gated behind a
+      separate capability, `info.meta.capabilities.api_terminal: true`
+      (default `False`). See the privacy / safety note below.
+
+    ### Streaming modes
+
+    API Tools supports **both** streaming and non-streaming requests.
+    The `stream` flag controls how tool-execution progress is delivered
+    back to the client.
+
+    #### Streaming (`stream: true`)
+
+    Tool events are emitted as **`x_open_webui.tool_event`** (singular)
+    on individual `chat.completion.chunk` objects, interleaved with the
+    normal content / tool_call chunks. This is the natural mode for
+    rendering live progress UI.
+
+    ```json
+    {
+      "id": "chatcmpl-x",
+      "object": "chat.completion.chunk",
+      "choices": [{"index": 0, "delta": {}, "finish_reason": null}],
+      "x_open_webui": {
+        "tool_event": {
+          "type": "tool_call_end",
+          "tool_call_id": "call_abc",
+          "tool_name": "web_search",
+          "iteration": 1,
+          "timestamp": "2026-07-13T12:34:57.012+00:00",
+          "result_summary": "Found 5 results..."
+        }
+      }
+    }
+    ```
+
+    #### Non-streaming (`stream: false`)
+
+    All tool events that occurred during execution are aggregated into the
+    **`x_open_webui.tool_events`** (plural — note the **`'s'`**) array on
+    the single final `chat.completion` response object. The response is
+    otherwise a standard OpenAI chat completion; non-custom clients can
+    ignore the `x_open_webui` key entirely.
+
+    ```json
+    {
+      "id": "chatcmpl-x",
+      "object": "chat.completion",
+      "choices": [
+        {
+          "index": 0,
+          "message": {"role": "assistant", "content": "Based on the latest release notes..."},
+          "finish_reason": "stop"
+        }
+      ],
+      "x_open_webui": {
+        "tool_events": [
+          {"type": "tool_call_start", "tool_call_id": "call_abc", "tool_name": "web_search", "iteration": 1, "timestamp": "...", "arguments": {"query": "..."}},
+          {"type": "tool_call_end",   "tool_call_id": "call_abc", "tool_name": "web_search", "iteration": 1, "timestamp": "...", "result_summary": "Found 5 results..."}
+        ]
+      }
+    }
+    ```
+
+    In both modes the per-event payload shape is identical and matches
+    `XOpenWebUIToolEvent` (see the reference model defined near the top
+    of this module).
+
+    #### Internal errors (rare)
+
+    If something goes wrong inside the server-side tool-execution wrapper
+    itself (not the model or the tool), the endpoint responds with
+    **HTTP 500** and one of the following `error.code` values. Both are
+    rare and indicate a backend bug, not caller error:
+
+    | HTTP | `error.code`                       | When                                          |
+    | ---- | ---------------------------------- | --------------------------------------------- |
+    | 500  | `api_tools_stream_init_failed`     | Failure initializing the streaming path.      |
+    | 500  | `api_tools_aggregation_failed`     | Failure during non-streaming aggregation.     |
+
+    ### The `x_open_webui` extension field
+
+    During tool execution, output objects carry an extra top-level
+    `x_open_webui` field (`tool_event` singular on streaming chunks,
+    `tool_events` plural array on non-streaming responses):
+
+    * **Optional.** It only appears on outputs produced during a
+      tool-execution step; regular content / usage chunks do not include it.
+    * **Safe for standard clients.** Per the JSON spec, compliant OpenAI
+      clients ignore unknown top-level keys, so the response remains a valid
+      OpenAI chat completion (streaming or non-streaming). Standard clients
+      simply render the `delta.content` / `choices[0].message.content`.
+    * **Reference schema:** see `XOpenWebUIToolEvent` defined near the top of
+      this module for the canonical field list.
+
+    Full chunk shape (streaming):
+
+    ```json
+    {
+      "id": "chatcmpl-abc123",
+      "object": "chat.completion.chunk",
+      "created": 1720847696,
+      "model": "my-model",
+      "system_fingerprint": "fp_...",
+      "choices": [{"index": 0, "delta": {}, "finish_reason": null}],
+      "x_open_webui": {
+        "tool_event": {
+          "type": "tool_call_end",
+          "tool_call_id": "call_abc123",
+          "tool_name": "web_search",
+          "iteration": 1,
+          "timestamp": "2026-07-13T12:34:57.012+00:00",
+          "result_summary": "Found 5 results...",
+          "files": [{"type": "image", "url": "https://example.com/chart.png"}],
+          "citations": [{"source": {"name": "Open WebUI Blog", "url": "https://openwebui.com/blog/v0.5"}, "document": ["..."], "metadata": [{"source": "...", "title": "..."}]}]
+        }
+      }
+    }
+    ```
+
+    Per-event field presence:
+
+    | `type`                     | `arguments` | `result_summary` | `error` | `files` / `embeds` / `citations` |
+    | -------------------------- | ----------- | ---------------- | ------- | -------------------------------- |
+    | `tool_call_start`          | **yes**     | —                | —       | —                                |
+    | `tool_call_end`            | **yes**     | **yes** (≤500c)  | —       | **optional** (see below)         |
+    | `tool_error`               | **yes**     | **yes** (≤500c)  | **yes** | —                                |
+    | `tool_loop_max_iterations` | —           | —                | —       | —                                |
+
+    `result_summary` is truncated to **500 characters**. The full result is
+    always fed back to the LLM via a `role: "tool"` message regardless of the
+    summary length.
+
+    #### Structured tool result data (`tool_call_end` only)
+
+    On `tool_call_end`, the event payload **may** additionally carry three
+    structured-data keys. **All three are omitted entirely from the payload
+    when empty** (they are NOT serialized as `[]`) — clients should treat
+    their absence as "none":
+
+    | Key         | Type     | Present when                                 | Description                                                                          |
+    | ----------- | -------- | -------------------------------------------- | ----------------------------------------------------------------------------------- |
+    | `files`     | list     | `tool_call_end`, when the tool returned files    | Structured file objects, each `{type, url or content}` where `type` is `image`, `audio`, or `data`. |
+    | `embeds`    | list     | `tool_call_end`, when the tool returned embeds   | HTML strings or URLs to render as iframe embeds.                                    |
+    | `citations` | list     | `tool_call_end`, when the tool returned citations | Citation source objects `[{source, document, metadata}]` (for `search_web`, `fetch_url`, `view_file`, `view_knowledge_file`, `query_knowledge_files`). |
+
+    Custom clients should branch on the event `type` to render progress
+    (a spinner while a tool runs, an error badge on `tool_error`, a stop
+    badge on `tool_loop_max_iterations`) and surface `files` / `embeds` /
+    `citations` from `tool_call_end` as rich UI (image attachments, iframe
+    previews, source footnotes respectively).
+
+    ### Aggregated summary: `sources` and `tools_used`
+
+    In addition to the per-event `tool_event` progress described above, the
+    API emits a **unified turn-level summary** carrying **`x_open_webui.sources`**
+    and **`x_open_webui.tools_used`**. This summary is designed for a
+    single-chunk read — clients can render a "Sources" and "Tools used"
+    section below the assistant response, mirroring the native Open WebUI UI.
+
+    **When it appears:**
+
+    - **Streaming (`stream: true`):** a terminal ``chat.completion.chunk``
+      carrying ONLY ``x_open_webui.sources`` and/or ``x_open_webui.tools_used``,
+      emitted just before ``data: [DONE]``. The chunk is otherwise empty
+      (``delta: {}``, ``finish_reason: null`` or the actual final reason).
+    - **Non-streaming (`stream: false`):** top-level fields ``sources`` and
+      ``tools_used`` alongside ``tool_events`` on the ``chat.completion``
+      response object.
+
+    **Only emitted when at least one of `sources` or `tools_used` is
+    non-empty.** When no tools were called and no RAG sources were retrieved,
+    neither field appears.
+
+    #### `sources` — combined citation sources
+
+    A list of source objects combining:
+
+    - **RAG citation sources** — file/knowledge documents retrieved when the
+      model has knowledge attached and RAG is enabled.
+    - **Tool-execution citations** — from ``search_web``, ``fetch_url``,
+      ``view_file``, ``view_knowledge_file``, ``query_knowledge_files``.
+
+    Each entry in ``sources`` (see also ``XOpenWebUISource``):
+
+    ```json
+    {
+      "source": {
+        "id": "file-abc or collection-id or URL",
+        "name": "Display name",
+        "type": "file | collection | web_search | ...",
+        "url": "https://..."
+      },
+      "document": ["relevant snippet 1", "snippet 2"],
+      "metadata": [
+        {"source": "citation_id", "name": "label", "file_id": "abc", "page": 3, "url": "https://..."}
+      ],
+      "distances": [0.85, 0.72]
+    }
+    ```
+
+    | Path                     | Type          | Required | Description                                                                                     |
+    | ------------------------ | ------------- | -------- | ----------------------------------------------------------------------------------------------- |
+    | ``source.id``            | string        | **yes**  | Unique identifier (file id, collection id, URL).                                               |
+    | ``source.name``          | string        | **yes**  | Human-readable display name.                                                                   |
+    | ``source.type``          | string        | **yes**  | Origin type: ``file``, ``collection``, ``web_search``, etc.                                    |
+    | ``source.url``           | string        | no       | External URL (for web_search / fetch_url sources).                                              |
+    | ``document[]``           | list[string]  | **yes**  | Relevant text snippets, one per retrieved chunk.                                                |
+    | ``metadata[]``           | list[dict]    | **yes**  | Per-chunk metadata: ``source`` (citation_id), ``name`` (label), ``file_id``, ``page``, ``url``. |
+    | ``distances[]``          | list[float]   | no       | Relevance scores (one per chunk), e.g. cosine distance. Omitted when unavailable.               |
+
+    #### `tools_used` — per-tool-call summary
+
+    A list of summary entries — one per tool call executed during the turn.
+    Provides enough context to render a "Tools used this turn" UI without
+    replaying the entire event stream.
+
+    Each entry (see also ``XOpenWebUIToolUsedEntry``):
+
+    ```json
+    {
+      "tool_name": "web_search",
+      "tool_call_id": "call_abc",
+      "arguments": {"query": "Open WebUI latest release"},
+      "result_summary": "Found 5 results. Top: Open WebUI v0.5.0...",
+      "status": "success",
+      "iteration": 1,
+      "timestamp": "2026-07-14T12:34:56.789+00:00"
+    }
+    ```
+
+    When the tool call fails:
+
+    ```json
+    {
+      "tool_name": "web_search",
+      "tool_call_id": "call_xyz",
+      "arguments": {},
+      "result_summary": "Network timeout after 30s",
+      "status": "error",
+      "iteration": 1,
+      "timestamp": "2026-07-14T12:35:10.123+00:00",
+      "error": "Network timeout after 30s"
+    }
+    ```
+
+    | Key                  | Type   | Required | Description                                                                 |
+    | -------------------- | ------ | -------- | --------------------------------------------------------------------------- |
+    | ``tool_name``        | string | **yes**  | Name of the executed tool (e.g. ``web_search``).                            |
+    | ``tool_call_id``     | string | **yes**  | The upstream provider's tool call id.                                       |
+    | ``arguments``        | dict   | **yes**  | Arguments the model provided for this tool call.                            |
+    | ``result_summary``   | string | **yes**  | Truncated result string (max 500 characters).                               |
+    | ``status``           | string | **yes**  | ``success`` or ``error``.                                                    |
+    | ``iteration``        | int    | **yes**  | 1-based index of the tool-execution loop iteration.                         |
+    | ``timestamp``        | string | **yes**  | ISO-8601 UTC timestamp of when the tool call completed.                     |
+    | ``error``            | string | no       | Error message. Present only when ``status`` is ``"error"``.                 |
+
+    **Client integration tip:** to render the native "Sources" and "Tools
+    used" UX, your client should:
+    1. In streaming mode, watch for the terminal summary chunk (the last
+       chunk with an ``x_open_webui`` key before ``[DONE]``).
+    2. In non-streaming mode, read ``response["x_open_webui"]["sources"]``
+       and ``response["x_open_webui"]["tools_used"]`` directly.
+    3. ``sources`` maps to the "Sources" section (cite from
+       ``metadata[].source``, display ``metadata[].name``, link to
+       ``metadata[].url`` or ``metadata[].file_id`` for native file deep-links).
+    4. ``tools_used`` maps to the "Tools used this turn" section (show
+       ``tool_name``, ``iteration``, ``status`` badge, optional error message).
+
+    ### Examples
+
+    Both examples assume `my-web-enabled-model` has
+    `info.meta.capabilities.api_tools: true`, `function_calling` is not
+    `'legacy'`, and the admin has enabled `chat.api_tools.enabled`.
+
+    #### Example A — Streaming (`stream: true`)
+
+    **1. Request (curl):**
+
+    ```bash
+    curl -N -X POST "https://openwebui.example.com/api/v1/chat/completions" \
+      -H "Authorization: Bearer $OPENWEBUI_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "my-web-enabled-model",
+        "stream": true,
+        "messages": [
+          { "role": "user", "content": "What is new in the latest Open WebUI release?" }
+        ]
+      }'
+    ```
+
+    **2. Resulting SSE stream (abbreviated).** The `tool_call_end` chunk
+    carries `files` and `citations` (structured tool output). **The terminal
+    summary chunk** (just before `[DONE]`) carries the aggregated
+    `sources` and `tools_used` — read this single chunk to render the final
+    "Sources" and "Tools used" sections.
+
+    ```
+    data: {"id":"chatcmpl-x","object":"chat.completion.chunk","model":"my-web-enabled-model","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-x","object":"chat.completion.chunk","model":"my-web-enabled-model","choices":[{"index":0,"delta":{"content":"Let me"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-x","object":"chat.completion.chunk","model":"my-web-enabled-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"Open WebUI latest release notes\"}"}}]},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-x","object":"chat.completion.chunk","model":"my-web-enabled-model","choices":[{"index":0,"delta":{},"finish_reason":null}],"x_open_webui":{"tool_event":{"type":"tool_call_start","tool_call_id":"call_abc","tool_name":"web_search","iteration":1,"timestamp":"2026-07-13T12:34:56.789+00:00","arguments":{"query":"Open WebUI latest release notes"}}}}
+
+    data: {"id":"chatcmpl-x","object":"chat.completion.chunk","model":"my-web-enabled-model","choices":[{"index":0,"delta":{},"finish_reason":null}],"x_open_webui":{"tool_event":{"type":"tool_call_end","tool_call_id":"call_abc","tool_name":"web_search","iteration":1,"timestamp":"2026-07-13T12:34:57.012+00:00","arguments":{"query":"Open WebUI latest release notes"},"result_summary":"Found 5 results. Top: Open WebUI v0.5.0 release notes...","files":[{"type":"image","url":"https://openwebui.com/img/release-chart.png"}],"citations":[{"source":{"name":"Open WebUI Blog","url":"https://openwebui.com/blog/v0.5"},"document":["Open WebUI v0.5 release notes..."],"metadata":[{"source":"https://openwebui.com/blog/v0.5","title":"v0.5 Release"}]}]}}}
+
+    data: {"id":"chatcmpl-x","object":"chat.completion.chunk","model":"my-web-enabled-model","choices":[{"index":0,"delta":{"content":"Based on the latest release notes, "},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-x","object":"chat.completion.chunk","model":"my-web-enabled-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+    data: {"id":"chatcmpl-x","object":"chat.completion.chunk","model":"my-web-enabled-model","choices":[{"index":0,"delta":{},"finish_reason":null}],"x_open_webui":{"sources":[{"source":{"id":"search_web","name":"search_web","type":"web_search"},"document":["Open WebUI v0.5.0 release notes..."],"metadata":[{"source":"https://openwebui.com/blog/v0.5","name":"v0.5 Release","url":"https://openwebui.com/blog/v0.5"}]}],"tools_used":[{"tool_name":"web_search","tool_call_id":"call_abc","arguments":{"query":"Open WebUI latest release notes"},"result_summary":"Found 5 results. Top: Open WebUI v0.5.0...","status":"success","iteration":1,"timestamp":"2026-07-13T12:34:57.012+00:00"}]}}
+
+    data: [DONE]
+    ```
+
+    **3. Client-side handling (Python snippet):**
+
+    ```python
+    for raw in response.iter_lines():
+        if not raw.startswith("data: ") or raw.endswith("[DONE]"):
+            continue
+        chunk = json.loads(raw[len("data: "):])
+        xow = chunk.get("x_open_webui", {})
+        evt = xow.get("tool_event")
+        if xow.get("sources") or xow.get("tools_used"):
+            # Terminal summary chunk — render final "Sources" / "Tools used" sections
+            for src in xow.get("sources", []):
+                print(f"[source] {src['source']['name']} ({src['source']['url']})")
+            for tu in xow.get("tools_used", []):
+                badge = "OK" if tu["status"] == "success" else "FAIL"
+                print(f"[tool_used] [{badge}] {tu['tool_name']} (iter {tu['iteration']})")
+        elif evt:
+            print(f"[tool {evt['type']}] {evt['tool_name']} (iter {evt['iteration']})")
+            if evt["type"] == "tool_call_end":
+                for f in evt.get("files", []):
+                    print(f"  file: {f.get('type')} -> {f.get('url') or f.get('content')}")
+                for c in evt.get("citations", []):
+                    print(f"  citation: {c['source'].get('name')} ({c['source'].get('url')})")
+        else:
+            delta = chunk["choices"][0]["delta"].get("content")
+            if delta:
+                print(delta, end="", flush=True)
+    ```
+
+    #### Example B — Non-streaming (`stream: false`)
+
+    **1. Request (curl):**
+
+    ```bash
+    curl -X POST "https://openwebui.example.com/api/v1/chat/completions" \
+      -H "Authorization: Bearer $OPENWEBUI_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "my-web-enabled-model",
+        "stream": false,
+        "messages": [
+          { "role": "user", "content": "What is new in the latest Open WebUI release?" }
+        ]
+      }'
+    ```
+
+    **2. Resulting single JSON response.** The `x_open_webui` block carries
+    all three extension fields: `tool_events` (per-event detail, backwards
+    compat), `sources` (combined citations), and `tools_used` (per-tool-call
+    summary).
+
+    ```json
+    {
+      "id": "chatcmpl-x",
+      "object": "chat.completion",
+      "created": 1720847697,
+      "model": "my-web-enabled-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {"role": "assistant", "content": "Based on the latest release notes..."},
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {"prompt_tokens": 42, "completion_tokens": 128, "total_tokens": 170},
+      "x_open_webui": {
+        "tool_events": [
+          {"type": "tool_call_start", "tool_call_id": "call_abc", "tool_name": "web_search", "iteration": 1, "timestamp": "2026-07-13T12:34:56.789+00:00", "arguments": {"query": "Open WebUI latest release notes"}},
+          {"type": "tool_call_end",   "tool_call_id": "call_abc", "tool_name": "web_search", "iteration": 1, "timestamp": "2026-07-13T12:34:57.012+00:00", "arguments": {"query": "Open WebUI latest release notes"}, "result_summary": "Found 5 results...", "files": [{"type": "image", "url": "https://openwebui.com/img/release-chart.png"}], "citations": [{"source": {"name": "Open WebUI Blog", "url": "https://openwebui.com/blog/v0.5"}, "document": ["..."], "metadata": [{"source": "https://openwebui.com/blog/v0.5", "title": "v0.5 Release"}]}]}
+        ],
+        "sources": [
+          {"source": {"id": "search_web", "name": "search_web", "type": "web_search"}, "document": ["Open WebUI v0.5.0 release notes..."], "metadata": [{"source": "https://openwebui.com/blog/v0.5", "name": "v0.5 Release", "url": "https://openwebui.com/blog/v0.5"}]}
+        ],
+        "tools_used": [
+          {"tool_name": "web_search", "tool_call_id": "call_abc", "arguments": {"query": "Open WebUI latest release notes"}, "result_summary": "Found 5 results. Top: Open WebUI v0.5.0...", "status": "success", "iteration": 1, "timestamp": "2026-07-13T12:34:57.012+00:00"}
+        ]
+      }
+    }
+    ```
+
+    **3. Client-side handling (Python snippet):**
+
+    ```python
+    data = response.json()
+    print(data["choices"][0]["message"]["content"])
+
+    xow = data.get("x_open_webui", {})
+
+    # Per-tool-event detail (backwards compat)
+    for evt in xow.get("tool_events", []):
+        print(f"[tool {evt['type']}] {evt['tool_name']} (iter {evt['iteration']})")
+
+    # Aggregated sources — render "Sources" section
+    for src in xow.get("sources", []):
+        print(f"[source] {src['source']['name']}")
+        for doc, meta in zip(src["document"], src["metadata"]):
+            print(f"  {meta.get('name', '')}: {doc[:80]}...")
+
+    # Aggregated tools_used — render "Tools used this turn" section
+    for tu in xow.get("tools_used", []):
+        badge = "OK" if tu["status"] == "success" else "FAIL"
+        print(f"[tool_used] [{badge}] {tu['tool_name']} (iter {tu['iteration']}): {tu['result_summary'][:60]}...")
+    ```
+
+    ### Privacy / safety note
+
+    * API Tools executes the model's **attached tools server-side**, under the
+      **identity of the API key's user**. Any side effects (web searches,
+      knowledge queries, terminal commands) run with that user's permissions.
+    * The **builtin tool allowlist is deliberately small** (`time`,
+      `knowledge`, `web_search`) to prevent personal data from one user
+      leaking to another via a shared API key. Do not widen this allowlist
+      without considering the cross-user data-exposure risk.
+    * **Terminal / MCP tool servers** via the API are gated separately on
+      `info.meta.capabilities.api_terminal: true` (default `False`). When
+      enabled, arbitrary shell commands may be executed server-side on behalf
+      of the API caller. Enable only on trusted models with narrowly scoped
+      tool servers, and audit the attached tool servers carefully.
+    * **Tool results are passed through to the API caller.** A tool's
+      structured output (`files`, `embeds`, `citations` on `tool_call_end`)
+      is surfaced verbatim in the `x_open_webui` extension — so the caller
+      sees images, audio, data, citation URLs, iframe embeds, etc. produced
+      by tools like `web_search` and knowledge tools. Treat this output as
+      untrusted tool-derived content (it may reference external URLs).
+    * All tool execution is logged via the standard Open WebUI logger and
+      is subject to the same audit trail as UI-initiated tool calls.
+
+    Args:
+        request (Request): Request context.
+        form_data (dict): OpenAI-compatible chat completion payload.
+        user: Authenticated user (verified token).
+
+    Returns:
+        StreamingResponse | JSONResponse: SSE stream of
+        ``chat.completion.chunk`` objects (carrying
+        ``x_open_webui.tool_event``) when ``stream=True``, otherwise a
+        single ``chat.completion`` object carrying the aggregated
+        ``x_open_webui.tool_events`` array. Returns HTTP 500 with
+        ``code: "api_tools_stream_init_failed"`` or
+        ``"api_tools_aggregation_failed"`` on rare internal errors inside
+        the API Tools wrapper.
+    """
     if not request.app.state.MODELS:
         await get_all_models(request, user=user)
 
@@ -1044,14 +1821,12 @@ async def chat_completion(
             # Check if user has access to the model
             if not BYPASS_MODEL_ACCESS_CONTROL and (user.role != 'admin' or not BYPASS_ADMIN_ACCESS_CONTROL):
                 try:
-                    await check_model_access(user, model)
+                    await check_model_access(user, model, model_info=model_info)
                 except Exception as e:
                     raise e
         else:
             model = model_item
-
-            request.state.direct = True
-            request.state.model = model
+            await _set_direct_model(request, model, user)
 
         # Model params: global defaults as base, per-model overrides win
         default_model_params = await Config.get('models.default_params', {}) or {}
@@ -1125,6 +1900,13 @@ async def chat_completion(
             message_ids = [{'model_id': model_id, 'message_id': form_data.pop('id', None)}]
 
         user_message = form_data.pop('user_message', None) or form_data.pop('parent_message', None)
+        chat_id = form_data.get('chat_id') or ''
+        chat_variables = form_data.pop('chat_variables', None)
+        if chat_variables is None:
+            existing_chat = await Chats.get_chat_by_id(chat_id) if is_saved_chat_id(chat_id) else None
+            chat_variables = existing_chat.variables if existing_chat else {}
+
+        chat_variables = normalize_chat_variables(chat_variables)
 
         # Drop tool_servers if caller lacks features.direct_tool_servers —
         # mirrors the storage-side strip in user/settings/update.
@@ -1143,6 +1925,7 @@ async def chat_completion(
         metadata = {
             'user_id': user.id,
             'user_agent': request.headers.get('user-agent', '') or '',
+            'internal': getattr(request.state, 'internal', False) is True,
             'chat_id': form_data.pop('chat_id', None) or '',
             'user_message': user_message,
             'user_message_id': user_message.get('id') if user_message else None,
@@ -1155,6 +1938,7 @@ async def chat_completion(
             'files': form_data.get('files', None),
             'features': form_data.get('features', {}),
             'variables': form_data.get('variables', {}),
+            'chat_variables': chat_variables,
             'model': model,
             'direct': model_item.get('direct', False),
             'params': {
@@ -1218,9 +2002,7 @@ async def chat_completion(
                             detail=ERROR_MESSAGES.DEFAULT(),
                         )
 
-            if not chat_id.startswith('local:') and not chat_id.startswith(
-                'channel:'
-            ):  # temporary/channel chats are not stored
+            if is_saved_chat_id(chat_id):
                 if is_new_chat:
                     # Build the full history upfront with ALL assistant placeholders
                     user_message = metadata.get('user_message') or {}
@@ -1237,7 +2019,7 @@ async def chat_completion(
                         target_model_id = entry['model_id']
                         assistant_message_id = entry['message_id']
                         if assistant_message_id:
-                            history_messages[assistant_message_id] = {
+                            assistant_message = {
                                 'id': assistant_message_id,
                                 'parentId': user_message_id,
                                 'childrenIds': [],
@@ -1247,6 +2029,11 @@ async def chat_completion(
                                 'model': target_model_id,
                                 'timestamp': int(time.time()),
                             }
+                            # Preserve the side-by-side column index so duplicate
+                            # models don't collapse into one another on reload.
+                            if entry.get('modelIdx') is not None:
+                                assistant_message['modelIdx'] = entry['modelIdx']
+                            history_messages[assistant_message_id] = assistant_message
 
                     await Chats.insert_new_chat(
                         chat_id,
@@ -1269,6 +2056,7 @@ async def chat_completion(
                                 'tags': [],
                                 'timestamp': int(time.time() * 1000),
                             },
+                            variables=chat_variables,
                             folder_id=metadata.get('folder_id'),
                         ),
                     )
@@ -1279,6 +2067,7 @@ async def chat_completion(
                         subject_id=chat_id,
                         data={'title': 'New Chat'},
                     )
+                    await emit_chat_list_event(metadata, chat_id)
                     if user_message_id:
                         await publish_event(
                             request,
@@ -1371,7 +2160,9 @@ async def chat_completion(
                                 updated['files'] = chat_files
                             if selected_chat_models:
                                 updated['models'] = selected_chat_models
-                            await Chats.update_chat_by_id(chat_id, updated)
+                            await Chats.update_chat_by_id(chat_id, updated, touch=False)
+
+                    await Chats.update_chat_variables_by_id(chat_id, chat_variables)
 
                     # Save user message to DB
                     if user_message and user_message.get('id'):
@@ -1380,6 +2171,7 @@ async def chat_completion(
                             user_message['id'],
                             user_message,
                         )
+                        await emit_chat_list_event({**metadata, 'message_id': user_message['id']}, chat_id)
                         await publish_event(
                             request,
                             EVENTS.MESSAGE_CREATED,
@@ -1391,6 +2183,15 @@ async def chat_completion(
                                 'content_preview': user_message.get('content', '')[:300],
                             },
                         )
+                        if not getattr(request.state, 'internal', False) and not (user_message.get('meta') or {}).get(
+                            'internal'
+                        ):
+                            try:
+                                from open_webui.utils.timers import cancel_timers_for_chat
+
+                                await cancel_timers_for_chat(chat_id, 'chat.user_message', user.id)
+                            except Exception:
+                                log.exception('Failed to cancel chat.user_message timers for chat %s', chat_id)
 
                         # Link grandparent → user message (childrenIds)
                         grandparent_id = user_message.get('parentId')
@@ -1445,19 +2246,24 @@ async def chat_completion(
                         target_model_id = entry['model_id']
                         assistant_message_id = entry['message_id']
                         if assistant_message_id:
+                            assistant_message = {
+                                'id': assistant_message_id,
+                                'parentId': user_message_id,
+                                'childrenIds': [],
+                                'role': 'assistant',
+                                'content': '',
+                                'done': False,
+                                'model': target_model_id,
+                                'timestamp': int(time.time()),
+                            }
+                            # Preserve the side-by-side column index so duplicate
+                            # models don't collapse into one another on reload.
+                            if entry.get('modelIdx') is not None:
+                                assistant_message['modelIdx'] = entry['modelIdx']
                             await Chats.upsert_message_to_chat_by_id_and_message_id(
                                 chat_id,
                                 assistant_message_id,
-                                {
-                                    'id': assistant_message_id,
-                                    'parentId': user_message_id,
-                                    'childrenIds': [],
-                                    'role': 'assistant',
-                                    'content': '',
-                                    'done': False,
-                                    'model': target_model_id,
-                                    'timestamp': int(time.time()),
-                                },
+                                assistant_message,
                             )
                             await publish_event(
                                 request,
@@ -1526,9 +2332,7 @@ async def chat_completion(
             if metadata.get('chat_id') and metadata.get('message_id'):
                 # Update the chat message with the error
                 try:
-                    if not metadata.get('chat_id', '').startswith('local:') and not metadata.get(
-                        'chat_id', ''
-                    ).startswith('channel:'):
+                    if is_saved_chat_id(metadata.get('chat_id')):
                         await Chats.upsert_message_to_chat_by_id_and_message_id(
                             metadata['chat_id'],
                             metadata['message_id'],
@@ -1596,15 +2400,55 @@ async def chat_completion(
                         event_emitter = await get_event_emitter(metadata, update_db=False)
                         if event_emitter:
                             try:
-                                await asyncio.shield(event_emitter({'type': 'chat:active', 'data': {'active': False}}))
+                                folder_id = metadata.get('folder_id') or await Chats.get_chat_folder_id(
+                                    chat_id, user.id
+                                )
+                                await asyncio.shield(
+                                    event_emitter(
+                                        {
+                                            'type': 'chat:active',
+                                            'data': {'active': False, 'folder_id': folder_id},
+                                        }
+                                    )
+                                )
                             except asyncio.CancelledError:
                                 pass
             except Exception:
                 pass
 
+            try:
+                chat_id = metadata.get('chat_id')
+                if (
+                    chat_id
+                    and getattr(request.state, 'internal', False) is not True
+                    and not await has_active_tasks(request.app.state.redis, chat_id)
+                ):
+                    from open_webui.utils.subagents import process_pending_internal_messages
+
+                    await process_pending_internal_messages(
+                        request,
+                        chat_id,
+                        user.id,
+                        {
+                            'model_id': metadata.get('model_id') or form_data.get('model'),
+                            'session_id': metadata.get('session_id'),
+                            'tool_ids': metadata.get('tool_ids') or [],
+                            'skill_ids': metadata.get('skill_ids') or [],
+                            'system_prompt': metadata.get('system_prompt'),
+                            'filter_ids': metadata.get('filter_ids') or [],
+                            'terminal_id': metadata.get('terminal_id'),
+                            'features': metadata.get('features') or {},
+                            'variables': metadata.get('variables') or {},
+                        },
+                    )
+            except Exception:
+                log.exception('Failed to process pending internal messages for chat %s', metadata.get('chat_id'))
+
     # Fan out: one task per model
     if metadata.get('session_id') and metadata.get('chat_id'):
         task_ids = []
+        subagent_results = []
+        is_internal = getattr(request.state, 'internal', False) is True
         chat_id = metadata['chat_id']
 
         for idx, entry in enumerate(message_ids):
@@ -1617,6 +2461,7 @@ async def chat_completion(
             per_model_metadata = {
                 **metadata,
                 'message_id': assistant_message_id,
+                'task_id': str(uuid4()),
             }
 
             # Per-model form_data: own model
@@ -1631,27 +2476,38 @@ async def chat_completion(
 
             # Only the first model runs chat-level background tasks;
             # subsequent models only run follow-ups.
+            process = process_chat(
+                request,
+                model_form_data,
+                user,
+                per_model_metadata,
+                resolved_model,
+                tasks
+                if idx == 0
+                else {
+                    k: v for k, v in (tasks or {}).items() if k not in (TASKS.TITLE_GENERATION, TASKS.TAGS_GENERATION)
+                }
+                or None,
+            )
+            if is_internal:
+                subagent_results.append(await process)
+                continue
+
             task_id, _ = await create_task(
                 request.app.state.redis,
-                process_chat(
-                    request,
-                    model_form_data,
-                    user,
-                    per_model_metadata,
-                    resolved_model,
-                    tasks
-                    if idx == 0
-                    else {
-                        k: v
-                        for k, v in (tasks or {}).items()
-                        if k not in (TASKS.TITLE_GENERATION, TASKS.TAGS_GENERATION)
-                    }
-                    or None,
-                ),
+                process,
                 id=chat_id,
+                task_id=per_model_metadata['task_id'],
             )
-            per_model_metadata['task_id'] = task_id
             task_ids.append(task_id)
+
+        if is_internal:
+            return {
+                'status': True,
+                'task_ids': [],
+                'chat_id': chat_id,
+                'results': subagent_results,
+            }
 
         # Emit chat:active=true
         if task_ids:
@@ -1660,7 +2516,8 @@ async def chat_completion(
                 update_db=False,
             )
             if event_emitter:
-                await event_emitter({'type': 'chat:active', 'data': {'active': True}})
+                folder_id = metadata.get('folder_id') or await Chats.get_chat_folder_id(chat_id, user.id)
+                await event_emitter({'type': 'chat:active', 'data': {'active': True, 'folder_id': folder_id}})
 
         return {
             'status': True,
@@ -1692,8 +2549,78 @@ app.state.CHAT_COMPLETION_HANDLER = chat_completion
 from open_webui.utils.anthropic import (
     convert_anthropic_to_openai_payload,
     convert_openai_to_anthropic_response,
+    is_anthropic_messages_passthrough,
     openai_stream_to_anthropic_stream,
 )
+
+
+@app.post('/api/message/count_tokens')
+@app.post('/api/v1/messages/count_tokens')  # Anthropic Messages token-count endpoint
+async def count_message_tokens(
+    request: Request,
+    form_data: dict,
+    user=Depends(get_verified_user),
+):
+    return {'input_tokens': await openai.count_anthropic_tokens(request, form_data, user)}
+
+
+async def passthrough_anthropic_messages(request: Request, form_data: dict, user) -> Response | dict:
+    requested_model, payload, url, key, headers, cookies = await openai.get_anthropic_token_count_target(
+        request, form_data, user
+    )
+    request_url = f'{url.rstrip("/")}/messages'
+    response = None
+    streaming = False
+
+    try:
+        session = await get_session()
+        response = await session.request(
+            method='POST',
+            url=request_url,
+            data=json.dumps(payload),
+            headers=headers,
+            cookies=cookies,
+            ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            timeout=aiohttp.ClientTimeout(total=openai.AIOHTTP_CLIENT_TIMEOUT),
+        )
+
+        if 'text/event-stream' in response.headers.get('Content-Type', ''):
+            streaming = True
+            return StreamingResponse(
+                stream_wrapper(response),
+                status_code=response.status,
+                headers=openai._clean_proxy_headers(response.headers),
+            )
+
+        try:
+            response_data = await response.json()
+        except Exception:
+            response_data = await response.text()
+
+        if response.status >= 400:
+            await openai.publish_model_provider_request_failed(
+                request,
+                actor=user,
+                provider='openai-compatible',
+                base_url=url,
+                api_key=key,
+                status=response.status,
+                requested_model=requested_model,
+                upstream_error=response_data,
+            )
+            if isinstance(response_data, (dict, list)):
+                return JSONResponse(status_code=response.status, content=response_data)
+            return Response(status_code=response.status, content=response_data)
+
+        return response_data
+    except HTTPException:
+        raise
+    except Exception:
+        log.exception('Failed to passthrough Anthropic Messages request for model %s', requested_model)
+        raise HTTPException(status_code=502, detail=ERROR_MESSAGES.SERVER_CONNECTION_ERROR)
+    finally:
+        if not streaming:
+            await cleanup_response(response)
 
 
 @app.post('/api/message')
@@ -1716,10 +2643,40 @@ async def generate_messages(
     Authentication: Supports both standard Authorization header and
     Anthropic's x-api-key header (via middleware translation).
     """
-    # Convert Anthropic payload to OpenAI format
     requested_model = form_data.get('model', '')
+    input_tokens = None
+    try:
+        input_tokens = await openai.count_anthropic_tokens(request, form_data, user)
+    except Exception:
+        # Counting must not turn a compatible generation request into an outage.
+        log.warning('Unable to count Anthropic input tokens for model %s', requested_model, exc_info=True)
 
-    openai_payload = convert_anthropic_to_openai_payload(form_data)
+    model_id = requested_model
+    model_info = await Models.get_model_by_id(model_id)
+    if model_info and model_info.base_model_id:
+        model_id = model_info.base_model_id
+
+    passthrough_params = []
+    models = request.app.state.OPENAI_MODELS
+    if not models or model_id not in models:
+        await openai.get_all_models(request, user=user)
+        models = request.app.state.OPENAI_MODELS
+    model = models.get(model_id)
+    if model:
+        url, _, api_config = await openai.get_openai_connection(model['urlIdx'])
+        if is_anthropic_messages_passthrough(url, api_config):
+            return await passthrough_anthropic_messages(request, form_data, user)
+        passthrough_params = api_config.get('passthrough_params') or []
+
+    # Convert Anthropic payload to OpenAI format
+    openai_payload = convert_anthropic_to_openai_payload(form_data, passthrough_params)
+    model_meta = model_info.meta.model_dump() if model_info and model_info.meta else {}
+    if (model_meta.get('capabilities') or {}).get('usage') is True:
+        if openai_payload.get('stream'):
+            stream_options = openai_payload.get('stream_options')
+            if not isinstance(stream_options, dict):
+                stream_options = {}
+            openai_payload['stream_options'] = {**stream_options, 'include_usage': True}
 
     # Route through the existing chat_completion handler
     response = await chat_completion(request, openai_payload, user)
@@ -1728,7 +2685,7 @@ async def generate_messages(
     if isinstance(response, StreamingResponse):
         # Streaming response: wrap the generator to convert SSE format
         return StreamingResponse(
-            openai_stream_to_anthropic_stream(response.body_iterator, model=requested_model),
+            openai_stream_to_anthropic_stream(response.body_iterator, model=requested_model, input_tokens=input_tokens),
             media_type='text/event-stream',
             headers={
                 'Cache-Control': 'no-cache',
@@ -1736,22 +2693,42 @@ async def generate_messages(
             },
         )
     elif isinstance(response, dict):
-        return convert_openai_to_anthropic_response(response, model=requested_model)
+        return convert_openai_to_anthropic_response(response, model=requested_model, input_tokens=input_tokens)
     else:
         # Passthrough for error responses (JSONResponse, PlainTextResponse, etc.)
         return response
+
+
+async def verify_chat_ownership(chat_id: str | None, user) -> None:
+    """Temporary chats are per-socket and unsaved, so they have no owner to check."""
+    if not chat_id or is_temporary_chat_id(chat_id):
+        return
+
+    # Channel messages need the membership and write-access gate that only /api/chat/completions has.
+    if chat_id.startswith('channel:'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Channel chats are not supported on this endpoint',
+        )
+
+    if user.role != 'admin' and not await Chats.is_chat_owner(chat_id, user.id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.DEFAULT(),
+        )
 
 
 @app.post('/api/chat/completed')
 async def chat_completed(request: Request, form_data: dict, user=Depends(get_verified_user)):
     """Deprecated: outlet filters now run inline during chat completion.
     Kept for backward compatibility with external integrations."""
+    await verify_chat_ownership(form_data.get('chat_id'), user)
+
     try:
         model_item = form_data.pop('model_item', {})
 
         if model_item.get('direct', False):
-            request.state.direct = True
-            request.state.model = model_item
+            await _set_direct_model(request, model_item, user)
 
         return await chat_completed_handler(request, form_data, user)
     except Exception as e:
@@ -1763,12 +2740,13 @@ async def chat_completed(request: Request, form_data: dict, user=Depends(get_ver
 
 @app.post('/api/chat/actions/{action_id}')
 async def chat_action(request: Request, action_id: str, form_data: dict, user=Depends(get_verified_user)):
+    await verify_chat_ownership(form_data.get('chat_id'), user)
+
     try:
         model_item = form_data.pop('model_item', {})
 
         if model_item.get('direct', False):
-            request.state.direct = True
-            request.state.model = model_item
+            await _set_direct_model(request, model_item, user)
 
         return await chat_action_handler(request, action_id, form_data, user)
     except Exception as e:
@@ -1794,8 +2772,8 @@ async def list_tasks_endpoint(request: Request, user=Depends(get_admin_user)):
 
 @app.get('/api/tasks/chat/{chat_id:path}')
 async def list_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=Depends(get_verified_user)):
-    if chat_id.startswith('local:') or chat_id.startswith('channel:'):
-        socket_id = chat_id[len('local:') :]
+    socket_id = get_temporary_chat_session_id(chat_id)
+    if socket_id:
         owner_id = get_user_id_from_session_pool(socket_id)
         if owner_id != user.id and user.role != 'admin':
             return {'task_ids': []}
@@ -1812,8 +2790,8 @@ async def list_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=De
 
 @app.post('/api/tasks/chat/{chat_id:path}/stop')
 async def stop_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=Depends(get_verified_user)):
-    if chat_id.startswith('local:') or chat_id.startswith('channel:'):
-        socket_id = chat_id[len('local:') :]
+    socket_id = get_temporary_chat_session_id(chat_id)
+    if socket_id:
         owner_id = get_user_id_from_session_pool(socket_id)
         if owner_id != user.id and user.role != 'admin':
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
@@ -1865,6 +2843,7 @@ async def get_app_config(request: Request):
     license_metadata = getattr(app.state, 'LICENSE_METADATA', None)
     user_count = await Users.get_num_users() if license_metadata else None
     config = await Config.get_many(
+        'oauth.enable',
         'oauth.auto_redirect',
         'ldap.enable',
         'ui.enable_signup',
@@ -1878,6 +2857,7 @@ async def get_app_config(request: Request):
         'calendar.enable',
         'automations.enable',
         'notes.enable',
+        'chat.context_compaction.enable',
         'web.search.enable',
         'web.search.confirmation.enable',
         'web.search.confirmation.content',
@@ -1918,7 +2898,13 @@ async def get_app_config(request: Request):
         'version': VERSION,
         'default_locale': str(DEFAULT_LOCALE),
         'oauth': {
-            'providers': {name: config.get('name', name) for name, config in OAUTH_PROVIDERS.items()},
+            # Hide providers (and thus the login buttons / auto-redirect) when OAuth
+            # is disabled, without clearing the admin's provider configuration.
+            'providers': (
+                {name: provider.get('name', name) for name, provider in OAUTH_PROVIDERS.items()}
+                if config.get('oauth.enable', True)
+                else {}
+            ),
             'auto_redirect': config.get('oauth.auto_redirect'),
         },
         'features': {
@@ -1940,12 +2926,14 @@ async def get_app_config(request: Request):
                     'enable_public_active_users_count': ENABLE_PUBLIC_ACTIVE_USERS_COUNT,
                     'enable_easter_eggs': ENABLE_EASTER_EGGS,
                     'enable_direct_connections': config.get('direct.enable'),
+                    'enable_plugins': ENABLE_PLUGINS,
                     'enable_folders': config.get('folders.enable'),
                     'folder_max_file_count': config.get('folders.max_file_count'),
                     'enable_channels': config.get('channels.enable'),
                     'enable_calendar': config.get('calendar.enable'),
                     'enable_automations': config.get('automations.enable'),
                     'enable_notes': config.get('notes.enable'),
+                    'enable_context_compaction': config.get('chat.context_compaction.enable'),
                     'enable_web_search': config.get('web.search.enable'),
                     'enable_web_search_confirmation': config.get('web.search.confirmation.enable'),
                     'web_search_confirmation_content': config.get('web.search.confirmation.content'),

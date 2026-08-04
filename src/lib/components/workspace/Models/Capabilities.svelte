@@ -51,31 +51,43 @@
 			label: $i18n.t('Status Updates'),
 			description: $i18n.t('Displays status updates (e.g., web search progress) in the response')
 		},
+		memory: {
+			label: $i18n.t('Memory'),
+			description: $i18n.t('Inject stored memories into conversation context')
+		},
 		builtin_tools: {
 			label: $i18n.t('Builtin Tools'),
 			description: $i18n.t(
 				'Automatically inject system tools in native function calling mode (e.g., timestamps, memory, chat history, notes, etc.)'
 			)
+		},
+		api_tools: {
+			label: $i18n.t('API Tools'),
+			description: $i18n.t(
+				'When enabled, this model exposes its builtin and attached tools (web search, knowledge, time) to API/programmatic callers (no UI session). Off by default. Built-in tool access is restricted to time, knowledge, and web_search for privacy.'
+			)
+		},
+		api_terminal: {
+			label: $i18n.t('API Terminal'),
+			description: $i18n.t(
+				'When enabled, this model can use its attached Terminal tool server when called via the API. Off by default. Use with caution — terminal servers can execute arbitrary commands.'
+			)
 		}
 	};
 
-	export let capabilities: {
-		file_context?: boolean;
-		vision?: boolean;
-		file_upload?: boolean;
-		web_search?: boolean;
-		image_generation?: boolean;
-		code_interpreter?: boolean;
-		terminal?: boolean;
-		usage?: boolean;
-		citations?: boolean;
-		status_updates?: boolean;
-		builtin_tools?: boolean;
-	} = {};
+	type Capability = keyof typeof capabilityLabels;
 
-	// Hide file_context when file_upload is disabled
-	$: visibleCapabilities = Object.keys(capabilityLabels).filter((cap) => {
+	export let capabilities: Partial<Record<Capability, boolean>> = {};
+	export let baseModelId: string | null = null;
+
+	// Hide file_context when file_upload is disabled.
+	// For wrapper models (base_model_id set), hide vision and builtin_tools
+	// as these are inherited from the base model.
+	$: visibleCapabilities = (Object.keys(capabilityLabels) as Capability[]).filter((cap) => {
 		if (cap === 'file_context' && !capabilities.file_upload) {
+			return false;
+		}
+		if (baseModelId && (cap === 'vision' || cap === 'builtin_tools')) {
 			return false;
 		}
 		return true;
@@ -83,24 +95,27 @@
 </script>
 
 <div>
-	<div class="flex w-full justify-between mb-1">
-		<div class=" self-center text-xs font-medium text-gray-500">{$i18n.t('Capabilities')}</div>
-	</div>
-	<div class="flex items-center mt-2 flex-wrap">
+	<div class="mb-1.5 text-xs text-gray-400 dark:text-gray-600">{$i18n.t('Capabilities')}</div>
+	{#if baseModelId}
+		<div class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+			{$i18n.t('Vision and Builtin Tools capabilities are inherited from the base model and cannot be overridden on a wrapper model.')}
+		</div>
+	{/if}
+	<div class="grid grid-cols-1 gap-x-5 gap-y-1 sm:grid-cols-2 lg:grid-cols-3">
 		{#each visibleCapabilities as capability}
-			<div class=" flex items-center gap-2 mr-3">
+			<div class="flex min-h-6 items-center justify-between gap-2.5">
+				<div class="min-w-0 text-xs text-gray-600 dark:text-gray-400">
+					<Tooltip content={marked.parse(capabilityLabels[capability].description)}>
+						<span class="truncate">{$i18n.t(capabilityLabels[capability].label)}</span>
+					</Tooltip>
+				</div>
 				<Checkbox
+					ariaLabel={$i18n.t(capabilityLabels[capability].label)}
 					state={capabilities[capability] ? 'checked' : 'unchecked'}
 					on:change={(e) => {
 						capabilities[capability] = e.detail === 'checked';
 					}}
 				/>
-
-				<div class=" py-0.5 text-sm capitalize">
-					<Tooltip content={marked.parse(capabilityLabels[capability].description)}>
-						{$i18n.t(capabilityLabels[capability].label)}
-					</Tooltip>
-				</div>
 			</div>
 		{/each}
 	</div>
