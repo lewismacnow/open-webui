@@ -27,8 +27,11 @@ ARG GID=0
 FROM --platform=$BUILDPLATFORM node:22-alpine3.20 AS build
 ARG BUILD_HASH
 
-# Set Node.js options (heap limit Allocation failed - JavaScript heap out of memory)
-# ENV NODE_OPTIONS="--max-old-space-size=4096"
+# Set Node.js heap limit so Vite can bundle the full frontend without OOMing.
+# Default V8 ceiling on 64-bit is ~4 GB, but the production build (6356+ modules,
+# pyodide fetch + vite build) peaks near that limit and dies with
+# "Ineffective mark-compacts near heap limit" — give it headroom.
+ENV NODE_OPTIONS="--max-old-space-size=8192"
 
 WORKDIR /app
 
