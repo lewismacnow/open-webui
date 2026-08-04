@@ -32,6 +32,7 @@
 		getMessageContentParts,
 		sanitizeResponseContent,
 		createMessagesList,
+		formatDate,
 		formatMessageTimestamp,
 		formatMessageTimestampFull,
 		removeDetails,
