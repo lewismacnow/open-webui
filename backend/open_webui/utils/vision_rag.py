@@ -22,7 +22,11 @@ The describe call is best-effort: on any failure it logs and returns False so
 the normal chat flow continues unaffected.
 """
 
+import asyncio
+import hashlib
 import logging
+import time
+from collections import OrderedDict
 
 from open_webui.models.config import Config
 from open_webui.models.models import Models
@@ -55,6 +59,46 @@ DEFAULT_DESCRIBE_PROMPT = (
     'Do not add information that is not visible. The output will be embedded in a text-only '
     'conversation to help the chat model respond to the user.'
 )
+
+
+# Simple in-memory LRU cache for image descriptions. Avoids re-describing the
+# same image on follow-up messages.  Non-persistent, short TTL, tiny footprint.
+_VISION_DESC_CACHE: OrderedDict = OrderedDict()
+_VISION_DESC_CACHE_MAX = 50  # max 50 cached descriptions
+_VISION_DESC_CACHE_TTL = 300  # 5 minutes
+
+
+def _image_cache_key(image_parts: list[dict], context_hash: str = '') -> str:
+    """Build a cache key from image content + optional context (user text)."""
+    h = hashlib.sha256()
+    for part in image_parts:
+        url = (part.get('image_url') or {}).get('url', '') if isinstance(part, dict) else ''
+        if url:
+            # For data URIs, hash the full content; for URLs, hash the URL itself
+            h.update(url.encode('utf-8')[:10000])  # cap to avoid hashing huge base64
+    if context_hash:
+        h.update(context_hash.encode('utf-8'))
+    return h.hexdigest()
+
+
+def _get_cached_description(cache_key: str) -> str | None:
+    """Return cached description if present and not expired."""
+    if cache_key in _VISION_DESC_CACHE:
+        desc, ts = _VISION_DESC_CACHE[cache_key]
+        if time.time() - ts < _VISION_DESC_CACHE_TTL:
+            # Move to end (most recently used)
+            _VISION_DESC_CACHE.move_to_end(cache_key)
+            return desc
+        else:
+            del _VISION_DESC_CACHE[cache_key]
+    return None
+
+
+def _set_cached_description(cache_key: str, description: str) -> None:
+    """Cache a description, evicting oldest if over limit."""
+    _VISION_DESC_CACHE[cache_key] = (description, time.time())
+    while len(_VISION_DESC_CACHE) > _VISION_DESC_CACHE_MAX:
+        _VISION_DESC_CACHE.popitem(last=False)  # evict oldest
 
 
 def _image_parts(message: dict) -> list[dict]:
@@ -146,7 +190,12 @@ async def process_image_rag(
 
     # Decide which model describes the image.
     chatting_supports_vision = _resolve_effective_vision_capability(model, request)
-    vision_support_model_id = ((await Config.get('rag.vision.support_model')) or '').strip()
+    # Batch both config reads to avoid two sequential DB round-trips.
+    vision_support_task = Config.get('rag.vision.support_model', '')
+    system_prompt_task = Config.get('rag.vision.system_prompt', '')
+    vision_support_model_id_raw, admin_system_prompt_raw = await asyncio.gather(vision_support_task, system_prompt_task)
+    vision_support_model_id = (vision_support_model_id_raw or '').strip()
+    admin_system_prompt = (admin_system_prompt_raw or '').strip()
 
     # Is there anything for the downstream RAG step to retrieve? Model-attached
     # and folder-attached knowledge are already moved from form_data['files']
@@ -171,11 +220,6 @@ async def process_image_rag(
     else:
         # Non-vision chatting model and no global vision model configured.
         return False
-
-    # Admin-configurable system prompt for the vision support model call.
-    # When set, it completely replaces the chatting model's system prompt,
-    # giving admins full control over the support model's behavior.
-    admin_system_prompt = ((await Config.get('rag.vision.system_prompt')) or '').strip()
 
     user_text = _message_text(last_user)
 
@@ -221,6 +265,8 @@ async def process_image_rag(
         'model': vision_model_id,
         'messages': describe_messages,
         'stream': False,
+        'max_tokens': 800,  # Cap description length — structured OCR+description fits in ~800 tokens
+        'temperature': 0.1,  # Low temperature for factual, consistent descriptions
         # Mark this as a sub-task so it can never re-trigger vision-RAG or other
         # pipeline work. (Note: generate_chat_completion still merges
         # request.state.metadata into form_data['metadata'], so the parent's
@@ -232,51 +278,80 @@ async def process_image_rag(
         },
     }
 
-    if event_emitter is not None:
+    # Check cache before making the expensive LLM call.
+    # Handles common case: follow-up messages re-sending the same images.
+    cache_key = _image_cache_key(image_parts, user_text or '')
+    cached = _get_cached_description(cache_key)
+    if cached:
+        description = cached
+        if event_emitter is not None:
+            try:
+                await event_emitter(
+                    {
+                        'type': 'status',
+                        'data': {
+                            'action': 'vision_rag',
+                            'description': 'Vision Support: image analyzed (cached)',
+                            'done': True,
+                        },
+                    }
+                )
+            except Exception:
+                pass
+    else:
+        if event_emitter is not None:
+            try:
+                await event_emitter(
+                    {
+                        'type': 'status',
+                        'data': {
+                            'action': 'vision_rag',
+                            'description': 'Vision Support: analyzing image...'
+                            if not user_text
+                            else f'Vision Support: analyzing image for: {user_text[:80]}',
+                            'done': False,
+                        },
+                    }
+                )
+            except Exception:
+                pass
+
+        # generate_chat_completion writes bypass_filter / bypass_system_prompt onto
+        # request.state for downstream access checks. Save and restore them so the
+        # parent chat's access handling isn't contaminated by this sub-call.
+        saved_bf = getattr(request.state, 'bypass_filter', False)
+        saved_bsp = getattr(request.state, 'bypass_system_prompt', False)
         try:
-            await event_emitter(
-                {
-                    'type': 'status',
-                    'data': {'action': 'vision_rag', 'query': user_text, 'done': False},
-                }
+            response = await generate_chat_completion(
+                request,
+                form_data=payload,
+                user=user,
+                bypass_filter=bypass_filter,
+                # The chatting model's system prompt is already injected above as a
+                # system message; don't let the support model's own params.system
+                # get merged on top.
+                bypass_system_prompt=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f'Vision RAG: describe call to {vision_model_id} failed: {e}')
+            return False
+        finally:
+            request.state.bypass_filter = saved_bf
+            request.state.bypass_system_prompt = saved_bsp
 
-    # generate_chat_completion writes bypass_filter / bypass_system_prompt onto
-    # request.state for downstream access checks. Save and restore them so the
-    # parent chat's access handling isn't contaminated by this sub-call.
-    saved_bf = getattr(request.state, 'bypass_filter', False)
-    saved_bsp = getattr(request.state, 'bypass_system_prompt', False)
-    try:
-        response = await generate_chat_completion(
-            request,
-            form_data=payload,
-            user=user,
-            bypass_filter=bypass_filter,
-            # The chatting model's system prompt is already injected above as a
-            # system message; don't let the support model's own params.system
-            # get merged on top.
-            bypass_system_prompt=True,
-        )
-    except Exception as e:
-        log.warning(f'Vision RAG: describe call to {vision_model_id} failed: {e}')
-        return False
-    finally:
-        request.state.bypass_filter = saved_bf
-        request.state.bypass_system_prompt = saved_bsp
-
-    description = ''
-    try:
-        description = (
-            (((response or {}).get('choices') or [{}])[0].get('message', {}) or {}).get('content') or ''
-        ).strip()
-    except Exception:
         description = ''
+        try:
+            description = (
+                (((response or {}).get('choices') or [{}])[0].get('message', {}) or {}).get('content') or ''
+            ).strip()
+        except Exception:
+            description = ''
 
-    if not description:
-        log.warning('Vision RAG: describe call returned empty content; skipping.')
-        return False
+        if not description:
+            log.warning('Vision RAG: describe call returned empty content; skipping.')
+            return False
+
+        _set_cached_description(cache_key, description)
 
     # Replace image parts with the description text. Keep the user's original
     # text so the final prompt is: description + original prompt.
@@ -285,9 +360,18 @@ async def process_image_rag(
         combined = f'{combined}\n\n{user_text}'
     last_user['content'] = [{'type': 'text', 'text': combined}]
 
-    if event_emitter is not None:
+    if event_emitter is not None and not cached:
         try:
-            await event_emitter({'type': 'status', 'data': {'action': 'vision_rag', 'done': True}})
+            await event_emitter(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'vision_rag',
+                        'description': 'Vision Support: image analyzed',
+                        'done': True,
+                    },
+                }
+            )
         except Exception:
             pass
 
