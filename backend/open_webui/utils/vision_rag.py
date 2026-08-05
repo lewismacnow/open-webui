@@ -37,6 +37,21 @@ from open_webui.utils.payload import resolve_system_prompt
 log = logging.getLogger(__name__)
 
 
+# Prefix injected before each image description to tell the non-vision model
+# that an image was attached and a Vision Support Model analyzed it. Without
+# this explicit framing, the model often doesn't realize the text block IS an
+# image description and responds "I can't see images."
+VISION_CONTEXT_PREFIX = (
+    '[VISION SUPPORT]\n'
+    'The user attached one or more images to this message. You are a text-only '
+    'model and cannot directly view images. A Vision Support Model has analyzed '
+    'the image(s) and produced the description below. Treat this description as '
+    "if you can see the image — use it to answer the user's question about the "
+    'image. Do NOT say you cannot see images; the description below IS the image.\n'
+    '[/VISION SUPPORT]'
+)
+
+
 _REDIS_CLIENT = None
 _REDIS_CHECKED = False
 
@@ -304,7 +319,7 @@ async def process_image_rag(
         if db_vision_context:
             description = db_vision_context
             # Replace image parts with the pre-existing description
-            combined = f'[Image description]\n{description}'
+            combined = f'{VISION_CONTEXT_PREFIX}\n\n{description}'
             if user_text:
                 combined = f'{combined}\n\n{user_text}'
             msg['content'] = [{'type': 'text', 'text': combined}]
@@ -459,7 +474,7 @@ async def process_image_rag(
 
         # Replace image parts with the description text. Keep the user's original
         # text so the final prompt is: description + original prompt.
-        combined = f'[Image description]\n{description}'
+        combined = f'{VISION_CONTEXT_PREFIX}\n\n{description}'
         if user_text:
             combined = f'{combined}\n\n{user_text}'
         msg['content'] = [{'type': 'text', 'text': combined}]
