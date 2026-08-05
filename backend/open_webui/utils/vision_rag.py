@@ -31,7 +31,6 @@ from collections import OrderedDict
 from open_webui.models.config import Config
 from open_webui.models.models import Models
 from open_webui.utils.chat import generate_chat_completion
-from open_webui.utils.misc import get_last_user_message_item
 from open_webui.utils.payload import resolve_system_prompt
 
 log = logging.getLogger(__name__)
@@ -180,12 +179,19 @@ async def process_image_rag(
         return False
 
     messages = form_data.get('messages', [])
-    last_user = get_last_user_message_item(messages)
-    if not last_user:
-        return False
 
-    image_parts = _image_parts(last_user)
-    if not image_parts:
+    # Find ALL user messages that contain image parts (not just the last one).
+    # On follow-up turns, earlier messages loaded from DB still have raw images
+    # that must be described for non-vision models.
+    messages_with_images = []
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        parts = _image_parts(msg)
+        if parts:
+            messages_with_images.append((msg, parts))
+
+    if not messages_with_images:
         return False
 
     # Decide which model describes the image.
@@ -221,21 +227,8 @@ async def process_image_rag(
         # Non-vision chatting model and no global vision model configured.
         return False
 
-    user_text = _message_text(last_user)
-
-    if admin_system_prompt:
-        # Admin override: use ONLY the admin prompt as the system message.
-        # The DEFAULT_DESCRIBE_PROMPT is folded in as a user instruction so the
-        # admin has full control of the system message tone/role.
-        describe_messages = [{'role': 'system', 'content': admin_system_prompt}]
-        describe_user_content: list[dict] = [{'type': 'text', 'text': DEFAULT_DESCRIBE_PROMPT}]
-        if user_text:
-            describe_user_content.append({'type': 'text', 'text': f"User's message: {user_text}"})
-        describe_user_content.extend(image_parts)
-        describe_messages.append({'role': 'user', 'content': describe_user_content})
-    else:
-        # Default behavior: use chatting model's system prompt + DEFAULT_DESCRIBE_PROMPT
-        # (existing logic preserved verbatim).
+    # Resolve the chatting model's system prompt ONCE (per-model, not per-message).
+    if not admin_system_prompt:
         system_raw = None
         try:
             chatting_model_row = await Models.get_model_by_id(model.get('id'))
@@ -249,130 +242,141 @@ async def process_image_rag(
 
         system_prompt = await resolve_system_prompt(system_raw, metadata, user)
 
-        describe_instruction = DEFAULT_DESCRIBE_PROMPT
-        if user_text:
-            describe_instruction = f"{describe_instruction}\n\nUser's message: {user_text}"
+    # Process each user message with images.
+    any_replaced = False
+    for idx, (msg, image_parts) in enumerate(messages_with_images):
+        is_last_message = idx == len(messages_with_images) - 1
+        user_text = _message_text(msg)
 
-        describe_content: list[dict] = [{'type': 'text', 'text': describe_instruction}]
-        describe_content.extend(image_parts)
+        # Check cache
+        cache_key = _image_cache_key(image_parts, user_text or '')
+        cached = _get_cached_description(cache_key)
 
-        describe_messages: list[dict] = []
-        if system_prompt:
-            describe_messages.append({'role': 'system', 'content': system_prompt})
-        describe_messages.append({'role': 'user', 'content': describe_content})
+        if cached:
+            description = cached
+            if is_last_message and event_emitter is not None:
+                try:
+                    await event_emitter(
+                        {
+                            'type': 'status',
+                            'data': {
+                                'action': 'vision_rag',
+                                'description': 'Vision Support: image analyzed (cached)',
+                                'done': True,
+                            },
+                        }
+                    )
+                except Exception:
+                    pass
+        else:
+            if is_last_message and event_emitter is not None:
+                try:
+                    await event_emitter(
+                        {
+                            'type': 'status',
+                            'data': {
+                                'action': 'vision_rag',
+                                'description': 'Vision Support: analyzing image...'
+                                if not user_text
+                                else f'Vision Support: analyzing image for: {user_text[:80]}',
+                                'done': False,
+                            },
+                        }
+                    )
+                except Exception:
+                    pass
 
-    payload = {
-        'model': vision_model_id,
-        'messages': describe_messages,
-        'stream': False,
-        'max_tokens': 800,  # Cap description length — structured OCR+description fits in ~800 tokens
-        'temperature': 0.1,  # Low temperature for factual, consistent descriptions
-        # Mark this as a sub-task so it can never re-trigger vision-RAG or other
-        # pipeline work. (Note: generate_chat_completion still merges
-        # request.state.metadata into form_data['metadata'], so the parent's
-        # chat_id/session_id are inherited — that's fine for a plain completion
-        # and is not re-processed by process_chat_payload.)
-        'metadata': {
-            'task': 'vision_rag_description',
-            'chat_id': (metadata or {}).get('chat_id'),
-        },
-    }
+            # Build describe messages (per-message: uses THIS message's
+            # user_text and image_parts, not the shared system prompt).
+            if admin_system_prompt:
+                describe_messages = [{'role': 'system', 'content': admin_system_prompt}]
+                describe_user_content: list[dict] = [{'type': 'text', 'text': DEFAULT_DESCRIBE_PROMPT}]
+                if user_text:
+                    describe_user_content.append({'type': 'text', 'text': f"User's message: {user_text}"})
+                describe_user_content.extend(image_parts)
+                describe_messages.append({'role': 'user', 'content': describe_user_content})
+            else:
+                describe_instruction = DEFAULT_DESCRIBE_PROMPT
+                if user_text:
+                    describe_instruction = f"{describe_instruction}\n\nUser's message: {user_text}"
 
-    # Check cache before making the expensive LLM call.
-    # Handles common case: follow-up messages re-sending the same images.
-    cache_key = _image_cache_key(image_parts, user_text or '')
-    cached = _get_cached_description(cache_key)
-    if cached:
-        description = cached
-        if event_emitter is not None:
+                describe_content: list[dict] = [{'type': 'text', 'text': describe_instruction}]
+                describe_content.extend(image_parts)
+
+                describe_messages: list[dict] = []
+                if system_prompt:
+                    describe_messages.append({'role': 'system', 'content': system_prompt})
+                describe_messages.append({'role': 'user', 'content': describe_content})
+
+            payload = {
+                'model': vision_model_id,
+                'messages': describe_messages,
+                'stream': False,
+                'max_tokens': 800,  # Cap description length
+                'temperature': 0.1,  # Low temperature for factual descriptions
+                # Mark this as a sub-task so it can never re-trigger vision-RAG.
+                'metadata': {
+                    'task': 'vision_rag_description',
+                    'chat_id': (metadata or {}).get('chat_id'),
+                },
+            }
+
+            # generate_chat_completion writes bypass_filter / bypass_system_prompt
+            # onto request.state. Save and restore so the parent chat isn't tainted.
+            saved_bf = getattr(request.state, 'bypass_filter', False)
+            saved_bsp = getattr(request.state, 'bypass_system_prompt', False)
             try:
-                await event_emitter(
-                    {
-                        'type': 'status',
-                        'data': {
-                            'action': 'vision_rag',
-                            'description': 'Vision Support: image analyzed (cached)',
-                            'done': True,
-                        },
-                    }
+                response = await generate_chat_completion(
+                    request,
+                    form_data=payload,
+                    user=user,
+                    bypass_filter=bypass_filter,
+                    # Chatting model's system prompt is injected above as a
+                    # system message; don't let the support model's params merge.
+                    bypass_system_prompt=True,
                 )
-            except Exception:
-                pass
-    else:
-        if event_emitter is not None:
-            try:
-                await event_emitter(
-                    {
-                        'type': 'status',
-                        'data': {
-                            'action': 'vision_rag',
-                            'description': 'Vision Support: analyzing image...'
-                            if not user_text
-                            else f'Vision Support: analyzing image for: {user_text[:80]}',
-                            'done': False,
-                        },
-                    }
-                )
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f'Vision RAG: describe call to {vision_model_id} failed: {e}')
+                continue  # skip this message, try the next
+            finally:
+                request.state.bypass_filter = saved_bf
+                request.state.bypass_system_prompt = saved_bsp
 
-        # generate_chat_completion writes bypass_filter / bypass_system_prompt onto
-        # request.state for downstream access checks. Save and restore them so the
-        # parent chat's access handling isn't contaminated by this sub-call.
-        saved_bf = getattr(request.state, 'bypass_filter', False)
-        saved_bsp = getattr(request.state, 'bypass_system_prompt', False)
-        try:
-            response = await generate_chat_completion(
-                request,
-                form_data=payload,
-                user=user,
-                bypass_filter=bypass_filter,
-                # The chatting model's system prompt is already injected above as a
-                # system message; don't let the support model's own params.system
-                # get merged on top.
-                bypass_system_prompt=True,
-            )
-        except Exception as e:
-            log.warning(f'Vision RAG: describe call to {vision_model_id} failed: {e}')
-            return False
-        finally:
-            request.state.bypass_filter = saved_bf
-            request.state.bypass_system_prompt = saved_bsp
-
-        description = ''
-        try:
-            description = (
-                (((response or {}).get('choices') or [{}])[0].get('message', {}) or {}).get('content') or ''
-            ).strip()
-        except Exception:
             description = ''
+            try:
+                description = (
+                    (((response or {}).get('choices') or [{}])[0].get('message', {}) or {}).get('content') or ''
+                ).strip()
+            except Exception:
+                description = ''
 
-        if not description:
-            log.warning('Vision RAG: describe call returned empty content; skipping.')
-            return False
+            if not description:
+                log.warning('Vision RAG: describe call returned empty content; skipping.')
+                continue  # skip this message
 
-        _set_cached_description(cache_key, description)
+            _set_cached_description(cache_key, description)
 
-    # Replace image parts with the description text. Keep the user's original
-    # text so the final prompt is: description + original prompt.
-    combined = f'[Image description]\n{description}'
-    if user_text:
-        combined = f'{combined}\n\n{user_text}'
-    last_user['content'] = [{'type': 'text', 'text': combined}]
+            if is_last_message and event_emitter is not None:
+                try:
+                    await event_emitter(
+                        {
+                            'type': 'status',
+                            'data': {
+                                'action': 'vision_rag',
+                                'description': 'Vision Support: image analyzed',
+                                'done': True,
+                            },
+                        }
+                    )
+                except Exception:
+                    pass
 
-    if event_emitter is not None and not cached:
-        try:
-            await event_emitter(
-                {
-                    'type': 'status',
-                    'data': {
-                        'action': 'vision_rag',
-                        'description': 'Vision Support: image analyzed',
-                        'done': True,
-                    },
-                }
-            )
-        except Exception:
-            pass
+        # Replace image parts with the description text. Keep the user's original
+        # text so the final prompt is: description + original prompt.
+        combined = f'[Image description]\n{description}'
+        if user_text:
+            combined = f'{combined}\n\n{user_text}'
+        msg['content'] = [{'type': 'text', 'text': combined}]
+        any_replaced = True
 
-    return True
+    return any_replaced
