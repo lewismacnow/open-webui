@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, getContext } from 'svelte';
 	import { getApiToolsConfig, setApiToolsConfig } from '$lib/apis/configs';
+	import { toast } from 'svelte-sonner';
 
 	import Switch from '$lib/components/common/Switch.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
@@ -53,8 +54,9 @@
 				allowed_categories: allowedCategories,
 				allow_tool_servers: allowToolServers
 			});
+			toast.success($i18n.t('API Tools settings saved'));
 		} catch (e) {
-			// Error is logged in the API client
+			toast.error($i18n.t('Failed to save API Tools settings'));
 		}
 	}
 
@@ -85,13 +87,7 @@
 			'Master switch for the entire API Tools feature. When enabled, models with the API Tools capability can execute tools server-side when called via the API. When disabled, API callers never receive tools regardless of individual settings below.'
 		)}
 	>
-		<Switch
-			state={enabled}
-			on:change={(e) => {
-				enabled = e.detail.state ?? false;
-				save();
-			}}
-		/>
+		<Switch bind:state={enabled} on:change={save} />
 	</AdminSettingField>
 
 	{#if !enabled}
@@ -159,14 +155,18 @@
 					'When enabled, MCP tool servers and OpenAPI tool servers attached to a model become available to API callers. When disabled, only the builtin tools selected above are available. Direct client-side tool servers never work via API (they require a browser socket connection).'
 				)}
 			>
-				<Switch
-					state={allowToolServers}
-					on:change={async () => {
-						allowToolServers = !allowToolServers;
-						await save();
-					}}
-				/>
+				<Switch bind:state={allowToolServers} on:change={save} />
 			</AdminSettingField>
 		</AdminSettingSection>
+	</div>
+
+	<div class="flex justify-end pt-3 pb-3">
+		<button
+			type="button"
+			class="px-3.5 py-1.5 text-sm font-medium bg-black dark:bg-white text-white dark:text-black rounded-lg transition"
+			on:click={save}
+		>
+			{$i18n.t('Save')}
+		</button>
 	</div>
 </form>
