@@ -47,6 +47,7 @@
 	import AdminAnalytics from '$lib/components/admin/Analytics.svelte';
 	import AdminIntegrations from '$lib/components/admin/Settings/Integrations.svelte';
 	import AdminDocuments from '$lib/components/admin/Settings/Documents.svelte';
+	import AdminApiTools from '$lib/components/admin/Settings/ApiTools.svelte';
 	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
 	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
 	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
@@ -125,6 +126,7 @@
 		'admin:analytics': 'Quality',
 		'admin:integrations': 'Tools',
 		'admin:documents': 'Tools',
+		'admin:api-tools': 'Tools',
 		'admin:web': 'Tools',
 		'admin:code-execution': 'Tools',
 		'admin:pipelines': 'Tools',
@@ -728,6 +730,11 @@
 			keywords: ['documents', 'files', 'rag', 'knowledge', 'upload', 'embedding', 'vector db']
 		},
 		{
+			id: 'admin:api-tools',
+			title: 'API Tools',
+			keywords: ['api tools', 'tool servers', 'mcp', 'web search', 'knowledge', 'builtin tools', 'function calling', 'allowlist', 'policy']
+		},
+		{
 			id: 'admin:web',
 			title: 'Web Search',
 			keywords: ['web search', 'google', 'bing', 'duckduckgo', 'serp', 'searxng', 'tavily', 'exa']
@@ -1239,9 +1246,11 @@
 				<AdminAnalytics />
 			{:else if selectedTab === 'admin:integrations'}
 				<AdminIntegrations {saveSettings} />
-			{:else if selectedTab === 'admin:documents'}
-				<AdminDocuments on:save={adminConfigSaveHandler} />
-			{:else if selectedTab === 'admin:web'}
+		{:else if selectedTab === 'admin:documents'}
+			<AdminDocuments on:save={adminConfigSaveHandler} />
+		{:else if selectedTab === 'admin:api-tools'}
+			<AdminApiTools />
+		{:else if selectedTab === 'admin:web'}
 				<AdminWebSearch saveHandler={adminConfigSaveHandler} />
 			{:else if selectedTab === 'admin:code-execution'}
 				<AdminCodeExecution saveHandler={adminConfigSaveHandler} />
