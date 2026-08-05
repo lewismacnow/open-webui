@@ -1093,6 +1093,42 @@ class ChatTable:
         except Exception:
             return None
 
+    async def update_message_vision_context_by_id_and_message_id(
+        self, id: str, message_id: str, vision_context: str
+    ) -> ChatModel | None:
+        """Persist a vision description annotation on a specific message.
+
+        Used by process_image_rag to cache image descriptions per-message in the
+        chat DB record, so subsequent turns don't re-describe the same images.
+        The annotation is stored as ``vision_context`` on the message dict — the
+        original ``content`` (with image_url parts) is preserved untouched.
+        """
+        try:
+            async with get_async_db_context() as session:
+                chat_item = await session.get(Chat, id)
+                if chat_item is None:
+                    return None
+
+                self._sanitize_chat_row(chat_item)
+                chat = chat_item.chat or {}
+                self._repair_chat_current_id(chat)
+                history = chat.get('history', {})
+
+                if message_id in history.get('messages', {}):
+                    history['messages'][message_id]['vision_context'] = vision_context
+
+                chat['history'] = history
+                clean_chat = self._clean_null_bytes(chat)
+                chat_item.chat = clean_chat
+                chat_item.title = self._clean_null_bytes(clean_chat['title']) if 'title' in clean_chat else 'New Chat'
+                chat_item.current_message_id = self.get_current_message_id(clean_chat)
+                flag_modified(chat_item, 'chat')
+                await session.commit()
+
+                return ChatModel.model_validate(chat_item)
+        except Exception:
+            return None
+
     async def add_message_files_by_id_and_message_id(self, id: str, message_id: str, files: list[dict]) -> list[dict]:
         async with get_async_db_context() as session:
             chat = await self.get_chat_by_id(id, db=session)
