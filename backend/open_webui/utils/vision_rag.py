@@ -25,6 +25,7 @@ the normal chat flow continues unaffected.
 import asyncio
 import hashlib
 import logging
+import os
 import time
 from collections import OrderedDict
 
@@ -34,6 +35,30 @@ from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.payload import resolve_system_prompt
 
 log = logging.getLogger(__name__)
+
+
+_REDIS_CLIENT = None
+_REDIS_CHECKED = False
+
+
+async def _get_redis():
+    """Lazily create and cache a Redis connection. Returns None if Redis unavailable."""
+    global _REDIS_CLIENT, _REDIS_CHECKED
+    if _REDIS_CHECKED:
+        return _REDIS_CLIENT
+    _REDIS_CHECKED = True
+    redis_url = os.getenv('REDIS_URL', '')
+    if not redis_url:
+        return None
+    try:
+        import redis.asyncio as aioredis
+
+        _REDIS_CLIENT = aioredis.Redis.from_url(redis_url, decode_responses=True)
+        await _REDIS_CLIENT.ping()
+    except Exception as e:
+        log.debug(f'Vision RAG: Redis unavailable, using in-memory cache only: {e}')
+        _REDIS_CLIENT = None
+    return _REDIS_CLIENT
 
 
 DEFAULT_DESCRIBE_PROMPT = (
@@ -80,24 +105,48 @@ def _image_cache_key(image_parts: list[dict], context_hash: str = '') -> str:
     return h.hexdigest()
 
 
-def _get_cached_description(cache_key: str) -> str | None:
-    """Return cached description if present and not expired."""
+async def _get_cached_description(cache_key: str) -> str | None:
+    """Check in-memory cache, then Redis. Returns description or None."""
+    # Layer 1: in-memory LRU
     if cache_key in _VISION_DESC_CACHE:
         desc, ts = _VISION_DESC_CACHE[cache_key]
         if time.time() - ts < _VISION_DESC_CACHE_TTL:
-            # Move to end (most recently used)
             _VISION_DESC_CACHE.move_to_end(cache_key)
             return desc
         else:
             del _VISION_DESC_CACHE[cache_key]
+
+    # Layer 2: Redis (shared across workers, 24h TTL)
+    redis = await _get_redis()
+    if redis:
+        try:
+            cached = await redis.get(f'vision_desc:{cache_key}')
+            if cached:
+                # Populate in-memory for faster subsequent access
+                _VISION_DESC_CACHE[cache_key] = (cached, time.time())
+                while len(_VISION_DESC_CACHE) > _VISION_DESC_CACHE_MAX:
+                    _VISION_DESC_CACHE.popitem(last=False)
+                return cached
+        except Exception as e:
+            log.debug(f'Vision RAG: Redis cache read failed: {e}')
+
     return None
 
 
-def _set_cached_description(cache_key: str, description: str) -> None:
-    """Cache a description, evicting oldest if over limit."""
+async def _set_cached_description(cache_key: str, description: str) -> None:
+    """Store description in in-memory cache AND Redis."""
+    # Layer 1: in-memory LRU
     _VISION_DESC_CACHE[cache_key] = (description, time.time())
     while len(_VISION_DESC_CACHE) > _VISION_DESC_CACHE_MAX:
-        _VISION_DESC_CACHE.popitem(last=False)  # evict oldest
+        _VISION_DESC_CACHE.popitem(last=False)
+
+    # Layer 2: Redis (24h TTL)
+    redis = await _get_redis()
+    if redis:
+        try:
+            await redis.setex(f'vision_desc:{cache_key}', 86400, description)
+        except Exception as e:
+            log.debug(f'Vision RAG: Redis cache write failed: {e}')
 
 
 def _image_parts(message: dict) -> list[dict]:
@@ -248,12 +297,37 @@ async def process_image_rag(
         is_last_message = idx == len(messages_with_images) - 1
         user_text = _message_text(msg)
 
-        # Check cache
+        # Layer 0: DB annotation — check if this message already has a persisted
+        # vision_context from a prior turn. This is set by process_image_rag itself
+        # after the first describe, then carried in the message dict on subsequent loads.
+        db_vision_context = msg.get('vision_context') or ''
+        if db_vision_context:
+            description = db_vision_context
+            # Replace image parts with the pre-existing description
+            combined = f'[Image description]\n{description}'
+            if user_text:
+                combined = f'{combined}\n\n{user_text}'
+            msg['content'] = [{'type': 'text', 'text': combined}]
+            any_replaced = True
+            continue  # next message — no need to check cache or describe
+
         cache_key = _image_cache_key(image_parts, user_text or '')
-        cached = _get_cached_description(cache_key)
+        cached = await _get_cached_description(cache_key)
 
         if cached:
             description = cached
+            # Back-fill DB annotation if missing (populates from cache for messages
+            # described before DB persistence was available).
+            msg_id = msg.get('id')
+            chat_id = (metadata or {}).get('chat_id')
+            if msg_id and chat_id and not msg.get('vision_context'):
+                try:
+                    from open_webui.models.chats import Chats
+
+                    await Chats.update_message_vision_context_by_id_and_message_id(chat_id, msg_id, description)
+                except Exception:
+                    pass  # best-effort
+
             if is_last_message and event_emitter is not None:
                 try:
                     await event_emitter(
@@ -354,7 +428,19 @@ async def process_image_rag(
                 log.warning('Vision RAG: describe call returned empty content; skipping.')
                 continue  # skip this message
 
-            _set_cached_description(cache_key, description)
+            await _set_cached_description(cache_key, description)
+
+            # Persist to DB so subsequent turns (which load messages from DB)
+            # find the description without re-describing.
+            msg_id = msg.get('id')
+            chat_id = (metadata or {}).get('chat_id')
+            if msg_id and chat_id:
+                try:
+                    from open_webui.models.chats import Chats
+
+                    await Chats.update_message_vision_context_by_id_and_message_id(chat_id, msg_id, description)
+                except Exception as e:
+                    log.debug(f'Vision RAG: could not persist vision_context to DB: {e}')
 
             if is_last_message and event_emitter is not None:
                 try:
