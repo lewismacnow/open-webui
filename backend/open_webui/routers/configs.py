@@ -950,6 +950,7 @@ async def get_banners(
 
 
 class ApiToolsConfigForm(BaseModel):
+    enabled: bool = False
     allowed_categories: list[str] = ['time', 'knowledge', 'web_search']
     allow_tool_servers: bool = False
 
@@ -957,6 +958,7 @@ class ApiToolsConfigForm(BaseModel):
 @router.get('/api-tools', response_model=ApiToolsConfigForm)
 async def get_api_tools_config(request: Request, user=Depends(get_admin_user)):
     return {
+        'enabled': bool(await Config.get('chat.api_tools.enabled', False)),
         'allowed_categories': (await Config.get('chat.api_tools.allowed_categories'))
         or ['time', 'knowledge', 'web_search'],
         'allow_tool_servers': bool(await Config.get('chat.api_tools.allow_tool_servers', False)),
@@ -967,11 +969,13 @@ async def get_api_tools_config(request: Request, user=Depends(get_admin_user)):
 async def set_api_tools_config(request: Request, form_data: ApiToolsConfigForm, user=Depends(get_admin_user)):
     await Config.upsert(
         {
+            'chat.api_tools.enabled': form_data.enabled,
             'chat.api_tools.allowed_categories': form_data.allowed_categories,
             'chat.api_tools.allow_tool_servers': form_data.allow_tool_servers,
         }
     )
     return {
+        'enabled': form_data.enabled,
         'allowed_categories': form_data.allowed_categories,
         'allow_tool_servers': form_data.allow_tool_servers,
     }

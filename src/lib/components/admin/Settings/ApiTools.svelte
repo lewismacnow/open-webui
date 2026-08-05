@@ -26,6 +26,7 @@
 		{ id: 'skills', label: 'Skills', description: 'Execute configured skills' }
 	];
 
+	let enabled = false;
 	let allowedCategories: string[] = ['time', 'knowledge', 'web_search'];
 	let allowToolServers = false;
 	let loaded = false;
@@ -48,6 +49,7 @@
 	async function save() {
 		try {
 			await setApiToolsConfig(localStorage.token, {
+				enabled: enabled,
 				allowed_categories: allowedCategories,
 				allow_tool_servers: allowToolServers
 			});
@@ -59,6 +61,7 @@
 	onMount(async () => {
 		try {
 			const config = await getApiToolsConfig(localStorage.token);
+			enabled = config.enabled;
 			allowedCategories = config.allowed_categories;
 			allowToolServers = config.allow_tool_servers;
 		} catch (e) {
@@ -76,7 +79,33 @@
 		{$i18n.t('API Tools')}
 	</h2>
 
-	<div class="flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5">
+	<AdminSettingField
+		label={$i18n.t('Enable API Tools (Master Switch)')}
+		description={$i18n.t(
+			'Master switch for the entire API Tools feature. When enabled, models with the API Tools capability can execute tools server-side when called via the API. When disabled, API callers never receive tools regardless of individual settings below.'
+		)}
+	>
+		<Switch
+			state={enabled}
+			on:change={(e) => {
+				enabled = e.detail.state ?? false;
+				save();
+			}}
+		/>
+	</AdminSettingField>
+
+	{#if !enabled}
+		<div class="flex items-center gap-2 p-3 my-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50">
+			<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="size-4 text-amber-600 dark:text-amber-400 shrink-0">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+			</svg>
+			<span class="text-xs text-amber-700 dark:text-amber-300">
+				{$i18n.t('API Tools is disabled. Toggle the master switch above to activate tool calling for API clients.')}
+			</span>
+		</div>
+	{/if}
+
+	<div class="flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5" class:opacity-50={!enabled}>
 		<AdminSettingSection title={$i18n.t('API Tools Policy')} first>
 			<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
 				{$i18n.t(
