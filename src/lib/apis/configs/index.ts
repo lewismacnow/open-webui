@@ -869,6 +869,7 @@ export const setRagVisionConfig = async (
 // --- API Tools ---
 
 export const getApiToolsConfig = async (token: string): Promise<{
+	enabled: boolean;
 	allowed_categories: string[];
 	allow_tool_servers: boolean;
 }> => {
@@ -895,6 +896,7 @@ export const getApiToolsConfig = async (token: string): Promise<{
 	}
 
 	return {
+		enabled: res?.enabled ?? false,
 		allowed_categories: res?.allowed_categories ?? ['time', 'knowledge', 'web_search'],
 		allow_tool_servers: res?.allow_tool_servers ?? false
 	};
@@ -902,8 +904,8 @@ export const getApiToolsConfig = async (token: string): Promise<{
 
 export const setApiToolsConfig = async (
 	token: string,
-	config: { allowed_categories: string[]; allow_tool_servers: boolean }
-): Promise<{ allowed_categories: string[]; allow_tool_servers: boolean }> => {
+	config: { enabled: boolean; allowed_categories: string[]; allow_tool_servers: boolean }
+): Promise<{ enabled: boolean; allowed_categories: string[]; allow_tool_servers: boolean }> => {
 	let error = null;
 	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/api-tools`, {
 		method: 'POST',
@@ -912,6 +914,7 @@ export const setApiToolsConfig = async (
 			Authorization: `Bearer ${token}`
 		},
 		body: JSON.stringify({
+			enabled: config.enabled,
 			allowed_categories: config.allowed_categories,
 			allow_tool_servers: config.allow_tool_servers
 		})
@@ -931,6 +934,7 @@ export const setApiToolsConfig = async (
 	}
 
 	return {
+		enabled: res?.enabled ?? config.enabled,
 		allowed_categories: res?.allowed_categories ?? config.allowed_categories,
 		allow_tool_servers: res?.allow_tool_servers ?? config.allow_tool_servers
 	};
