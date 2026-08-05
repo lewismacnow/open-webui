@@ -24,6 +24,7 @@
 	import CodeExecution from './Settings/CodeExecution.svelte';
 	import Integrations from './Settings/Integrations.svelte';
 	import Subagents from './Settings/Subagents.svelte';
+	import ApiTools from './Settings/ApiTools.svelte';
 
 	import Search from '../icons/Search.svelte';
 	import AdminTabIcon from './Settings/AdminTabIcon.svelte';
@@ -46,6 +47,7 @@
 			'analytics',
 			'integrations',
 			'documents',
+			'api-tools',
 			'web',
 			'code-execution',
 			'interface',
@@ -205,6 +207,35 @@
 				'tika',
 				'docling',
 				'unstructured'
+			]
+		},
+		{
+			id: 'api-tools',
+			title: 'API Tools',
+			route: '/admin/settings/api-tools',
+			keywords: [
+				'api',
+				'tools',
+				'policy',
+				'tool servers',
+				'mcp',
+				'openapi',
+				'builtin',
+				'categories',
+				'time',
+				'knowledge',
+				'web search',
+				'image generation',
+				'code interpreter',
+				'chats',
+				'memory',
+				'notes',
+				'channels',
+				'tasks',
+				'automations',
+				'calendar',
+				'subagents',
+				'skills'
 			]
 		},
 		{
@@ -442,6 +473,8 @@
 							await config.set(await getBackendConfig());
 						}}
 					/>
+				{:else if selectedTab === 'api-tools'}
+					<ApiTools />
 				{:else if selectedTab === 'web'}
 					<WebSearch
 						saveHandler={async () => {

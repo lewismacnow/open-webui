@@ -2702,8 +2702,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         chat is not None and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note'
     )
 
-    # Builtin tools allowlist for API mode — privacy boundary for shared API keys.
-    API_BUILTIN_TOOLS_ALLOWLIST = {'time', 'knowledge', 'web_search'}
+    # Fork: API Tools — load the admin-configurable allowlist from DB config.
+    # Replaces the previously hardcoded {'time', 'knowledge', 'web_search'}.
+    _api_allowed = await Config.get('chat.api_tools.allowed_categories', ['time', 'knowledge', 'web_search'])
+    API_BUILTIN_TOOLS_ALLOWLIST = set(_api_allowed) if _api_allowed else set()
 
     use_builtin_tools = (
         (internal_note or bool(metadata.get('session_id')) or api_tools_active)
@@ -2719,6 +2721,14 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             model_tool_ids = (model.get('info', {}).get('meta', {}) or {}).get('toolIds', [])
             if model_tool_ids:
                 tool_ids = list(model_tool_ids)
+
+        # Fork: filter External Tool Servers (MCP) based on admin policy.
+        # When allow_tool_servers is False, strip MCP tool IDs from the
+        # auto-resolved set — they require explicit API permission.
+        _allow_tool_servers = await Config.get('chat.api_tools.allow_tool_servers', False)
+        if not _allow_tool_servers and tool_ids:
+            tool_ids = [tid for tid in tool_ids if not tid.startswith('server:mcp:')]
+
         if bool(model_capabilities.get('api_terminal', False)) and not terminal_id:
             model_terminal_id = (model.get('info', {}).get('meta', {}) or {}).get('terminalId')
             if model_terminal_id:
