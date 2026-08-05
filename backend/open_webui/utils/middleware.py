@@ -2659,6 +2659,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         and (await Config.get('chat.api_tools.enabled', False))
     )
 
+    # Fork: API Tools — auto-populate features for allowlisted builtin tools.
+    # API callers don't send the 'features' dict (it's a UI-only concept), so
+    # we populate it here based on what the allowlist permits. Without this,
+    # web_search and other feature-gated tools fail silently because their
+    # gates check features.get('web_search') which is always falsy for API.
+    if api_tools_active:
+        if 'web_search' in API_BUILTIN_TOOLS_ALLOWLIST:
+            features['web_search'] = True
+
     chat = None
     if is_saved_chat_id(metadata.get('chat_id')):
         chat = await Chats.get_chat_by_id(metadata['chat_id'])

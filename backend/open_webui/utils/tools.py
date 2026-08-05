@@ -533,6 +533,13 @@ async def get_builtin_tools(
     features = features or {}
     model = model or {}
 
+    # When allowed_categories is set, we're in API Tools mode. Bypass the
+    # features and model-capability gates for allowlisted categories — the
+    # admin's decision to enable api_tools on the model implies they want
+    # these tools available without requiring the API caller to send feature
+    # flags or the model to have per-capability toggles set.
+    api_tools_mode = allowed_categories is not None
+
     # Helper to get model capabilities (defaults to True if not specified)
     def get_model_capability(name: str, default: bool = True) -> bool:
         return (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get(name, default)
@@ -679,8 +686,8 @@ async def get_builtin_tools(
         (allowed_categories is None or 'web_search' in allowed_categories)
         and is_builtin_tool_enabled('web_search')
         and config.get('web.search.enable')
-        and get_model_capability('web_search')
-        and features.get('web_search')
+        and (api_tools_mode or get_model_capability('web_search'))
+        and (api_tools_mode or features.get('web_search'))
         and await has_user_permission('web_search')
     ):
         builtin_functions.extend([search_web, fetch_url])
