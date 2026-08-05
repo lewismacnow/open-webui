@@ -2659,6 +2659,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         and (await Config.get('chat.api_tools.enabled', False))
     )
 
+    # Fork: API Tools — load the admin-configurable allowlist from DB config.
+    # Replaces the previously hardcoded {'time', 'knowledge', 'web_search'}.
+    # Must be defined BEFORE the api_tools_active block below that uses it.
+    _api_allowed = await Config.get('chat.api_tools.allowed_categories', ['time', 'knowledge', 'web_search'])
+    API_BUILTIN_TOOLS_ALLOWLIST = set(_api_allowed) if _api_allowed else set()
+
     # Fork: API Tools — auto-populate features for allowlisted builtin tools.
     # API callers don't send the 'features' dict (it's a UI-only concept), so
     # we populate it here based on what the allowlist permits. Without this,
@@ -2701,11 +2707,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     internal_note = (
         chat is not None and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note'
     )
-
-    # Fork: API Tools — load the admin-configurable allowlist from DB config.
-    # Replaces the previously hardcoded {'time', 'knowledge', 'web_search'}.
-    _api_allowed = await Config.get('chat.api_tools.allowed_categories', ['time', 'knowledge', 'web_search'])
-    API_BUILTIN_TOOLS_ALLOWLIST = set(_api_allowed) if _api_allowed else set()
 
     use_builtin_tools = (
         (internal_note or bool(metadata.get('session_id')) or api_tools_active)
