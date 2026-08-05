@@ -4125,6 +4125,29 @@ async def api_tool_stream_wrapper(response, ctx, events):
     form_data = {**_form_data_src, 'messages': list(_form_data_src.get('messages', []))}
     tools = metadata.get('tools', {}) or {}
 
+    # Fork: Reconnect MCP clients that were disconnected during the gap
+    # between process_chat_payload returning and Path C streaming starting.
+    # The MCP session transport (httpx/streamable_http) can time out or be
+    # cleaned up during this gap. Without reconnection, tool execution fails
+    # with 'MCP client is not connected.'
+    _mcp_clients = metadata.get('mcp_clients', {})
+    if _mcp_clients:
+        for _server_id, _client in _mcp_clients.items():
+            if not getattr(_client, 'session', None):
+                try:
+                    _reconnect = await connect_mcp_server(request, _server_id, user, metadata, {})
+                    if _reconnect:
+                        _new_client, _ = _reconnect
+                        # Patch the existing client object in-place so tool
+                        # function closures (which captured the old client)
+                        # continue to work with the new connection.
+                        _client.session = _new_client.session
+                        _client.exit_stack = _new_client.exit_stack
+                        _client._streams_context = _new_client._streams_context
+                        _client._session_context = _new_client._session_context
+                except Exception as e:
+                    log.warning(f'Path C: failed to reconnect MCP server {_server_id}: {e}')
+
     def wrap_item(item):
         return f'data: {item}\n\n'
 
