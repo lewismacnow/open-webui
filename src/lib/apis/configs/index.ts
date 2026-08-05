@@ -866,6 +866,76 @@ export const setRagVisionConfig = async (
 	};
 };
 
+// --- API Tools ---
+
+export const getApiToolsConfig = async (token: string): Promise<{
+	allowed_categories: string[];
+	allow_tool_servers: boolean;
+}> => {
+	let error = null;
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/api-tools`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = `getApiToolsConfig: ${err}`;
+			console.log(error);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return {
+		allowed_categories: res?.allowed_categories ?? ['time', 'knowledge', 'web_search'],
+		allow_tool_servers: res?.allow_tool_servers ?? false
+	};
+};
+
+export const setApiToolsConfig = async (
+	token: string,
+	config: { allowed_categories: string[]; allow_tool_servers: boolean }
+): Promise<{ allowed_categories: string[]; allow_tool_servers: boolean }> => {
+	let error = null;
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/api-tools`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			allowed_categories: config.allowed_categories,
+			allow_tool_servers: config.allow_tool_servers
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = `setApiToolsConfig: ${err}`;
+			console.log(error);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return {
+		allowed_categories: res?.allowed_categories ?? config.allowed_categories,
+		allow_tool_servers: res?.allow_tool_servers ?? config.allow_tool_servers
+	};
+};
+
 // --- Subagents ---
 
 export const getSubagentsConfig = async (token: string) => {

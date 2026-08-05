@@ -491,6 +491,15 @@ ENABLE_CODE_INTERPRETER = os.getenv('ENABLE_CODE_INTERPRETER', 'True').lower() =
 # Default OFF; per-model capabilities (meta.capabilities.api_tools / api_terminal) further gate this.
 CHAT_API_TOOLS_ENABLED = os.getenv('CHAT_API_TOOLS_ENABLED', 'False').lower() == 'true'
 
+# Fork: API Tools policy — which tool categories are available to API callers.
+# Comma-separated list of builtin tool categories allowed via API.
+# Default matches the original hardcoded allowlist.
+API_TOOLS_ALLOWED_CATEGORIES = [
+    c.strip() for c in os.getenv('API_TOOLS_ALLOWED_CATEGORIES', 'time,knowledge,web_search').split(',') if c.strip()
+]
+# Whether External Tool Servers (MCP) are available via API.
+API_TOOLS_ALLOW_TOOL_SERVERS = os.getenv('API_TOOLS_ALLOW_TOOL_SERVERS', 'False').lower() == 'true'
+
 ENABLE_MEMORIES = os.getenv('ENABLE_MEMORIES', 'True').lower() == 'true'
 ENABLE_MEMORY_SYSTEM_CONTEXT = os.getenv('ENABLE_MEMORY_SYSTEM_CONTEXT', 'True').lower() == 'true'
 ENABLE_MEMORY_BACKGROUND_REVIEW = os.getenv('ENABLE_MEMORY_BACKGROUND_REVIEW', 'False').lower() == 'true'
@@ -3194,6 +3203,8 @@ DEFAULT_CONFIG = {
     'chat.context_pruning.purge_errors': ENABLE_CONTEXT_PRUNING_PURGE_ERRORS,
     'chat.context_pruning.purge_error_turns': CONTEXT_PRUNING_PURGE_ERROR_TURNS,
     'chat.api_tools.enabled': CHAT_API_TOOLS_ENABLED,
+    'chat.api_tools.allowed_categories': API_TOOLS_ALLOWED_CATEGORIES,
+    'chat.api_tools.allow_tool_servers': API_TOOLS_ALLOW_TOOL_SERVERS,
     'task.title.prompt_template': TITLE_GENERATION_PROMPT_TEMPLATE,
     'task.tags.prompt_template': TAGS_GENERATION_PROMPT_TEMPLATE,
     'task.image.prompt_template': IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE,

@@ -947,3 +947,31 @@ async def get_banners(
     user=Depends(get_verified_user),
 ):
     return await Config.get('ui.banners')
+
+
+class ApiToolsConfigForm(BaseModel):
+    allowed_categories: list[str] = ['time', 'knowledge', 'web_search']
+    allow_tool_servers: bool = False
+
+
+@router.get('/api-tools', response_model=ApiToolsConfigForm)
+async def get_api_tools_config(request: Request, user=Depends(get_admin_user)):
+    return {
+        'allowed_categories': (await Config.get('chat.api_tools.allowed_categories'))
+        or ['time', 'knowledge', 'web_search'],
+        'allow_tool_servers': bool(await Config.get('chat.api_tools.allow_tool_servers', False)),
+    }
+
+
+@router.post('/api-tools', response_model=ApiToolsConfigForm)
+async def set_api_tools_config(request: Request, form_data: ApiToolsConfigForm, user=Depends(get_admin_user)):
+    await Config.upsert(
+        {
+            'chat.api_tools.allowed_categories': form_data.allowed_categories,
+            'chat.api_tools.allow_tool_servers': form_data.allow_tool_servers,
+        }
+    )
+    return {
+        'allowed_categories': form_data.allowed_categories,
+        'allow_tool_servers': form_data.allow_tool_servers,
+    }
