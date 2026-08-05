@@ -4117,8 +4117,12 @@ async def api_tool_stream_wrapper(response, ctx, events):
     user = ctx['user']
     model = ctx['model']
     metadata = ctx['metadata']
-    # Deep copy so appended assistant/tool messages don't mutate caller state.
-    form_data = copy.deepcopy(ctx.get('form_data', {}))
+    # Shallow copy + clone the messages list so appended assistant/tool
+    # messages don't mutate caller state. Can't deepcopy the entire
+    # form_data because it contains non-serializable objects (request
+    # state, callables, etc.) that were added during pipeline processing.
+    _form_data_src = ctx.get('form_data', {})
+    form_data = {**_form_data_src, 'messages': list(_form_data_src.get('messages', []))}
     tools = metadata.get('tools', {}) or {}
 
     def wrap_item(item):
