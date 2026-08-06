@@ -214,7 +214,7 @@ export const generateTool = async (
 		headers: {
 			Accept: 'application/json',
 			'Content-Type': 'application/json',
-			authorization: `Bearer ${token}`
+			Authorization: `Bearer ${token}`
 		},
 		body: JSON.stringify(config)
 	})
@@ -223,8 +223,8 @@ export const generateTool = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
-			console.error(err);
+			error = err?.detail ?? err?.message ?? 'Request failed';
+			console.error('generateTool error:', err);
 			return null;
 		});
 

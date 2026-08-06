@@ -67,6 +67,12 @@
 				existing_description: existingDescription || undefined
 			});
 
+			console.log('Tool generation response:', response);
+
+			if (!response || typeof response !== 'object') {
+				throw new Error('Invalid response from server');
+			}
+
 			result = response;
 
 			if (response.validation_passed) {
@@ -77,14 +83,14 @@
 				);
 			} else {
 				validationStatus = 'warning';
-				toast.warning(
+				toast.error(
 					$i18n.t('Tool generated with validation issues') +
 						`: ${response.validation_message}`
 				);
 			}
-		} catch (e) {
-			toast.error($i18n.t('Failed to generate tool'));
-			console.error(e);
+		} catch (e: any) {
+			console.error('Tool generation error:', e);
+			toast.error($i18n.t('Failed to generate tool') + ': ' + (e?.message || String(e)));
 		} finally {
 			generating = false;
 		}
