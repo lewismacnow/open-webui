@@ -7,7 +7,6 @@
 	import { toast } from 'svelte-sonner';
 
 	import Modal from '$lib/components/common/Modal.svelte';
-	import CodeEditor from '$lib/components/common/CodeEditor.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 
@@ -98,11 +97,17 @@
 
 	function handleAccept() {
 		if (result && result.code) {
-			onAccept({
-				code: result.code,
-				name: result.name,
-				description: result.description
-			});
+			try {
+				if (typeof onAccept === 'function') {
+					onAccept({
+						code: result.code,
+						name: result.name,
+						description: result.description
+					});
+				}
+			} catch (e) {
+				console.error('onAccept error:', e);
+			}
 			show = false;
 			prompt = '';
 			result = null;
@@ -249,14 +254,8 @@
 					</div>
 
 					<!-- Code Preview -->
-					<div class="mb-3 min-h-[200px] overflow-hidden rounded-lg border border-gray-300 dark:border-gray-700">
-						<CodeEditor
-							value={result.code}
-							lang="python"
-							className="text-[11px]"
-							onChange={(value) => { if (result) result.code = value; }}
-							onSave={() => {}}
-						/>
+					<div class="mb-3 max-h-[400px] overflow-auto rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 p-3">
+						<pre class="text-[11px] font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300">{result.code}</pre>
 					</div>
 
 					<!-- Action Buttons -->
