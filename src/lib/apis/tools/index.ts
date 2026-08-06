@@ -190,6 +190,51 @@ export const getToolById = async (token: string, id: string) => {
 	return res;
 };
 
+export const generateTool = async (
+	token: string,
+	config: {
+		model: string;
+		prompt: string;
+		existing_code?: string;
+		existing_name?: string;
+		existing_description?: string;
+	}
+): Promise<{
+	code: string;
+	name: string;
+	description: string;
+	validation_passed: boolean;
+	validation_message: string;
+	attempts: number;
+}> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/tools/generate`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(config)
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const updateToolById = async (token: string, id: string, tool: object) => {
 	let error = null;
 

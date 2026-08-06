@@ -16,12 +16,14 @@
 	import AccessButton from '$lib/components/common/AccessButton.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
+	import ToolGeneratorModal from './ToolGeneratorModal.svelte';
 
 	let formElement = null;
 	let loading = false;
 
 	let showConfirm = false;
 	let showAccessControlModal = false;
+	let showGeneratorModal = false;
 
 	export let edit = false;
 	export let clone = false;
@@ -289,6 +291,28 @@ class Tools:
 			</div>
 
 			<div class="flex shrink-0 items-center gap-1 pr-0.5">
+				<button
+					class="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-gradient-to-r from-purple-500 to-indigo-500 text-white hover:from-purple-600 hover:to-indigo-600 transition"
+					on:click={() => (showGeneratorModal = true)}
+					type="button"
+				>
+					<svg
+						xmlns="http://www.w3.org/2000/svg"
+						fill="none"
+						viewBox="0 0 24 24"
+						stroke-width="2"
+						stroke="currentColor"
+						class="size-3.5"
+					>
+						<path
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.456-2.456L14.25 6l1.035-.259a3.375 3.375 0 0 0 2.456-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z"
+						/>
+					</svg>
+					{$i18n.t(edit ? 'Edit with Model' : 'Generate with Model')}
+				</button>
+
 				<AccessButton
 					on:click={() => {
 						showAccessControlModal = true;
@@ -349,6 +373,23 @@ class Tools:
 		</div>
 	</form>
 </div>
+
+<ToolGeneratorModal
+	bind:show={showGeneratorModal}
+	existingCode={content}
+	existingName={name}
+	existingDescription={meta?.description ?? ''}
+	onAccept={(result) => {
+		name = result.name;
+		if (!edit) {
+			id = nameToId(result.name);
+		}
+		meta = { ...meta, description: result.description };
+		_content = result.code;
+		content = result.code;
+		toast.success($i18n.t('Generated tool applied to editor'));
+	}}}
+/>
 
 <ConfirmDialog
 	bind:show={showConfirm}
