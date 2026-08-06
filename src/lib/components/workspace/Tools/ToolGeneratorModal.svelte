@@ -248,7 +248,7 @@
 							value={result.code}
 							lang="python"
 							className="text-[11px]"
-							onChange={() => {}}
+							onChange={(value) => { if (result) result.code = value; }}
 							onSave={() => {}}
 						/>
 					</div>

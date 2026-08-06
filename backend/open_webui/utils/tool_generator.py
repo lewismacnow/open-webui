@@ -84,12 +84,10 @@ Output ONLY the Python code wrapped in a single ```python code block. No explana
 
 def _extract_code_from_response(text: str) -> str:
     """Extract Python code from a model response that may have markdown fences."""
-    # Try to extract from ```python ... ``` fences
-    match = re.search(r'```python\s*\n(.*?)```', text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    # Try generic ``` ... ``` fences
-    match = re.search(r'```\s*\n(.*?)```', text, re.DOTALL)
+    text = text.strip()
+    # Match from the FIRST opening fence to the LAST closing fence — handles
+    # nested code blocks inside docstrings/examples without truncating.
+    match = re.search(r'```(?:python|py)?\s*\n(.*)```\s*$', text, re.DOTALL)
     if match:
         return match.group(1).strip()
     # No fences — assume the entire response is code

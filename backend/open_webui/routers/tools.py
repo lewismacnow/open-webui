@@ -442,6 +442,14 @@ class ToolGenerationForm(BaseModel):
 @router.post('/generate')
 async def generate_tool(request: Request, form_data: ToolGenerationForm, user=Depends(get_verified_user)):
     """Generate tool code via AI model with self-improvement validation."""
+    if not ENABLE_PLUGINS:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Tools are disabled')
+
+    if user.role != 'admin' and not await has_permission(
+        user.id, 'workspace.tools', await Config.get('user.permissions')
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.UNAUTHORIZED)
+
     models = request.app.state.MODELS
     model_id = form_data.model
     if model_id not in models:
@@ -460,8 +468,8 @@ async def generate_tool(request: Request, form_data: ToolGenerationForm, user=De
                             'description': spec.get('description', '')[:200],
                         }
                     )
-    except Exception:
-        pass  # non-critical
+    except Exception as e:
+        log.debug(f'Failed to collect existing tool specs for generation: {e}')
 
     result = await generate_tool_code(
         request=request,
