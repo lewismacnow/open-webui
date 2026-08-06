@@ -38,6 +38,7 @@ from open_webui.utils.plugin import (
     replace_imports,
     resolve_valves_schema_options,
 )
+from open_webui.utils.tool_generator import generate_tool_code
 from open_webui.utils.tools import get_tool_servers, get_tool_specs
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -423,6 +424,57 @@ async def create_new_tools(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.ID_TAKEN,
         )
+
+
+############################
+# GenerateTool
+############################
+
+
+class ToolGenerationForm(BaseModel):
+    model: str
+    prompt: str
+    existing_code: str = ''
+    existing_name: str = ''
+    existing_description: str = ''
+
+
+@router.post('/generate')
+async def generate_tool(request: Request, form_data: ToolGenerationForm, user=Depends(get_verified_user)):
+    """Generate tool code via AI model with self-improvement validation."""
+    models = request.app.state.MODELS
+    model_id = form_data.model
+    if model_id not in models:
+        raise HTTPException(404, ERROR_MESSAGES.MODEL_NOT_FOUND())
+
+    # Fetch existing tool specs for the "integrated tools" feature
+    existing_tool_specs = []
+    try:
+        all_tools = await Tools.get_tools()
+        for tool in all_tools[:20]:  # limit to prevent token overflow
+            if tool.specs:
+                for spec in tool.specs:
+                    existing_tool_specs.append(
+                        {
+                            'name': spec.get('name', ''),
+                            'description': spec.get('description', '')[:200],
+                        }
+                    )
+    except Exception:
+        pass  # non-critical
+
+    result = await generate_tool_code(
+        request=request,
+        model_id=model_id,
+        user_prompt=form_data.prompt,
+        existing_code=form_data.existing_code,
+        existing_name=form_data.existing_name,
+        existing_description=form_data.existing_description,
+        user=user,
+        existing_tool_specs=existing_tool_specs if existing_tool_specs else None,
+    )
+
+    return result
 
 
 ############################
