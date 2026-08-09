@@ -27,7 +27,14 @@ def _event_text(message: str, description: str | None = None, event_data: dict |
     return '\n'.join(lines)
 
 
-async def post_webhook(name: str, url: str, message: str, event_data: dict, description: str | None = None) -> bool:
+async def post_webhook(
+    name: str,
+    url: str,
+    message: str,
+    event_data: dict,
+    description: str | None = None,
+    headers: list[dict[str, str]] | None = None,
+) -> bool:
     try:
         log.debug(f'post_webhook: {url}, {message}, {event_data}')
         # Block private-IP / loopback / cloud-metadata targets — the URL is
@@ -82,9 +89,22 @@ async def post_webhook(name: str, url: str, message: str, event_data: dict, desc
 
         log.debug(f'payload: {payload}')
         async with get_ssrf_safe_session() as session:
+            # Build request headers from optional custom headers. Each entry has
+            # shape {'key': str, 'value': str}. Filters out empty keys/values.
+            request_headers: dict[str, str] = {}
+            if isinstance(headers, list):
+                for entry in headers:
+                    if not isinstance(entry, dict):
+                        continue
+                    key = str(entry.get('key') or '').strip()
+                    value = str(entry.get('value') or '')
+                    if key and value:
+                        request_headers[key] = value
+
             async with session.post(
                 url,
                 json=payload,
+                headers=request_headers or None,
                 ssl=AIOHTTP_CLIENT_SESSION_SSL,
                 allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS,
             ) as r:

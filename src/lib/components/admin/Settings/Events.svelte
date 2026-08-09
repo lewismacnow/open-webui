@@ -49,7 +49,8 @@
 		name: '',
 		url: '',
 		enabled: true,
-		events: ['*'] as string[]
+		events: ['*'] as string[],
+		headers: [] as Array<{ key: string; value: string }>
 	};
 
 	const inputClass =
@@ -103,7 +104,8 @@
 			name: '',
 			url: '',
 			enabled: true,
-			events: ['*']
+			events: ['*'],
+			headers: []
 		};
 		pattern = '';
 		resetTargets();
@@ -122,7 +124,8 @@
 			name: webhook.name,
 			url: webhook.url,
 			enabled: webhook.enabled,
-			events: webhook.events?.length ? [...webhook.events] : ['*']
+			events: webhook.events?.length ? [...webhook.events] : ['*'],
+			headers: webhook.headers?.length ? [...webhook.headers] : []
 		};
 		pattern = '';
 
@@ -336,11 +339,17 @@
 	};
 
 	const saveWebhook = async () => {
+		// Filter out empty header key/value pairs before saving
+		const cleanHeaders = (form.headers ?? [])
+			.filter((h) => h.key.trim() !== '' && h.value !== '')
+			.map((h) => ({ key: h.key.trim(), value: h.value }));
+
 		const payload = {
 			name: form.name || (form.id === 'default' ? 'Default webhook' : 'Webhook'),
 			url: form.url,
 			enabled: form.enabled,
 			events: form.events.length ? form.events : ['*'],
+			headers: cleanHeaders,
 			targets: selectedTargets()
 		};
 
@@ -448,6 +457,55 @@
 							</Tooltip>
 						</div>
 					</div>
+				</div>
+
+				<div class="mt-3">
+					<div class="flex items-center justify-between">
+						<label class={`text-xs text-gray-500`}
+							>{$i18n.t('Headers (optional)')}
+							<span class="ml-1 text-gray-400 text-[0.625rem]"
+								>{$i18n.t('Sent as HTTP headers on the POST request')}</span
+							>
+						</label>
+						<button
+							type="button"
+							class="text-xs text-gray-700 dark:text-gray-300 hover:underline"
+							on:click={() => (form.headers = [...form.headers, { key: '', value: '' }])}
+						>
+							{$i18n.t('Add header')}
+						</button>
+					</div>
+
+					{#if form.headers.length > 0}
+						<div class="mt-2 flex flex-col gap-1.5">
+							{#each form.headers as header, i}
+								<div class="flex items-center gap-1.5">
+									<input
+										class={`flex-1 text-xs font-mono ${inputClass}`}
+										type="text"
+										placeholder={$i18n.t('Header name')}
+										autocomplete="off"
+										bind:value={header.key}
+									/>
+									<input
+										class={`flex-1 text-xs font-mono ${inputClass}`}
+										type="text"
+										placeholder={$i18n.t('Value')}
+										autocomplete="off"
+										bind:value={header.value}
+									/>
+									<button
+										type="button"
+										aria-label={$i18n.t('Remove header')}
+										class="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500"
+										on:click={() => (form.headers = form.headers.filter((_, j) => j !== i))}
+									>
+										<XMark className="size-3.5" strokeWidth="2" />
+									</button>
+								</div>
+							{/each}
+						</div>
+					{/if}
 				</div>
 
 				<div class="mt-3">

@@ -698,6 +698,23 @@ SENSITIVE_KEYS = {
 SAFE_ACTOR_FIELDS = ('id', 'name', 'email', 'role', 'created_at', 'updated_at')
 
 
+def _normalize_event_webhook_headers(headers: Any) -> list[dict[str, str]]:
+    if not isinstance(headers, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+    for entry in headers:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get('key') or '').strip()
+        if not key or key in seen_keys:
+            continue
+        value = str(entry.get('value') or '')
+        normalized.append({'key': key, 'value': value})
+        seen_keys.add(key)
+    return normalized
+
+
 def normalize_event_webhook(webhook: dict[str, Any], *, create: bool = False) -> dict[str, Any]:
     now = int(time.time())
     webhook_id = str(webhook.get('id') or uuid.uuid4())
@@ -724,6 +741,7 @@ def normalize_event_webhook(webhook: dict[str, Any], *, create: bool = False) ->
         'url': url,
         'enabled': bool(webhook.get('enabled', True)),
         'events': events,
+        'headers': _normalize_event_webhook_headers(webhook.get('headers')),
         'targets': targets,
         'created_at': int(webhook.get('created_at') or now),
         'updated_at': now if create or webhook.get('updated_at') is None else int(webhook.get('updated_at') or now),
@@ -1045,6 +1063,7 @@ async def dispatch_webhook_event(app: Any, event: Event) -> None:
                 message,
                 event.model_dump(),
                 description=definition.description if definition else None,
+                headers=webhook.get('headers'),
             )
         except Exception:
             log.exception('Event webhook failed for %s', webhook.get('id'))
