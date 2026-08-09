@@ -3049,11 +3049,17 @@ async def get_app_config(request: Request):
     }
 
 
+class EventWebhookHeaderForm(BaseModel):
+    key: str
+    value: str
+
+
 class EventWebhookForm(BaseModel):
     name: str | None = None
     url: str
     enabled: bool = True
     events: list[str] | None = None
+    headers: list[EventWebhookHeaderForm] | None = None
     targets: list[dict[str, str]] | None = None
 
 
@@ -3062,6 +3068,7 @@ class EventWebhookUpdateForm(BaseModel):
     url: str | None = None
     enabled: bool | None = None
     events: list[str] | None = None
+    headers: list[EventWebhookHeaderForm] | None = None
     targets: list[dict[str, str]] | None = None
 
 
@@ -3087,6 +3094,7 @@ async def create_event_webhook(form_data: EventWebhookForm, user=Depends(get_adm
                 'url': form_data.url,
                 'enabled': form_data.enabled,
                 'events': form_data.events,
+                'headers': [h.model_dump() for h in form_data.headers] if form_data.headers else None,
                 'targets': form_data.targets,
             }
         )
