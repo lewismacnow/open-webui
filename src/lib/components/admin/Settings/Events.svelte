@@ -708,6 +708,193 @@
 					{/if}
 				</div>
 
+				<div class="mt-3 border-t border-gray-100 dark:border-gray-850 pt-3">
+					<details class="text-xs">
+						<summary class="cursor-pointer text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 select-none">
+							{$i18n.t('Payload schema')}
+							<span class="ml-1 text-gray-400 text-[0.625rem]">
+								{$i18n.t('JSON body sent to the webhook URL')}
+							</span>
+						</summary>
+						<div class="mt-2 max-h-72 overflow-auto rounded-lg border border-gray-100 dark:border-gray-850 bg-gray-50/40 dark:bg-white/[0.03] p-3">
+							<p class="text-gray-500 dark:text-gray-400 mb-2">
+								{$i18n.t(
+									'Default payload (any URL other than Slack / Discord / Teams). ' +
+									'Service-specific slugs send a simplified payload instead — see notes below.'
+								)}
+							</p>
+							<pre class="text-[0.6875rem] font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300">{`{
+  "schema": "open-webui.events.v1",
+  "id": "evt_<uuid>",
+  "event": "config.updated",
+  "resource": "config",
+  "operation": "updated",
+  "created_at": 1734567890,
+  "instance_id": "owui_<uuid>",
+  "version": "0.11.0",
+  "source": "open-webui:matomo prod",
+  "actor": {
+    "id": "user_<uuid>",
+    "name": "Jane Doe",
+    "email": "jane@example.com",
+    "role": "user"
+  },
+  "subject": {
+    "id": "user_<uuid>",
+    "name": "Jane Doe",
+    "email": "jane@example.com",
+    "role": "user"
+  },
+  "data": {
+    "<event-specific>": "..."
+  },
+  "message": "Config updated"
+}`}</pre>
+
+							<details class="mt-3 text-gray-500 dark:text-gray-400">
+								<summary class="cursor-pointer text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 select-none">
+									{$i18n.t('Field reference')}
+								</summary>
+								<table class="mt-2 w-full text-[0.6875rem]">
+									<thead class="text-left text-gray-500 dark:text-gray-400">
+										<tr>
+											<th class="font-medium py-0.5 pr-2">{$i18n.t('Field')}</th>
+											<th class="font-medium py-0.5 pr-2">{$i18n.t('Type')}</th>
+											<th class="font-medium py-0.5">{$i18n.t('Notes')}</th>
+										</tr>
+									</thead>
+									<tbody>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">schema</td>
+											<td class="py-0.5 pr-2">string</td>
+											<td class="py-0.5">{$i18n.t('Schema version (e.g. open-webui.events.v1).')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">id</td>
+											<td class="py-0.5 pr-2">string</td>
+											<td class="py-0.5">{$i18n.t('Unique event ID (UUID).')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">event</td>
+											<td class="py-0.5 pr-2">string</td>
+											<td class="py-0.5">{$i18n.t('Event name (e.g. config.updated, chat.completed).')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">resource</td>
+											<td class="py-0.5 pr-2">string</td>
+											<td class="py-0.5">{$i18n.t('Resource type (e.g. config, chat, user).')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">operation</td>
+											<td class="py-0.5 pr-2">string</td>
+											<td class="py-0.5">{$i18n.t('Operation performed (e.g. created, updated, deleted).')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">created_at</td>
+											<td class="py-0.5 pr-2">integer</td>
+											<td class="py-0.5">{$i18n.t('Unix timestamp (seconds).')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">instance_id</td>
+											<td class="py-0.5 pr-2">string / null</td>
+											<td class="py-0.5">{$i18n.t('Unique instance ID (null if not configured).')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">version</td>
+											<td class="py-0.5 pr-2">string</td>
+											<td class="py-0.5">{$i18n.t('Open WebUI version (e.g. 0.11.0).')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">source</td>
+											<td class="py-0.5 pr-2">string</td>
+											<td class="py-0.5">{$i18n.t('Source identifier (e.g. open-webui).')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">actor</td>
+											<td class="py-0.5 pr-2">object / null</td>
+											<td class="py-0.5">{$i18n.t('User who triggered the event.')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">subject</td>
+											<td class="py-0.5 pr-2">object / null</td>
+											<td class="py-0.5">{$i18n.t('Resource subject (the entity the event is about).')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">data</td>
+											<td class="py-0.5 pr-2">object</td>
+											<td class="py-0.5">{$i18n.t('Event-specific payload.')}</td>
+										</tr>
+										<tr>
+											<td class="font-mono py-0.5 pr-2">message</td>
+											<td class="py-0.5 pr-2">string / null</td>
+											<td class="py-0.5">{$i18n.t('Human-readable event message.')}</td>
+										</tr>
+									</tbody>
+								</table>
+							</details>
+
+							<details class="mt-3 text-gray-500 dark:text-gray-400">
+								<summary class="cursor-pointer text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 select-none">
+									{$i18n.t('Service-specific payloads')}
+								</summary>
+								<div class="mt-2 space-y-2 text-[0.6875rem]">
+									<div>
+										<p class="font-medium text-gray-700 dark:text-gray-300">
+											{$i18n.t('Slack')}
+											<span class="font-mono text-gray-500">https://hooks.slack.com/...</span>
+										</p>
+										<pre class="font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300 mt-1">{`{
+  "text": "<event name>\\n<description>\\nEvent: <event name>"
+}`}</pre>
+									</div>
+									<div>
+										<p class="font-medium text-gray-700 dark:text-gray-300">
+											{$i18n.t('Discord')}
+											<span class="font-mono text-gray-500">https://discord.com/api/webhooks/...</span>
+										</p>
+										<pre class="font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300 mt-1">{`{
+  "content": "<event name>\\n<description>\\nEvent: <event name>"
+}`}</pre>
+									</div>
+									<div>
+										<p class="font-medium text-gray-700 dark:text-gray-300">
+											{$i18n.t('Microsoft Teams')}
+											<span class="font-mono text-gray-500">webhook.office.com/...</span>
+										</p>
+										<pre class="font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300 mt-1">{`{
+  "@type": "MessageCard",
+  "@context": "http://schema.org/extensions",
+  "themeColor": "0076D7",
+  "summary": "<event name>",
+  "sections": [
+    {
+      "activityTitle": "<event name>",
+      "activitySubtitle": "<webhook name> (0.11.0) - <operation>",
+      "activityImage": "<favicon url>",
+      "text": "<description>",
+      "facts": [
+        { "name": "event", "value": "<event name>" },
+        { "name": "id", "value": "<user id>" },
+        ...
+      ],
+      "markdown": true
+    }
+  ]
+}`}</pre>
+									</div>
+								</div>
+							</details>
+
+							<div class="mt-3 text-gray-500 dark:text-gray-400 text-[0.6875rem]">
+								{$i18n.t('HTTP request')}:
+							</div>
+							<pre class="font-mono text-[0.6875rem] text-gray-700 dark:text-gray-300 mt-1">{`POST /events
+Content-Type: application/json
+<configuration headers, if any>`}</pre>
+						</div>
+					</details>
+				</div>
+
 				<div class="flex justify-between items-center pt-4 text-sm font-normal">
 					<div>
 						{#if editing}
