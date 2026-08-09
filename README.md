@@ -4,16 +4,46 @@
 >
 > This is a customised fork. Upstream is treated as a source of enhancements that we periodically merge in; our own changes are maintained on top. The high-level deviations from upstream are:
 >
+> ### Model resilience & tooling
+>
 > | Area | Tweak / Enhancement | Why |
 > |------|---------------------|-----|
 > | **Model resilience** | LLM provider **failover** — an ordered list of OpenAI-compatible providers per model (incl. base-model failover), with provider health tracking and streaming failover (`utils/failover.py`, `utils/provider_health.py`). | A single provider outage no longer breaks chat; requests transparently fall through to the next healthy provider. |
+> | **External API tools** | **API Tools** — for models with the `api_tools` capability, server-side tool execution is enabled for API callers (no browser socket). Path-C streaming handler runs the tool loop, attaches custom `x_open_webui.tool_event` / `x_open_webui.sources` / `x_open_webui.tools_used` fields to the OpenAI-format response, and auto-resolves `model.meta.toolIds` from the request. Privacy-bounded: only allowlisted builtin tools (`time`, `knowledge`, `web_search`) are exposed. | Lets external clients trigger the same builtin tools the chat UI can — web search, knowledge queries, etc. — without a browser session. |
+> | **API Tools Policy** | **Admin → Settings → API Tools** — per-category builtin tool allowlist + master switch + external tool-server toggle, all config-driven (`chat.api_tools.allowed_categories`, `chat.api_tools.allow_tool_servers`) and editable in the UI. | Admins can grant/revoke specific builtin tools per API deployment without code changes. |
+>
+> ### RAG & retrieval
+>
+> | Area | Tweak / Enhancement | Why |
+> |------|---------------------|-----|
 > | **RAG tuning** | **Per-model and per-knowledge-base "Document Snippets Returned" (top-k) override.** | Attaching several knowledge bases to a model otherwise returns `top_k × N` snippets and blows the context window; per-KB caps let us fine-tune retrieval (e.g. 5 from A, 2 from B). |
+> | **Vision Image RAG** | **Vision Support Model** — when a non-vision model receives images, a vision-capable support model (`rag.vision.support_model`) is called server-side to describe each image (concise visual description + OCR + context), then the description is injected into the prompt with an explicit "[VISION SUPPORT]…treat this as if you can see the image" framing. Configurable system prompt (`rag.vision.system_prompt`) lets admins tune the description behavior. | Makes vision-capable agents usable for non-vision models without changing the user-facing model selection. |
+> | **Vision description caching** | **Three-layer description cache** (in-memory LRU → Redis → message-level `vision_context` annotation on the DB message). Same image hashed + same user-context = cache hit, no re-describe. | A 50-turn conversation with the same screenshots no longer re-pays the vision-model cost or latency on every turn. |
+> | **Context compaction** | **Summarization-based compaction** — when message tokens exceed `chat.context_compaction.token_threshold`, older messages are summarized by a configurable model (`chat.context_compaction.model`) and the summary is persisted as `contextSummary` on the DB message. Customizable retention percentage and prompt template (`chat.context_compaction.prompt_template`). | Models with long-burning sessions don't run out of context window. |
+> | **Context pruning** | **Lightweight deterministic pruning** — three pre-compaction strategies: tool output replacement (keep N most recent, replace older with placeholders), identical consecutive tool-call dedup, and errored tool-call purge (after N turns). Configurable via `chat.context_pruning.*`. | Token waste from old tool outputs and duplicate error messages is removed before the more expensive LLM summarization runs. |
+>
+> ### Knowledge ingestion & UX
+>
+> | Area | Tweak / Enhancement | Why |
+> |------|---------------------|-----|
 > | **Knowledge ingestion** | **Async, durable embedding pipeline** — files upload first, then a background worker embeds them, tracking per-file status (`pending`/`processing`/`completed`/`failed`) on the `knowledge_file` link. Resumes after restart. | Large imports (10k+ files) no longer require keeping a browser session open, and progress survives interruptions/restarts instead of starting over. |
 > | **Knowledge ingestion** | **Stuck-file recovery** — extraction orphans (interrupted uploads) are re-driven automatically by the worker and via a manual "Recover" action. | Files left mid-extraction by a crash/restart used to spin forever; they now self-heal. |
 > | **Knowledge ingestion** | **Duplicate rejection by content hash** before vectorising. | Avoids wasted storage, duplicate embeddings, and phantom entries from re-uploading the same document. |
 > | **Knowledge UX** | **Per-file embedding status badges, embedding progress banner, retry, and bounded-concurrency (parallel) bulk/directory upload.** | Makes the success/failure of every file reviewable and speeds up large directory imports. |
 > | **Knowledge sync** | **Incremental directory sync** (checksum diff add/modify/delete) endpoints. | Re-syncing a source folder only uploads what actually changed. |
 > | **Performance** | **Paginated Files API** and a **`metadata_only` knowledge listing** view (defers the heavy `data` column). | Knowledge bases with tens of thousands of files load without timing out or exhausting memory. |
+>
+> ### Tool editor
+>
+> | Area | Tweak / Enhancement | Why |
+> |------|---------------------|-----|
+> | **AI tool generator** | **"Edit with Model" button** in the tool editor opens a popup where a user describes a tool in plain language; a selected model generates the full Python tool (`class Tools:`, typed methods, docstrings, optional `class Valves`). The backend validates the generated code via `load_tool_module_by_id` + `get_tool_specs` and self-improvement-loops up to 3 attempts on validation failure. System prompt includes the existing workspace's tool specs so the model can compose rather than duplicate. | Lets non-developers create tools without writing Python; enables rapid iteration for power users. |
+> | **Webhook custom headers** | **Optional custom HTTP headers** on event webhook config (e.g. `Authorization: Bearer <token>`). Editable key-value pairs in the webhook modal; stored on the webhook config and added to the downstream `session.post()` request. | External automation tools (n8n, Make, Zapier, custom bridges) that require API keys or signature headers can now receive webhooks reliably. |
+>
+> ### Ops
+>
+> | Area | Tweak / Enhancement | Why |
+> |------|---------------------|-----|
 > | **Ops** | **Dockerfile fix and pinned `requirements.txt`.** | Reproducible builds and a working image. |
 >
 > _For the authoritative, commit-level diff: `git diff upstream/main...HEAD`._
