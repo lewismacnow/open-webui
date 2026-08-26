@@ -1786,7 +1786,7 @@ async def _try_provider_candidate(
             streaming = True
             provider_event = (
                 'data: '
-                + json.dumps(
+                + JSONCodec.dumps(
                     {
                         'provider_selected': {
                             'url': candidate.url,
@@ -1825,7 +1825,7 @@ async def _try_provider_candidate(
 
         if r.status >= 400:
             if is_retryable_error(r.status, None):
-                detail = response if isinstance(response, str) else json.dumps(response)
+                detail = response if isinstance(response, str) else JSONCodec.dumps(response)
                 raise RetryableProviderError(
                     status_code=r.status,
                     detail=detail[:500],
