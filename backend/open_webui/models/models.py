@@ -104,7 +104,7 @@ class ModelMeta(BaseModel):
     capabilities: dict | None = None
     knowledge: list[Any] | None = None
 
-    failover_providers: Optional[list[FailoverProvider]] = None
+    failover_providers: list[FailoverProvider] | None = None
     """
         Ordered list of OpenAI-compatible providers to try when this model
         is invoked. First entry is primary. If unset, legacy base_model_id
