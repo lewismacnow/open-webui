@@ -779,6 +779,15 @@ async def query_collection(
     # Generate all query embeddings (in one call)
     query_embeddings = await embedding_function(queries, prefix=RAG_EMBEDDING_QUERY_PREFIX)
     log.debug('query_collection: processing %s queries across %s collections', len(queries), len(collection_names))
+    # DIAGNOSTIC: surfaces what the embedder actually saw — useful when
+    # auto-RAG silently returns no sources. WARNING level so it shows up at
+    # default LOG_LEVEL=INFO without having to flip to DEBUG.
+    log.warning(
+        'query_collection: queries=%r collection_names=%r prefix=%s',
+        queries,
+        collection_names,
+        RAG_EMBEDDING_QUERY_PREFIX,
+    )
 
     task_results = await asyncio.gather(
         *[
@@ -1650,16 +1659,18 @@ async def get_sources_from_items(
             if BYPASS_RETRIEVAL_ACCESS_CONTROL:
                 collection_names.append(item['collection_name'])
             else:
-                log.debug(
-                    "get_sources_from_items: ignoring untrusted direct collection_name '%s' on item without type",
+                log.warning(
+                    "get_sources_from_items: ignoring untrusted direct collection_name '%s' on item without type (item keys=%s)",
                     item.get('collection_name'),
+                    sorted(item.keys()),
                 )
         elif item.get('collection_names'):
             if BYPASS_RETRIEVAL_ACCESS_CONTROL:
                 collection_names.extend(item['collection_names'])
             else:
-                log.debug(
-                    'get_sources_from_items: ignoring untrusted direct collection_names on item without type',
+                log.warning(
+                    'get_sources_from_items: ignoring untrusted direct collection_names on item without type (item keys=%s)',
+                    sorted(item.keys()),
                 )
 
         # If query_result is None

@@ -2061,6 +2061,28 @@ async def chat_completion_files_handler(
                 'rag.enable_hybrid_search',
                 'rag.full_context',
             )
+            # DIAGNOSTIC: surface the inputs to get_sources_from_items at WARNING
+            # level so item drops inside the dispatcher are traceable from the
+            # chat-completions path. Useful when auto-RAG silently returns no
+            # sources despite the embedder being called.
+            log.warning(
+                'chat_completion_files_handler: dispatching %d files with %d queries; files_meta=%s; queries=%r',
+                len(files),
+                len(queries),
+                [
+                    {
+                        'id': f.get('id'),
+                        'type': f.get('type'),
+                        'name': f.get('name'),
+                        'has_collection_name': bool(f.get('collection_name')),
+                        'has_collection_names': bool(f.get('collection_names')),
+                        'legacy': bool(f.get('legacy')),
+                        'context': f.get('context'),
+                    }
+                    for f in files[:8]
+                ],
+                queries,
+            )
             # Directly await async get_sources_from_items (no thread needed - fully async now)
             sources = await get_sources_from_items(
                 request=request,
@@ -2663,9 +2685,17 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         knowledge_files = []
         for item in model_knowledge:
             if item.get('collection_name'):
+                # Legacy single-collection item. Preserve any original ``id``
+                # (KB UUID) and add the routing fields the dispatcher in
+                # ``retrieval/utils.get_sources_from_items`` requires — without
+                # ``type`` + ``collection_names`` the item is silently dropped
+                # (the dispatcher logs "ignoring untrusted direct collection_name
+                # on item without type"), which surfaces as auto-RAG returning
+                # no sources even though the embedder was called.
                 knowledge_file = {
-                    'id': item.get('collection_name'),
-                    'name': item.get('name'),
+                    **item,
+                    'type': 'collection',
+                    'collection_names': [item.get('collection_name')],
                     'legacy': True,
                 }
             elif item.get('collection_names'):
