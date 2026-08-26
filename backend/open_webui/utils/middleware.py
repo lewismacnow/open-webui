@@ -2362,6 +2362,30 @@ async def connect_mcp_server(
     return client, tool_specs
 
 
+def _merge_into_metadata_files(metadata: dict, new_files: list[dict]) -> list[dict]:
+    """Append knowledge items into ``metadata['files']`` with dedup.
+
+    Both the folder-knowledge and model-attached-knowledge injections below
+    populate ``form_data['files']`` (top-level), but
+    ``chat_completion_files_handler`` reads from ``body['metadata']['files']``
+    — a different dict path. Without mirroring, the handler sees an empty
+    list and skips the embedding API call + RAG lookup entirely (the
+    "Searching knowledge" status event still fires, misleadingly). This helper
+    is the bridge: it appends ``new_files`` into ``metadata['files']``,
+    skipping any entry that is already present (matched on id /
+    collection_names / type tuple, so the same collection isn't RAG'd twice).
+    """
+    metadata_files = metadata.get('files') or []
+    seen = {(f.get('id'), f.get('collection_names'), f.get('type')) for f in metadata_files}
+    for f in new_files:
+        key = (f.get('id'), f.get('collection_names'), f.get('type'))
+        if key not in seen:
+            metadata_files.append(f)
+            seen.add(key)
+    metadata['files'] = metadata_files
+    return metadata_files
+
+
 async def process_chat_payload(request, form_data, user, metadata, model):
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
@@ -2583,6 +2607,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     *allowed_files,
                     *form_data.get('files', []),
                 ]
+                # CRITICAL: also push into metadata['files'] so
+                # chat_completion_files_handler — which reads from
+                # body['metadata']['files'], not body['files'] — actually picks
+                # them up and triggers the embedding API call + RAG lookup.
+                # Without this mirror, the handler reads an empty file list and
+                # silently skips RAG for folder-attached knowledge.
+                _merge_into_metadata_files(metadata, allowed_files)
                 # Also expose to builtin knowledge tools for follow-up searches.
                 metadata['folder_knowledge'] = allowed_files
 
@@ -2595,9 +2626,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # mode (default/native/legacy). Upstream gates this on `function_calling == 'legacy'`,
     # which means default & native modes only expose knowledge as an optional builtin
     # tool the model may never call — so RAG silently never runs. Dropping the gate
-    # guarantees auto-RAG. (chat_completion_files_handler below runs whenever the
-    # file_context capability is on, which is the default.) The builtin knowledge
-    # tools remain available for the model to do follow-up searches if it needs to.
+    # guarantees auto-RAG.
+    #
+    # Two writes are required because chat_completion_files_handler reads from
+    # body['metadata']['files'] (a different dict path from body['files']). Writing
+    # only to form_data['files'] is the dead-letter bug fixed by this fork — the
+    # "Searching knowledge" status event would fire but no embedding API call
+    # would land. _merge_into_metadata_files mirrors the same items into the
+    # path the handler reads from. The builtin knowledge tools remain available
+    # for the model to do follow-up searches if it decides to call them.
     if model_knowledge:
         await event_emitter(
             {
@@ -2645,6 +2682,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         files = form_data.get('files', [])
         files.extend(knowledge_files)
         form_data['files'] = files
+
+        # Mirror into metadata['files'] so chat_completion_files_handler picks
+        # them up and triggers the embedding API call + RAG lookup (the user's
+        # initial message gets source-grounded automatically — see the
+        # _merge_into_metadata_files docstring for the dead-letter bug
+        # background).
+        _merge_into_metadata_files(metadata, knowledge_files)
 
     variables = form_data.pop('variables', None)
     payload_tools = form_data.get('tools', None)  # snapshot before filters
