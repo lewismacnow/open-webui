@@ -8,22 +8,19 @@ cache are deprioritised, but never removed outright — if every provider
 looks unhealthy we still try them rather than hard-failing.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 import logging
 import time
+from types import SimpleNamespace
 from typing import Optional
 
 from fastapi import Request
 
 from open_webui.models.config import Config
+from open_webui.utils import provider_inflight
 
 log = logging.getLogger(__name__)
-
-
-# Capability names that the resolver understands today.
-CAPABILITY_TOOLS = 'tools'
-CAPABILITY_VISION = 'vision'
 
 
 class RetryableProviderError(Exception):
@@ -57,25 +54,13 @@ class ProviderCandidate:
     model_name: str
     api_config: dict
     prefix_id: Optional[str] = None
-    capabilities: list[str] = field(default_factory=list)
+    # Max concurrent in-flight requests before the resolver sinks this
+    # candidate to the at-capacity tier (sourced from the chain entry's
+    # max_concurrent). None = no configured limit.
+    max_concurrent: Optional[int] = None
     # Position in the original failover list (0 = primary). Surfaced to the
     # frontend so the UI can say "answered by backup #2".
     position: int = 0
-
-
-def required_capabilities_from_payload(payload: dict) -> list[str]:
-    """Inspect an OpenAI-compatible chat payload to infer required capabilities."""
-    required: set[str] = set()
-    if payload.get('tools') or payload.get('functions'):
-        required.add(CAPABILITY_TOOLS)
-    for msg in payload.get('messages') or []:
-        content = msg.get('content')
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get('type') in ('image_url', 'input_image'):
-                    required.add(CAPABILITY_VISION)
-                    break
-    return sorted(required)
 
 
 def _health_status(health_cache: Optional[dict], url: str) -> str:
@@ -115,15 +100,15 @@ async def resolve_failover_candidates(
 
     Filters applied to the resolved chain:
     - ``skip_urls`` (set by the retry-with-different-provider button).
-    - Required capabilities — if the payload needs ``tools`` or ``vision``,
-      providers that explicitly assert their capabilities and don't include
-      one are filtered out. The implicit primary is always kept regardless.
     - Health cache — unhealthy providers sink to the end of the list but
       remain present, so an all-unhealthy chain still degrades rather
       than hard-failing.
+
+    Note: per-provider capability tags (tools/vision) were removed — the
+    wrapper model's own capability settings (inherited from the base model)
+    govern routing; providers no longer carry redundant capability asserts.
     """
     skip_set = set(skip_urls or [])
-    required_caps = required_capabilities_from_payload(payload)
 
     # Config is now DB-backed (upstream removed app.state.config); read the
     # OpenAI connection lists directly from Config (mirrors get_openai_runtime_config).
@@ -133,7 +118,9 @@ async def resolve_failover_candidates(
     configs = _rt.get('openai.api_configs') or {}
     models_state = request.app.state.OPENAI_MODELS or {}
 
-    def _build_candidate(model_id: str, position: int, capabilities: list[str]) -> Optional[ProviderCandidate]:
+    def _build_candidate(
+        model_id: str, position: int, max_concurrent: Optional[int] = None
+    ) -> Optional[ProviderCandidate]:
         """Resolve a `$models`-style id into a concrete (url, key, ...) candidate.
 
         Returns None if the model isn't in the OPENAI_MODELS cache (stale or
@@ -160,25 +147,46 @@ async def resolve_failover_candidates(
             model_name=model_id,
             api_config=api_config,
             prefix_id=api_config.get('prefix_id'),
-            capabilities=capabilities,
+            max_concurrent=max_concurrent if isinstance(max_concurrent, int) and max_concurrent > 0 else None,
             position=position,
         )
 
+    # Chain source resolution:
+    # 1. `failover_source == 'global'` on the wrapper's meta → the admin-
+    #    configured chain for this wrapper model id (DB key
+    #    `models.wrapper_provider_chains`). The workspace failover_providers
+    #    list is ignored for resolution (kept so users can flip back).
+    # 2. Otherwise → workspace `failover_providers` (custom), falling through
+    #    to the legacy global base-model map below when unset.
+    #
+    # NOTE: payload['model'] has already been rewritten to base_model_id by
+    # the caller when this is a wrapper — global chains are keyed by the
+    # WRAPPER id, so key off model_info.id, never the payload.
     failover = None
-    if model_info and model_info.meta and getattr(model_info.meta, 'failover_providers', None):
-        failover = model_info.meta.failover_providers
+    if model_info and model_info.meta:
+        if getattr(model_info.meta, 'failover_source', None) == 'global':
+            chains = (await Config.get('models.wrapper_provider_chains')) or {}
+            raw_chain = chains.get(model_info.id) or []
+            # PersistentConfig deserialises to plain dicts — normalise to the
+            # attribute-access shape the loop below expects (carrying
+            # max_concurrent through for the capacity tier).
+            failover = [
+                entry
+                if not isinstance(entry, dict)
+                else SimpleNamespace(model_id=entry.get('model_id'), max_concurrent=entry.get('max_concurrent'))
+                for entry in raw_chain
+            ]
+        elif getattr(model_info.meta, 'failover_providers', None):
+            failover = model_info.meta.failover_providers
 
     candidates: list[ProviderCandidate] = []
 
     if failover:
-        # Workspace-level chain wins entirely.
+        # Workspace-level (custom) or admin global chain wins entirely.
+        # Entries are FailoverProvider (Pydantic) or SimpleNamespace (global
+        # chain dicts) — both carry max_concurrent via getattr.
         for position, entry in enumerate(failover):
-            # Capability filter: if required caps declared, provider must
-            # list them. An empty capabilities list = "unknown, try it".
-            if required_caps and entry.capabilities:
-                if any(cap not in entry.capabilities for cap in required_caps):
-                    continue
-            candidate = _build_candidate(entry.model_id, position, list(entry.capabilities or []))
+            candidate = _build_candidate(entry.model_id, position, getattr(entry, 'max_concurrent', None))
             if candidate is None:
                 log.warning(
                     'Workspace failover provider model_id=%s not resolvable against current OPENAI_MODELS / config; skipping.',
@@ -191,7 +199,7 @@ async def resolve_failover_candidates(
         # implicit primary, then expand from the global base-model map if
         # an entry exists for that id.
         requested_id = payload.get('model')
-        primary = _build_candidate(requested_id, 0, [])
+        primary = _build_candidate(requested_id, 0)
         if primary is not None:
             candidates.append(primary)
 
@@ -204,11 +212,7 @@ async def resolve_failover_candidates(
             target_id = entry.get('model_id')
             if not target_id:
                 continue
-            cap_list = list(entry.get('capabilities') or [])
-            if required_caps and cap_list:
-                if any(cap not in cap_list for cap in required_caps):
-                    continue
-            candidate = _build_candidate(target_id, offset + 1, cap_list)
+            candidate = _build_candidate(target_id, offset + 1, entry.get('max_concurrent'))
             if candidate is None:
                 log.warning(
                     'Base-model failover entry model_id=%s (parent=%s) not resolvable; skipping.',
@@ -218,15 +222,29 @@ async def resolve_failover_candidates(
                 continue
             candidates.append(candidate)
 
+    # Capacity tier: batch-fetch in-flight counts for candidates carrying a
+    # max_concurrent limit (async fetch — the sort key itself must stay sync;
+    # unlimited candidates skip the round trip entirely). Providers at or over
+    # their limit sink below healthy/unknown but ABOVE unhealthy: capacity is
+    # a transient, self-clearing condition, so a busy-but-healthy provider
+    # still beats a broken one, and configured order is preserved among
+    # equals (stable sort) — the user's "2 on primary, then secondary, …"
+    # admission pattern.
+    limited = [c for c in candidates if c.max_concurrent is not None]
+    inflight = await provider_inflight.counts(request.app.state, [c.url for c in limited]) if limited else {}
+
     # Sink unhealthy providers to the end, but keep configured order among
     # equals so the primary still beats backup if both are healthy.
     def health_rank(c: ProviderCandidate) -> int:
+        limit = c.max_concurrent
+        if limit is not None and inflight.get(c.url, 0) >= limit:
+            return 2  # at capacity
         status = _health_status(health_cache, c.url)
         if status == 'healthy':
             return 0
         if status == 'unknown':
             return 1
-        return 2
+        return 3  # unhealthy
 
     # Stable sort preserves configured order within each health tier.
     candidates.sort(key=health_rank)

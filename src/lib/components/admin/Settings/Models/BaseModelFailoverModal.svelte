@@ -37,8 +37,7 @@
 		try {
 			fullMap = await getModelFailoverMap(localStorage.token);
 			providers = (fullMap[model!.id] ?? []).map((p: any) => ({
-				model_id: p?.model_id ?? '',
-				capabilities: p?.capabilities ?? []
+				model_id: p?.model_id ?? ''
 			}));
 		} catch (err: any) {
 			toast.error(err?.detail ?? `${err}`);
@@ -55,7 +54,7 @@
 			const valid = providers.filter((p) => p.model_id);
 			const next = { ...fullMap };
 			if (valid.length > 0) {
-				next[model.id] = valid;
+				next[model.id] = valid.map((p) => ({ model_id: p.model_id }));
 			} else {
 				// Drop the key entirely so absence-of-key stays the canonical
 				// "no failover" state.

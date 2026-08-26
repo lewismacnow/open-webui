@@ -85,13 +85,18 @@ class FailoverProvider(BaseModel):
     connections serving the "same" underlying model show up as two
     distinct entries here and can coexist in one failover chain.
 
-    `capabilities` is what the user asserts this provider supports; when the
-    incoming request needs a capability (tools, vision), providers missing
-    it are filtered out. An empty list means "unknown — try it anyway".
+    Note: per-provider `capabilities` tags were removed — the wrapper
+    model's own capability settings (inherited from the base model)
+    govern routing. `extra='allow'` keeps rows saved with a legacy
+    `capabilities` key loadable (the field is simply ignored).
     """
 
     model_id: str
-    capabilities: list[str] = Field(default_factory=list)
+    # Max concurrent in-flight requests this provider accepts before the
+    # failover resolver sinks it to the end of the candidate list.
+    # None/absent = unlimited. Optional today (the ModelEditor UI doesn't
+    # expose it for custom chains yet) but resolvable when set manually.
+    max_concurrent: int | None = None
 
     model_config = ConfigDict(extra='allow')
 
@@ -109,6 +114,16 @@ class ModelMeta(BaseModel):
         Ordered list of OpenAI-compatible providers to try when this model
         is invoked. First entry is primary. If unset, legacy base_model_id
         routing is used.
+    """
+
+    failover_source: str | None = None
+    """
+        Where this model's provider chain comes from:
+        - 'global' — use the admin-configured chain for this wrapper model id
+          (DB config key `models.wrapper_provider_chains`); failover_providers
+          is ignored for resolution (but kept so users can flip back).
+        - 'custom' or None — use failover_providers above (None preserves
+          pre-toggle back-compat: a model with providers set behaves custom).
     """
 
     model_config = ConfigDict(extra='allow')

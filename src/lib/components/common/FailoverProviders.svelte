@@ -8,7 +8,6 @@
 	// tried in order when earlier ones fail with a retryable error.
 	export let providers: Array<{
 		model_id: string;
-		capabilities: string[];
 	}> = [];
 
 	// Exclude the model currently being edited so it can't self-reference,
@@ -30,13 +29,7 @@
 	}
 
 	function addProvider() {
-		providers = [
-			...providers,
-			{
-				model_id: '',
-				capabilities: []
-			}
-		];
+		providers = [...providers, { model_id: '' }];
 	}
 
 	function removeProvider(idx: number) {
@@ -49,16 +42,6 @@
 		const copy = [...providers];
 		[copy[idx], copy[newIdx]] = [copy[newIdx], copy[idx]];
 		providers = copy;
-	}
-
-	function toggleCapability(providerIdx: number, cap: string) {
-		const p = providers[providerIdx];
-		if (p.capabilities.includes(cap)) {
-			p.capabilities = p.capabilities.filter((c) => c !== cap);
-		} else {
-			p.capabilities = [...p.capabilities, cap];
-		}
-		providers = providers;
 	}
 </script>
 
@@ -153,34 +136,6 @@
 					</button>
 				</div>
 			</div>
-
-			<!-- Capabilities row -->
-			<div class="flex items-center gap-4 mt-1.5 ml-24 text-xs text-gray-500 dark:text-gray-400">
-				<span class="text-[10px] uppercase tracking-wide">{$i18n.t('Supports')}</span>
-				<label class="flex items-center gap-1 cursor-pointer select-none">
-					<input
-						type="checkbox"
-						class="accent-gray-500"
-						checked={provider.capabilities.includes('tools')}
-						on:change={() => toggleCapability(idx, 'tools')}
-					/>
-					{$i18n.t('Tools')}
-				</label>
-				<label class="flex items-center gap-1 cursor-pointer select-none">
-					<input
-						type="checkbox"
-						class="accent-gray-500"
-						checked={provider.capabilities.includes('vision')}
-						on:change={() => toggleCapability(idx, 'vision')}
-					/>
-					{$i18n.t('Vision')}
-				</label>
-				{#if idx > 0}
-					<span class="text-[10px] text-gray-400 dark:text-gray-500">
-						{$i18n.t('Leave unticked if unsure — untagged backups are always eligible.')}
-					</span>
-				{/if}
-			</div>
 		</div>
 	{/each}
 
@@ -194,7 +149,7 @@
 
 	<p class="text-[11px] leading-relaxed text-gray-400 dark:text-gray-500 pt-1">
 		{$i18n.t(
-			'The first provider is the primary. Backups are tried in order when the previous one fails with a network, 429, or 5xx error. Capability ticks filter backups out when the request needs tools or vision.'
+			'The first provider is the primary. Backups are tried in order when the previous one fails with a network, 429, or 5xx error.'
 		)}
 	</p>
 </div>

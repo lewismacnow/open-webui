@@ -36,7 +36,7 @@
 	import AccessButton from '$lib/components/common/AccessButton.svelte';
 	import { extractInputVariables } from '$lib/utils';
 
-	const i18n = getContext('i18n');
+	const i18n: any = getContext('i18n');
 
 	export let onSubmit: Function;
 	export let onBack: null | Function = null;
@@ -124,8 +124,12 @@
 	// about it keep working.
 	let failoverProviders: Array<{
 		model_id: string;
-		capabilities: string[];
 	}> = [];
+	// Whether this model resolves its provider chain from the admin's
+	// global wrapper chains ('global') or from the per-model list bound
+	// to FailoverProviders.svelte ('custom'). Persisted as
+	// `meta.failover_source`; null/undefined behaves as 'custom'.
+	let failoverSource: 'global' | 'custom' = 'custom';
 	export let suggestionTags: { name: string }[] = [];
 	let voices: { id: string; name?: string }[] = [];
 
@@ -378,10 +382,12 @@
 
 		// Persist the ordered failover list and mirror the primary into the
 		// legacy base_model_id so code paths that only know the old shape
-		// keep working.
+		// keep working. `failover_providers` is written regardless of the
+		// source toggle so flipping back to 'custom' keeps the saved list.
+		info.meta.failover_source = failoverSource;
 		const validProviders = failoverProviders.filter((p) => p.model_id);
 		if (validProviders.length > 0) {
-			info.meta.failover_providers = validProviders;
+			info.meta.failover_providers = validProviders.map((p) => ({ model_id: p.model_id }));
 			info.base_model_id = validProviders[0].model_id;
 		} else {
 			if (info.meta.failover_providers) {
@@ -512,19 +518,22 @@
 
 			// Failover config: prefer the new ordered list if present; fall
 			// back to the legacy base_model_id as a one-entry list so old
-			// models auto-migrate on first edit.
-			if (Array.isArray(model?.meta?.failover_providers) && model.meta.failover_providers.length > 0) {
+			// models auto-migrate on first edit. A null/undefined
+			// `failover_source` behaves as 'custom' (back-compat).
+			failoverSource = model?.meta?.failover_source === 'global' ? 'global' : 'custom';
+			if (
+				Array.isArray(model?.meta?.failover_providers) &&
+				model.meta.failover_providers.length > 0
+			) {
 				failoverProviders = model.meta.failover_providers.map((p: any) => ({
 					// Tolerate the older {connection_url, model_name} shape
 					// by treating model_name as the id if model_id isn't set.
-					model_id: p.model_id ?? p.model_name ?? '',
-					capabilities: p.capabilities ?? []
+					model_id: p.model_id ?? p.model_name ?? ''
 				}));
 			} else if (model?.base_model_id) {
 				failoverProviders = [
 					{
-						model_id: model.base_model_id,
-						capabilities: []
+						model_id: model.base_model_id
 					}
 				];
 			} else {
@@ -770,10 +779,53 @@
 										{$i18n.t('Providers (primary + failover)')}
 									</div>
 
-									<FailoverProviders
-										bind:providers={failoverProviders}
-										currentModelId={edit ? id : null}
-									/>
+									<div class="text-xs font-medium mb-1 text-gray-500">
+										{$i18n.t('Provider chain')}
+									</div>
+
+									<div
+										class="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 p-0.5"
+									>
+										<button
+											type="button"
+											class="px-3 py-1 text-xs font-medium rounded-md transition {failoverSource ===
+											'global'
+												? 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white'
+												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+											on:click={() => (failoverSource = 'global')}
+										>
+											{$i18n.t('Use global chain (admin-configured)')}
+										</button>
+										<button
+											type="button"
+											class="px-3 py-1 text-xs font-medium rounded-md transition {failoverSource ===
+											'custom'
+												? 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white'
+												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+											on:click={() => (failoverSource = 'custom')}
+										>
+											{$i18n.t('Custom chain')}
+										</button>
+									</div>
+
+									<p class="mt-1 mb-2 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+										{#if failoverSource === 'global'}
+											{$i18n.t(
+												'Managed by your administrator under Settings → Wrapper Model Providers. Changes there apply immediately to this model.'
+											)}
+										{:else}
+											{$i18n.t(
+												'Define the ordered provider list below. Tried top to bottom on failure or capacity.'
+											)}
+										{/if}
+									</p>
+
+									{#if failoverSource === 'custom'}
+										<FailoverProviders
+											bind:providers={failoverProviders}
+											currentModelId={edit ? id : null}
+										/>
+									{/if}
 								</div>
 							{/if}
 

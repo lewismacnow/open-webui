@@ -721,7 +721,9 @@ export const setModelsConfig = async (token: string, config: object) => {
 
 export type ModelFailoverEntry = {
 	model_id: string;
-	capabilities: string[];
+	// Optional for backward compatibility: older saved entries may still
+	// carry per-provider capability tags. No longer rendered or written.
+	capabilities?: string[];
 };
 
 export type ModelFailoverMap = Record<string, ModelFailoverEntry[]>;
@@ -790,6 +792,80 @@ export const setModelFailoverMap = async (
 	return res?.MODEL_FAILOVER_MAP ?? {};
 };
 
+// --- Wrapper Model Provider Chains ---
+
+export type WrapperChainEntry = {
+	model_id: string;
+	// null = unlimited
+	max_concurrent: number | null;
+};
+
+export type WrapperProviderChains = Record<string, WrapperChainEntry[]>;
+
+/**
+ * Fetch the global per-wrapper-model provider chains.
+ *
+ * Admin-only on the backend; returns an empty object when no chains have
+ * been configured for any wrapper model.
+ */
+export const getWrapperProviderChains = async (token: string): Promise<WrapperProviderChains> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/models/wrapper-chains`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res?.WRAPPER_PROVIDER_CHAINS ?? {};
+};
+
+export const setWrapperProviderChains = async (
+	token: string,
+	chains: WrapperProviderChains
+): Promise<WrapperProviderChains> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/models/wrapper-chains`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({ WRAPPER_PROVIDER_CHAINS: chains })
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res?.WRAPPER_PROVIDER_CHAINS ?? {};
+};
+
 // --- Vision Image RAG ---
 
 /**
@@ -798,7 +874,9 @@ export const setModelFailoverMap = async (
  * Empty string means "not set" (only vision-capable chatting models get
  * image RAG). Admin-only on the backend.
  */
-export const getRagVisionConfig = async (token: string): Promise<{
+export const getRagVisionConfig = async (
+	token: string
+): Promise<{
 	VISION_SUPPORT_MODEL: string;
 	VISION_SYSTEM_PROMPT: string;
 }> => {
@@ -868,7 +946,9 @@ export const setRagVisionConfig = async (
 
 // --- API Tools ---
 
-export const getApiToolsConfig = async (token: string): Promise<{
+export const getApiToolsConfig = async (
+	token: string
+): Promise<{
 	enabled: boolean;
 	allowed_categories: string[];
 	allow_tool_servers: boolean;
@@ -965,7 +1045,7 @@ export const setSubagentsConfig = async (token: string, config: object) => {
 	});
 	if (!res.ok) throw await res.json();
 	return res.json();
-}
+};
 
 export const setDefaultPromptSuggestions = async (token: string, promptSuggestions: string) => {
 	let error = null;

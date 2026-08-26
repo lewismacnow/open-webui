@@ -774,12 +774,14 @@ async def set_models_config(request: Request, form_data: ModelsConfigForm, user=
 
 class ModelFailoverEntry(BaseModel):
     model_id: str
-    capabilities: list[str] = []
+    # NOTE: per-provider capability tags were removed (wrapper model's own
+    # capabilities govern routing). `capabilities` keys on legacy stored
+    # rows are ignored on validation and dropped on re-save.
 
 
 class ModelFailoverMapForm(BaseModel):
     # Shape mirrors what's stored in PersistentConfig:
-    # { "<base_model_id>": [ {model_id, capabilities}, ... ] }
+    # { "<base_model_id>": [ {model_id}, ... ] }
     MODEL_FAILOVER_MAP: dict[str, list[ModelFailoverEntry]]
 
 
@@ -809,6 +811,52 @@ async def set_model_failover_map(
     }
     await Config.upsert({'models.failover_map': cleaned})
     return {'MODEL_FAILOVER_MAP': cleaned}
+
+
+############################
+# Wrapper model provider chains
+############################
+
+
+class WrapperChainEntry(BaseModel):
+    model_id: str
+    # Max concurrent in-flight requests this provider accepts before the
+    # failover resolver sinks it to the end of the candidate list.
+    # None (or absent) = unlimited.
+    max_concurrent: int | None = None
+
+
+class WrapperProviderChainsForm(BaseModel):
+    # { "<wrapper_model_id>": [ {model_id, max_concurrent}, ... ] }
+    WRAPPER_PROVIDER_CHAINS: dict[str, list[WrapperChainEntry]]
+
+
+@router.get('/models/wrapper-chains', response_model=WrapperProviderChainsForm)
+async def get_wrapper_provider_chains(request: Request, user=Depends(get_admin_user)):
+    """Return the global wrapper-model provider chains.
+
+    Admin-only — describes infrastructure routing (same posture as the
+    per-base-model failover map above).
+    """
+    return {'WRAPPER_PROVIDER_CHAINS': (await Config.get('models.wrapper_provider_chains')) or {}}
+
+
+@router.post('/models/wrapper-chains', response_model=WrapperProviderChainsForm)
+async def set_wrapper_provider_chains(
+    request: Request,
+    form_data: WrapperProviderChainsForm,
+    user=Depends(get_admin_user),
+):
+    """Replace the wrapper provider chains. Empty lists are dropped so the
+    persisted value stays small and absence-of-key is the canonical
+    'no global chain for this wrapper' (falls back to custom/legacy)."""
+    cleaned = {
+        wrapper_id: [entry.model_dump() for entry in entries]
+        for wrapper_id, entries in form_data.WRAPPER_PROVIDER_CHAINS.items()
+        if entries
+    }
+    await Config.upsert({'models.wrapper_provider_chains': cleaned})
+    return {'WRAPPER_PROVIDER_CHAINS': cleaned}
 
 
 class RagVisionConfigForm(BaseModel):
