@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 import logging
 import time
+from types import SimpleNamespace
 from typing import Optional
 
 from fastapi import Request
@@ -142,9 +143,30 @@ async def resolve_failover_candidates(
             position=position,
         )
 
+    # Chain source resolution:
+    # 1. `failover_source == 'global'` on the wrapper's meta → the admin-
+    #    configured chain for this wrapper model id (DB key
+    #    `models.wrapper_provider_chains`). The workspace failover_providers
+    #    list is ignored for resolution (kept so users can flip back).
+    # 2. Otherwise → workspace `failover_providers` (custom), falling through
+    #    to the legacy global base-model map below when unset.
+    #
+    # NOTE: payload['model'] has already been rewritten to base_model_id by
+    # the caller when this is a wrapper — global chains are keyed by the
+    # WRAPPER id, so key off model_info.id, never the payload.
     failover = None
-    if model_info and model_info.meta and getattr(model_info.meta, 'failover_providers', None):
-        failover = model_info.meta.failover_providers
+    if model_info and model_info.meta:
+        if getattr(model_info.meta, 'failover_source', None) == 'global':
+            chains = (await Config.get('models.wrapper_provider_chains')) or {}
+            raw_chain = chains.get(model_info.id) or []
+            # PersistentConfig deserialises to plain dicts — normalise to the
+            # attribute-access shape the loop below expects.
+            failover = [
+                entry if not isinstance(entry, dict) else SimpleNamespace(model_id=entry.get('model_id'))
+                for entry in raw_chain
+            ]
+        elif getattr(model_info.meta, 'failover_providers', None):
+            failover = model_info.meta.failover_providers
 
     candidates: list[ProviderCandidate] = []
 

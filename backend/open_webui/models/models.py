@@ -111,6 +111,16 @@ class ModelMeta(BaseModel):
         routing is used.
     """
 
+    failover_source: str | None = None
+    """
+        Where this model's provider chain comes from:
+        - 'global' — use the admin-configured chain for this wrapper model id
+          (DB config key `models.wrapper_provider_chains`); failover_providers
+          is ignored for resolution (but kept so users can flip back).
+        - 'custom' or None — use failover_providers above (None preserves
+          pre-toggle back-compat: a model with providers set behaves custom).
+    """
+
     model_config = ConfigDict(extra='allow')
 
     @field_validator('profile_image_url', mode='before')
