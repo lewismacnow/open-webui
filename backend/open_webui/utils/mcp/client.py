@@ -176,7 +176,14 @@ class MCPClient:
                 raise
             log.debug('MCPClient.disconnect() suppressed internal cancellation: %s', exc)
         except RuntimeError as exc:
-            log.debug('MCPClient.disconnect() suppressed RuntimeError: %s', exc)
+            # Both known MCP SDK cleanup race conditions surface here:
+            #   - "aclose(): asynchronous generator is already running"
+            #     (streamablehttp_client's inner task group is still mid-iteration)
+            #   - "Attempted to exit cancel scope in a different task than it
+            #      was entered in" (anyio task group cancelled from a sibling task)
+            # Both are benign at this layer — the connection is already being torn
+            # down; the sockets will eventually be reaped by the MCP SDK's GC.
+            log.debug('MCPClient.disconnect() suppressed RuntimeError during aclose(): %s', exc)
         except Exception as exc:
             log.debug('MCPClient.disconnect() error: %s', exc)
 

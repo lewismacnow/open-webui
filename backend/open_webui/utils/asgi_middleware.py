@@ -117,9 +117,23 @@ class AppHTTPMiddleware:
                 return
             else:
                 await self.app(scope, receive, send_with_headers)
-        except BaseException:
-            self._rollback_session('AppHTTPMiddleware: rollback failed after downstream error')
-            raise
+        except BaseException as exc:
+            # Cancel-scope mismatches from starlette's `create_collapsing_task_group`
+            # can fire AFTER a streaming response has already been written to the
+            # wire (chat completions, SSE). The client already has the data; the
+            # error is purely an artifact of the response's body task being torn
+            # down in a different task than its parent. Treat it as a successful
+            # request: log it, skip rollback (response already sent), and fall
+            # through to the commit path. All other errors keep the original
+            # rollback + re-raise behaviour.
+            if isinstance(exc, RuntimeError) and 'cancel scope' in str(exc):
+                log.debug(
+                    'AppHTTPMiddleware: suppressed cancel-scope RuntimeError from starlette: %s',
+                    exc,
+                )
+            else:
+                self._rollback_session('AppHTTPMiddleware: rollback failed after downstream error')
+                raise
 
         self._commit_session()
 
