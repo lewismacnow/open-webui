@@ -165,7 +165,7 @@
 	<div class="flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5">
 		<AdminSettingSection title={$i18n.t('Global Provider Chains')} first>
 			<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-				{$i18n(
+				{$i18n.t(
 					'Global provider chains for wrapper models. Define an ordered list of providers per wrapper model. Applies to every wrapper model set to use the global chain; individual models can override with a custom chain in the workspace model editor.'
 				)}
 			</p>
