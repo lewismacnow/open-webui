@@ -792,6 +792,80 @@ export const setModelFailoverMap = async (
 	return res?.MODEL_FAILOVER_MAP ?? {};
 };
 
+// --- Wrapper Model Provider Chains ---
+
+export type WrapperChainEntry = {
+	model_id: string;
+	// null = unlimited
+	max_concurrent: number | null;
+};
+
+export type WrapperProviderChains = Record<string, WrapperChainEntry[]>;
+
+/**
+ * Fetch the global per-wrapper-model provider chains.
+ *
+ * Admin-only on the backend; returns an empty object when no chains have
+ * been configured for any wrapper model.
+ */
+export const getWrapperProviderChains = async (token: string): Promise<WrapperProviderChains> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/models/wrapper-chains`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res?.WRAPPER_PROVIDER_CHAINS ?? {};
+};
+
+export const setWrapperProviderChains = async (
+	token: string,
+	chains: WrapperProviderChains
+): Promise<WrapperProviderChains> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/models/wrapper-chains`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({ WRAPPER_PROVIDER_CHAINS: chains })
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res?.WRAPPER_PROVIDER_CHAINS ?? {};
+};
+
 // --- Vision Image RAG ---
 
 /**

@@ -48,6 +48,7 @@
 	import AdminIntegrations from '$lib/components/admin/Settings/Integrations.svelte';
 	import AdminDocuments from '$lib/components/admin/Settings/Documents.svelte';
 	import AdminApiTools from '$lib/components/admin/Settings/ApiTools.svelte';
+	import WrapperModelProviders from '$lib/components/admin/Settings/WrapperModelProviders.svelte';
 	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
 	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
 	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
@@ -155,6 +156,7 @@
 		'admin:authentication': 'System',
 		'admin:connections': 'AI',
 		'admin:models': 'AI',
+		'admin:wrapper-model-providers': 'AI',
 		'admin:subagents': 'AI',
 		'admin:evaluations': 'Quality',
 		'admin:analytics': 'Quality',
@@ -726,6 +728,11 @@
 			]
 		},
 		{
+			id: 'admin:wrapper-model-providers',
+			title: 'Wrapper Model Providers',
+			keywords: ['failover', 'provider', 'chain', 'global', 'concurrency']
+		},
+		{
 			id: 'admin:subagents',
 			title: 'Sub-agents',
 			keywords: ['sub-agents', 'subagents', 'delegation', 'background', 'agents']
@@ -1292,6 +1299,8 @@
 			<AdminDocuments on:save={adminConfigSaveHandler} />
 		{:else if selectedTab === 'admin:api-tools'}
 			<AdminApiTools />
+		{:else if selectedTab === 'admin:wrapper-model-providers'}
+			<WrapperModelProviders />
 		{:else if selectedTab === 'admin:web'}
 				<AdminWebSearch saveHandler={adminConfigSaveHandler} />
 			{:else if selectedTab === 'admin:code-execution'}
