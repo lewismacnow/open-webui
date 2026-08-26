@@ -2040,6 +2040,14 @@ async def chat_completion_files_handler(
                 }
             )
 
+        # Defensive: filter out None / empty / whitespace-only entries. The
+        # generate_queries JSON-parse fallback can wrap raw non-JSON content
+        # as ``{'queries': ['']}`` or ``{'queries': [None]}`` (list of length
+        # 1), which would otherwise slip past the ``len == 0`` guard below
+        # and reach ``query_collection`` — where the empty filter at
+        # ``retrieval/utils.py:776`` silently returns no results. Same guard
+        # pattern as the web-search handler further up.
+        queries = [q for q in queries if q and str(q).strip()]
         if len(queries) == 0:
             queries = [get_last_user_message(body['messages']) or '']
 
