@@ -46,6 +46,7 @@ from open_webui.utils.headers import get_custom_headers, include_user_info_heade
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import convert_logit_bias_input_to_json, stream_chunks_handler
 from open_webui.utils.model_ids import strip_provider_model_prefix
+from open_webui.utils import provider_inflight
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_system_prompt_to_body,
@@ -1632,6 +1633,21 @@ async def _try_provider_candidate(
     api_config = candidate.api_config
     idx = candidate.url_idx
 
+    # Capacity accounting: mark this request as in-flight against the
+    # provider BEFORE anything else, so the resolver's capacity tier (and any
+    # concurrent resolution) sees it. Decremented in the finally below for
+    # non-streaming paths, or when the streaming body completes via the
+    # tracked wrapper (a bare finally would fire the moment the
+    # StreamingResponse object is *returned*, not when the stream drains).
+    await provider_inflight.increment(request.app.state, url)
+    inflight_released = False
+
+    async def _release_inflight_once() -> None:
+        nonlocal inflight_released
+        if not inflight_released:
+            inflight_released = True
+            await provider_inflight.decrement(request.app.state, url)
+
     if candidate.prefix_id:
         attempt_payload['model'] = strip_provider_model_prefix(attempt_payload['model'], candidate.prefix_id)
 
@@ -1805,13 +1821,24 @@ async def _try_provider_candidate(
             response_headers['X-Selected-Provider-URL'] = url
             response_headers['X-Selected-Provider-Position'] = str(candidate.position)
 
+            async def _tracked_stream():
+                # Release the in-flight slot when the body actually finishes
+                # (drained, errored, or client-disconnected) — NOT when the
+                # StreamingResponse object is returned below. This is what
+                # makes max_concurrent reflect true concurrency.
+                try:
+                    async for chunk in prefetched_stream_wrapper(
+                        r,
+                        prefetched_chunks=prefetched,
+                        content_handler=stream_chunks_handler,
+                        leading_events=[provider_event],
+                    ):
+                        yield chunk
+                finally:
+                    await _release_inflight_once()
+
             return StreamingResponse(
-                prefetched_stream_wrapper(
-                    r,
-                    prefetched_chunks=prefetched,
-                    content_handler=stream_chunks_handler,
-                    leading_events=[provider_event],
-                ),
+                _tracked_stream(),
                 status_code=r.status,
                 headers=response_headers,
             )
@@ -1881,7 +1908,12 @@ async def _try_provider_candidate(
             detail=ERROR_MESSAGES.SERVER_CONNECTION_ERROR,
         )
     finally:
+        # Non-streaming paths (dict/JSON/PlainText/error returns and raises)
+        # release the in-flight slot here. Streaming releases in
+        # _tracked_stream's finally when the body actually drains — the
+        # once-guard makes a double release harmless if both somehow fire.
         if not streaming:
+            await _release_inflight_once()
             await cleanup_response(r)
 
 

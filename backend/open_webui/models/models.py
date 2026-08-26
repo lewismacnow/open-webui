@@ -92,6 +92,11 @@ class FailoverProvider(BaseModel):
     """
 
     model_id: str
+    # Max concurrent in-flight requests this provider accepts before the
+    # failover resolver sinks it to the end of the candidate list.
+    # None/absent = unlimited. Optional today (the ModelEditor UI doesn't
+    # expose it for custom chains yet) but resolvable when set manually.
+    max_concurrent: int | None = None
 
     model_config = ConfigDict(extra='allow')
 
