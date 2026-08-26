@@ -8,7 +8,7 @@ cache are deprioritised, but never removed outright — if every provider
 looks unhealthy we still try them rather than hard-failing.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 import logging
 import time
@@ -19,11 +19,6 @@ from fastapi import Request
 from open_webui.models.config import Config
 
 log = logging.getLogger(__name__)
-
-
-# Capability names that the resolver understands today.
-CAPABILITY_TOOLS = 'tools'
-CAPABILITY_VISION = 'vision'
 
 
 class RetryableProviderError(Exception):
@@ -57,25 +52,9 @@ class ProviderCandidate:
     model_name: str
     api_config: dict
     prefix_id: Optional[str] = None
-    capabilities: list[str] = field(default_factory=list)
     # Position in the original failover list (0 = primary). Surfaced to the
     # frontend so the UI can say "answered by backup #2".
     position: int = 0
-
-
-def required_capabilities_from_payload(payload: dict) -> list[str]:
-    """Inspect an OpenAI-compatible chat payload to infer required capabilities."""
-    required: set[str] = set()
-    if payload.get('tools') or payload.get('functions'):
-        required.add(CAPABILITY_TOOLS)
-    for msg in payload.get('messages') or []:
-        content = msg.get('content')
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get('type') in ('image_url', 'input_image'):
-                    required.add(CAPABILITY_VISION)
-                    break
-    return sorted(required)
 
 
 def _health_status(health_cache: Optional[dict], url: str) -> str:
@@ -115,15 +94,15 @@ async def resolve_failover_candidates(
 
     Filters applied to the resolved chain:
     - ``skip_urls`` (set by the retry-with-different-provider button).
-    - Required capabilities — if the payload needs ``tools`` or ``vision``,
-      providers that explicitly assert their capabilities and don't include
-      one are filtered out. The implicit primary is always kept regardless.
     - Health cache — unhealthy providers sink to the end of the list but
       remain present, so an all-unhealthy chain still degrades rather
       than hard-failing.
+
+    Note: per-provider capability tags (tools/vision) were removed — the
+    wrapper model's own capability settings (inherited from the base model)
+    govern routing; providers no longer carry redundant capability asserts.
     """
     skip_set = set(skip_urls or [])
-    required_caps = required_capabilities_from_payload(payload)
 
     # Config is now DB-backed (upstream removed app.state.config); read the
     # OpenAI connection lists directly from Config (mirrors get_openai_runtime_config).
@@ -133,7 +112,7 @@ async def resolve_failover_candidates(
     configs = _rt.get('openai.api_configs') or {}
     models_state = request.app.state.OPENAI_MODELS or {}
 
-    def _build_candidate(model_id: str, position: int, capabilities: list[str]) -> Optional[ProviderCandidate]:
+    def _build_candidate(model_id: str, position: int) -> Optional[ProviderCandidate]:
         """Resolve a `$models`-style id into a concrete (url, key, ...) candidate.
 
         Returns None if the model isn't in the OPENAI_MODELS cache (stale or
@@ -160,7 +139,6 @@ async def resolve_failover_candidates(
             model_name=model_id,
             api_config=api_config,
             prefix_id=api_config.get('prefix_id'),
-            capabilities=capabilities,
             position=position,
         )
 
@@ -173,12 +151,7 @@ async def resolve_failover_candidates(
     if failover:
         # Workspace-level chain wins entirely.
         for position, entry in enumerate(failover):
-            # Capability filter: if required caps declared, provider must
-            # list them. An empty capabilities list = "unknown, try it".
-            if required_caps and entry.capabilities:
-                if any(cap not in entry.capabilities for cap in required_caps):
-                    continue
-            candidate = _build_candidate(entry.model_id, position, list(entry.capabilities or []))
+            candidate = _build_candidate(entry.model_id, position)
             if candidate is None:
                 log.warning(
                     'Workspace failover provider model_id=%s not resolvable against current OPENAI_MODELS / config; skipping.',
@@ -191,7 +164,7 @@ async def resolve_failover_candidates(
         # implicit primary, then expand from the global base-model map if
         # an entry exists for that id.
         requested_id = payload.get('model')
-        primary = _build_candidate(requested_id, 0, [])
+        primary = _build_candidate(requested_id, 0)
         if primary is not None:
             candidates.append(primary)
 
@@ -204,11 +177,7 @@ async def resolve_failover_candidates(
             target_id = entry.get('model_id')
             if not target_id:
                 continue
-            cap_list = list(entry.get('capabilities') or [])
-            if required_caps and cap_list:
-                if any(cap not in cap_list for cap in required_caps):
-                    continue
-            candidate = _build_candidate(target_id, offset + 1, cap_list)
+            candidate = _build_candidate(target_id, offset + 1)
             if candidate is None:
                 log.warning(
                     'Base-model failover entry model_id=%s (parent=%s) not resolvable; skipping.',

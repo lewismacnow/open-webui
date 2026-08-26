@@ -721,7 +721,9 @@ export const setModelsConfig = async (token: string, config: object) => {
 
 export type ModelFailoverEntry = {
 	model_id: string;
-	capabilities: string[];
+	// Optional for backward compatibility: older saved entries may still
+	// carry per-provider capability tags. No longer rendered or written.
+	capabilities?: string[];
 };
 
 export type ModelFailoverMap = Record<string, ModelFailoverEntry[]>;
@@ -798,7 +800,9 @@ export const setModelFailoverMap = async (
  * Empty string means "not set" (only vision-capable chatting models get
  * image RAG). Admin-only on the backend.
  */
-export const getRagVisionConfig = async (token: string): Promise<{
+export const getRagVisionConfig = async (
+	token: string
+): Promise<{
 	VISION_SUPPORT_MODEL: string;
 	VISION_SYSTEM_PROMPT: string;
 }> => {
@@ -868,7 +872,9 @@ export const setRagVisionConfig = async (
 
 // --- API Tools ---
 
-export const getApiToolsConfig = async (token: string): Promise<{
+export const getApiToolsConfig = async (
+	token: string
+): Promise<{
 	enabled: boolean;
 	allowed_categories: string[];
 	allow_tool_servers: boolean;
@@ -965,7 +971,7 @@ export const setSubagentsConfig = async (token: string, config: object) => {
 	});
 	if (!res.ok) throw await res.json();
 	return res.json();
-}
+};
 
 export const setDefaultPromptSuggestions = async (token: string, promptSuggestions: string) => {
 	let error = null;

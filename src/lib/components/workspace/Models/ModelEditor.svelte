@@ -124,7 +124,6 @@
 	// about it keep working.
 	let failoverProviders: Array<{
 		model_id: string;
-		capabilities: string[];
 	}> = [];
 	export let suggestionTags: { name: string }[] = [];
 	let voices: { id: string; name?: string }[] = [];
@@ -381,7 +380,7 @@
 		// keep working.
 		const validProviders = failoverProviders.filter((p) => p.model_id);
 		if (validProviders.length > 0) {
-			info.meta.failover_providers = validProviders;
+			info.meta.failover_providers = validProviders.map((p) => ({ model_id: p.model_id }));
 			info.base_model_id = validProviders[0].model_id;
 		} else {
 			if (info.meta.failover_providers) {
@@ -513,18 +512,19 @@
 			// Failover config: prefer the new ordered list if present; fall
 			// back to the legacy base_model_id as a one-entry list so old
 			// models auto-migrate on first edit.
-			if (Array.isArray(model?.meta?.failover_providers) && model.meta.failover_providers.length > 0) {
+			if (
+				Array.isArray(model?.meta?.failover_providers) &&
+				model.meta.failover_providers.length > 0
+			) {
 				failoverProviders = model.meta.failover_providers.map((p: any) => ({
 					// Tolerate the older {connection_url, model_name} shape
 					// by treating model_name as the id if model_id isn't set.
-					model_id: p.model_id ?? p.model_name ?? '',
-					capabilities: p.capabilities ?? []
+					model_id: p.model_id ?? p.model_name ?? ''
 				}));
 			} else if (model?.base_model_id) {
 				failoverProviders = [
 					{
-						model_id: model.base_model_id,
-						capabilities: []
+						model_id: model.base_model_id
 					}
 				];
 			} else {
