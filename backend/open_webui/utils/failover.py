@@ -165,8 +165,24 @@ async def resolve_failover_candidates(
     failover = None
     if model_info and model_info.meta:
         if getattr(model_info.meta, 'failover_source', None) == 'global':
-            chains = (await Config.get('models.wrapper_provider_chains')) or {}
-            raw_chain = chains.get(model_info.id) or []
+            chains_data = await Config.get('models.wrapper_provider_chains') or []
+            # Backwards compat: an earlier fork version stored this as
+            # ``{wrapper_id: [entries]}`` keyed by wrapper id. If we see a
+            # dict, fall back to the first non-empty value so legacy
+            # configs keep working until the admin re-saves through the
+            # new (flat) admin page.
+            if isinstance(chains_data, dict):
+                log.warning(
+                    'resolve_failover_candidates: legacy per-wrapper dict '
+                    'format for models.wrapper_provider_chains; falling back '
+                    'to the first non-empty chain.'
+                )
+                chains_data = next(
+                    (v for v in chains_data.values() if v),
+                    [],
+                )
+            if not isinstance(chains_data, list):
+                chains_data = []
             # PersistentConfig deserialises to plain dicts — normalise to the
             # attribute-access shape the loop below expects (carrying
             # max_concurrent through for the capacity tier).
@@ -174,7 +190,7 @@ async def resolve_failover_candidates(
                 entry
                 if not isinstance(entry, dict)
                 else SimpleNamespace(model_id=entry.get('model_id'), max_concurrent=entry.get('max_concurrent'))
-                for entry in raw_chain
+                for entry in chains_data
             ]
         elif getattr(model_info.meta, 'failover_providers', None):
             failover = model_info.meta.failover_providers

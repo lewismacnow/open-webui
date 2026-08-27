@@ -827,18 +827,30 @@ class WrapperChainEntry(BaseModel):
 
 
 class WrapperProviderChainsForm(BaseModel):
-    # { "<wrapper_model_id>": [ {model_id, max_concurrent}, ... ] }
-    WRAPPER_PROVIDER_CHAINS: dict[str, list[WrapperChainEntry]]
+    # A single global chain applied to every wrapper with
+    # ``failover_source='global'``. Not keyed by wrapper id — set once,
+    # applies everywhere.
+    WRAPPER_PROVIDER_CHAINS: list[WrapperChainEntry]
 
 
 @router.get('/models/wrapper-chains', response_model=WrapperProviderChainsForm)
 async def get_wrapper_provider_chains(request: Request, user=Depends(get_admin_user)):
-    """Return the global wrapper-model provider chains.
+    """Return the global wrapper-model provider chain.
 
     Admin-only — describes infrastructure routing (same posture as the
     per-base-model failover map above).
     """
-    return {'WRAPPER_PROVIDER_CHAINS': (await Config.get('models.wrapper_provider_chains')) or {}}
+    stored = await Config.get('models.wrapper_provider_chains') or []
+    # Backwards compat: an earlier fork version stored this as
+    # ``{wrapper_id: [entries]}``. If we see a dict, treat it as the
+    # legacy shape and surface an empty chain so the admin can re-save.
+    if isinstance(stored, dict):
+        log.warning(
+            'models.wrapper_provider_chains stored in legacy per-wrapper dict format; '
+            'clearing so the admin can re-save as a flat global chain.'
+        )
+        stored = []
+    return {'WRAPPER_PROVIDER_CHAINS': stored}
 
 
 @router.post('/models/wrapper-chains', response_model=WrapperProviderChainsForm)
@@ -847,14 +859,10 @@ async def set_wrapper_provider_chains(
     form_data: WrapperProviderChainsForm,
     user=Depends(get_admin_user),
 ):
-    """Replace the wrapper provider chains. Empty lists are dropped so the
-    persisted value stays small and absence-of-key is the canonical
-    'no global chain for this wrapper' (falls back to custom/legacy)."""
-    cleaned = {
-        wrapper_id: [entry.model_dump() for entry in entries]
-        for wrapper_id, entries in form_data.WRAPPER_PROVIDER_CHAINS.items()
-        if entries
-    }
+    """Replace the global wrapper provider chain. Entries with empty
+    ``model_id`` are dropped so the persisted value stays small.
+    """
+    cleaned = [entry.model_dump() for entry in form_data.WRAPPER_PROVIDER_CHAINS if entry.model_id]
     await Config.upsert({'models.wrapper_provider_chains': cleaned})
     return {'WRAPPER_PROVIDER_CHAINS': cleaned}
 

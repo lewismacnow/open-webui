@@ -1933,37 +1933,32 @@ async def chat_completion(
                         model_info.base_model_id,
                         getattr(model_info.meta, 'failover_source', None),
                     )
-                    chains = (await Config.get('models.wrapper_provider_chains')) or {}
-                    log.info(
-                        'process_chat_payload: wrapper_provider_chains keys=%s',
-                        list(chains.keys()),
-                    )
 
-                    # The chain is keyed by the wrapper's model id when the admin
-                    # UI saves it via the Wrapper Model Providers page. But the
-                    # key may also have been stored under the wrapper's
-                    # base_model_id or display name if the config was set up by
-                    # an earlier code path or imported. Try each plausible key.
-                    raw_chain = []
-                    for key in (
-                        model_info.id,
-                        model_info.base_model_id,
-                        model_info.name,
-                    ):
-                        if key and key in chains:
-                            candidate_chain = chains[key] or []
-                            if candidate_chain:
-                                raw_chain = candidate_chain
-                                log.info(
-                                    'process_chat_payload: matched chain on key=%s (%d entries)',
-                                    key,
-                                    len(raw_chain),
-                                )
-                                break
+                    # The chain is now a single GLOBAL list (set once in the
+                    # admin page, applied to every wrapper with
+                    # ``failover_source='global'``). Backwards-compat: legacy
+                    # data may still be a per-wrapper dict — handle that.
+                    chains_data = await Config.get('models.wrapper_provider_chains') or []
+                    if isinstance(chains_data, dict):
+                        log.warning(
+                            'process_chat_payload: legacy per-wrapper dict for '
+                            'models.wrapper_provider_chains; falling back to '
+                            'the first non-empty chain.'
+                        )
+                        chains_data = next(
+                            (v for v in chains_data.values() if v),
+                            [],
+                        )
+                    if not isinstance(chains_data, list):
+                        chains_data = []
+                    log.info(
+                        'process_chat_payload: global chain has %d entries',
+                        len(chains_data),
+                    )
 
                     health_cache = getattr(request.app.state, 'PROVIDER_HEALTH', None)
                     candidates = []
-                    if raw_chain:
+                    if chains_data:
                         try:
                             candidates = await resolve_failover_candidates(
                                 request=request,

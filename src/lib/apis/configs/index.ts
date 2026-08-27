@@ -800,13 +800,15 @@ export type WrapperChainEntry = {
 	max_concurrent: number | null;
 };
 
-export type WrapperProviderChains = Record<string, WrapperChainEntry[]>;
+// The chain is global — one list applied to every wrapper model with
+// failover_source='global'. Not keyed by wrapper id.
+export type WrapperProviderChains = WrapperChainEntry[];
 
 /**
- * Fetch the global per-wrapper-model provider chains.
+ * Fetch the global wrapper provider chain.
  *
- * Admin-only on the backend; returns an empty object when no chains have
- * been configured for any wrapper model.
+ * Admin-only on the backend; returns an empty array when no chain has
+ * been configured.
  */
 export const getWrapperProviderChains = async (token: string): Promise<WrapperProviderChains> => {
 	let error = null;
@@ -832,12 +834,12 @@ export const getWrapperProviderChains = async (token: string): Promise<WrapperPr
 		throw error;
 	}
 
-	return res?.WRAPPER_PROVIDER_CHAINS ?? {};
+	return res?.WRAPPER_PROVIDER_CHAINS ?? [];
 };
 
 export const setWrapperProviderChains = async (
 	token: string,
-	chains: WrapperProviderChains
+	chain: WrapperProviderChains
 ): Promise<WrapperProviderChains> => {
 	let error = null;
 
@@ -847,7 +849,7 @@ export const setWrapperProviderChains = async (
 			'Content-Type': 'application/json',
 			Authorization: `Bearer ${token}`
 		},
-		body: JSON.stringify({ WRAPPER_PROVIDER_CHAINS: chains })
+		body: JSON.stringify({ WRAPPER_PROVIDER_CHAINS: chain })
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
@@ -863,7 +865,7 @@ export const setWrapperProviderChains = async (
 		throw error;
 	}
 
-	return res?.WRAPPER_PROVIDER_CHAINS ?? {};
+	return res?.WRAPPER_PROVIDER_CHAINS ?? [];
 };
 
 // --- Vision Image RAG ---
