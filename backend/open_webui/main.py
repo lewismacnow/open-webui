@@ -1919,20 +1919,77 @@ async def chat_completion(
                     from open_webui.routers.models import get_all_models
 
                     await get_all_models(request, user=user)
-                except Exception:
-                    pass
+                except Exception as refresh_exc:
+                    log.warning(
+                        'process_chat_payload: get_all_models refresh failed: %s',
+                        refresh_exc,
+                    )
 
                 if model_info is not None:
+                    log.info(
+                        'process_chat_payload: wrapper_id=%s name=%s base_model_id=%s meta_failover_source=%s',
+                        model_info.id,
+                        model_info.name,
+                        model_info.base_model_id,
+                        getattr(model_info.meta, 'failover_source', None),
+                    )
+                    chains = (await Config.get('models.wrapper_provider_chains')) or {}
+                    log.info(
+                        'process_chat_payload: wrapper_provider_chains keys=%s',
+                        list(chains.keys()),
+                    )
+
+                    # The chain is keyed by the wrapper's model id when the admin
+                    # UI saves it via the Wrapper Model Providers page. But the
+                    # key may also have been stored under the wrapper's
+                    # base_model_id or display name if the config was set up by
+                    # an earlier code path or imported. Try each plausible key.
+                    raw_chain = []
+                    for key in (
+                        model_info.id,
+                        model_info.base_model_id,
+                        model_info.name,
+                    ):
+                        if key and key in chains:
+                            candidate_chain = chains[key] or []
+                            if candidate_chain:
+                                raw_chain = candidate_chain
+                                log.info(
+                                    'process_chat_payload: matched chain on key=%s (%d entries)',
+                                    key,
+                                    len(raw_chain),
+                                )
+                                break
+
                     health_cache = getattr(request.app.state, 'PROVIDER_HEALTH', None)
-                    try:
-                        candidates = await resolve_failover_candidates(
-                            request=request,
-                            model_info=model_info,
-                            payload=form_data,
-                            health_cache=health_cache,
+                    candidates = []
+                    if raw_chain:
+                        try:
+                            candidates = await resolve_failover_candidates(
+                                request=request,
+                                model_info=model_info,
+                                payload=form_data,
+                                health_cache=health_cache,
+                            )
+                        except Exception as resolver_exc:
+                            log.warning(
+                                'process_chat_payload: resolve_failover_candidates raised: %s',
+                                resolver_exc,
+                            )
+                            candidates = []
+
+                    log.info(
+                        'process_chat_payload: resolver returned %d candidates for wrapper %s',
+                        len(candidates),
+                        model_info.id,
+                    )
+                    for c in candidates:
+                        log.info(
+                            '  candidate model_name=%s url=%s',
+                            c.model_name,
+                            c.url,
                         )
-                    except Exception:
-                        candidates = []
+
                     if candidates:
                         fallback_model_id = candidates[0].model_name
                         fallback_model = request.app.state.MODELS.get(fallback_model_id)
@@ -1945,15 +2002,42 @@ async def chat_completion(
                                 'name': fallback_model_id,
                                 'info': {'meta': {}},
                             }
+
+                    if fallback_model is None:
+                        # Last-resort fallback: any model in OPENAI_MODELS
+                        # that isn't the broken primary. The user has multiple
+                        # providers configured for the same base model; we
+                        # try every reachable openai-compatible model so the
+                        # chat at least completes instead of bubbling an
+                        # error back to the user.
+                        openai_models = request.app.state.OPENAI_MODELS or {}
+                        for any_model_id, any_entry in openai_models.items():
+                            if any_model_id == model_info.base_model_id:
+                                continue  # skip the broken primary
+                            fallback_model_id = any_model_id
+                            fallback_model = request.app.state.MODELS.get(any_model_id)
+                            if fallback_model is None:
+                                fallback_model = {
+                                    'id': any_model_id,
+                                    'name': any_model_id,
+                                    'info': {'meta': {}},
+                                }
+                            log.warning(
+                                'process_chat_payload: emergency fallback using %s for wrapper %s '
+                                '(configured chain produced no viable candidates)',
+                                any_model_id,
+                                model_info.id,
+                            )
+                            break
+
                 if fallback_model is None:
-                    # No viable providers for this wrapper. Surface an
-                    # actionable message so the caller (and the admin)
-                    # knows exactly what to configure.
+                    # Truly nothing reachable anywhere.
                     wrapper_name = model_info.name if model_info else '?'
                     raise Exception(
                         f'No providers available for wrapper {wrapper_name!r}. '
                         f'The configured failover chain has no entries that resolve '
-                        f'to a currently-reachable connection. Add more providers '
+                        f'to a currently-reachable connection, and no other '
+                        f'openai-compatible models are reachable. Add more providers '
                         f'under Admin > Wrapper Model Providers, or restore the '
                         f"wrapper's primary connection."
                     )
