@@ -1946,7 +1946,17 @@ async def chat_completion(
                                 'info': {'meta': {}},
                             }
                 if fallback_model is None:
-                    raise Exception('Model not found')
+                    # No viable providers for this wrapper. Surface an
+                    # actionable message so the caller (and the admin)
+                    # knows exactly what to configure.
+                    wrapper_name = model_info.name if model_info else '?'
+                    raise Exception(
+                        f'No providers available for wrapper {wrapper_name!r}. '
+                        f'The configured failover chain has no entries that resolve '
+                        f'to a currently-reachable connection. Add more providers '
+                        f'under Admin > Wrapper Model Providers, or restore the '
+                        f"wrapper's primary connection."
+                    )
             # Update model and form_data so routing uses the fallback model's type
             model = fallback_model
             form_data['model'] = fallback_model['id']
