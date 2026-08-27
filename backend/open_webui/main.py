@@ -1908,6 +1908,20 @@ async def chat_completion(
                 # OPENAI_MODELS. With the primary provider disabled and B/C
                 # active, the resolver picks B and the chat transparently
                 # routes through it instead of bubbling 400 'Model not found'.
+                #
+                # First refresh OPENAI_MODELS — the cache is populated lazily
+                # by the OpenAI-compatible path's first request, but
+                # connection-disable events don't invalidate it. If we don't
+                # refresh, the resolver sees stale entries (or misses
+                # entries for newly-active connections) and the chain looks
+                # empty when it shouldn't.
+                try:
+                    from open_webui.routers.models import get_all_models
+
+                    await get_all_models(request, user=user)
+                except Exception:
+                    pass
+
                 if model_info is not None:
                     health_cache = getattr(request.app.state, 'PROVIDER_HEALTH', None)
                     try:
