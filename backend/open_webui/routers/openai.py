@@ -1921,7 +1921,9 @@ def _record_provider_failure(request: Request, error: RetryableProviderError) ->
     """Mark a provider as unhealthy in the app-state cache.
 
     Honors ``Retry-After`` from the error if present; otherwise defaults to
-    a 60-second cool-off so follow-up requests skip this provider.
+    a 15-second cool-off so follow-up requests skip this provider briefly
+    (avoiding retry storms on a downed upstream) and re-test it quickly
+    once the ban lifts.
     """
     if not error.provider_url:
         return
@@ -1929,7 +1931,7 @@ def _record_provider_failure(request: Request, error: RetryableProviderError) ->
     if health is None:
         request.app.state.PROVIDER_HEALTH = {}
         health = request.app.state.PROVIDER_HEALTH
-    unhealthy_for = error.retry_after if error.retry_after is not None else 60
+    unhealthy_for = error.retry_after if error.retry_after is not None else 15
     entry = health.setdefault(error.provider_url, {})
     entry['status'] = 'unhealthy'
     entry['last_error'] = error.detail
