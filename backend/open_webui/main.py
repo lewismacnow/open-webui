@@ -222,6 +222,7 @@ from open_webui.utils.chat import (
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
+from open_webui.utils.failover import resolve_failover_candidates
 from open_webui.utils.chat_id import (
     get_temporary_chat_session_id,
     is_saved_chat_id,
@@ -1901,7 +1902,37 @@ async def chat_completion(
         # Check base model existence for custom models
         if missing_base_model:
             if fallback_model is None:
-                raise Exception('Model not found')
+                # The legacy ``ui.default_models`` fallback didn't help. Try
+                # the wrapper's configured failover chain (global or custom)
+                # — the resolver finds the first viable provider by consulting
+                # OPENAI_MODELS. With the primary provider disabled and B/C
+                # active, the resolver picks B and the chat transparently
+                # routes through it instead of bubbling 400 'Model not found'.
+                if model_info is not None:
+                    health_cache = getattr(request.app.state, 'PROVIDER_HEALTH', None)
+                    try:
+                        candidates = await resolve_failover_candidates(
+                            request=request,
+                            model_info=model_info,
+                            payload=form_data,
+                            health_cache=health_cache,
+                        )
+                    except Exception:
+                        candidates = []
+                    if candidates:
+                        fallback_model_id = candidates[0].model_name
+                        fallback_model = request.app.state.MODELS.get(fallback_model_id)
+                        if fallback_model is None:
+                            # Candidate model is a real upstream model but
+                            # not registered as a workspace model — synthesise
+                            # a minimal dict so downstream checks pass.
+                            fallback_model = {
+                                'id': fallback_model_id,
+                                'name': fallback_model_id,
+                                'info': {'meta': {}},
+                            }
+                if fallback_model is None:
+                    raise Exception('Model not found')
             # Update model and form_data so routing uses the fallback model's type
             model = fallback_model
             form_data['model'] = fallback_model['id']
