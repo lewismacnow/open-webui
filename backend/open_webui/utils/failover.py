@@ -252,16 +252,33 @@ async def resolve_failover_candidates(
 
 
 def is_retryable_error(status_code: Optional[int], exc: Optional[BaseException]) -> bool:
-    """Does this failure mean we should try the next failover provider?"""
+    """Does this failure mean we should try the next failover provider?
+
+    Treat as retryable when the current provider clearly *can't fulfil*
+    this request — i.e. the model is unavailable at this URL (400/401/403/404
+    typically mean "model not found", bad auth, access denied, or endpoint
+    missing) or is too busy to serve it (429, 5xx).
+
+    Carve-outs for *client-side* failures that should NOT loop across
+    providers — the next provider would respond identically:
+
+    - 413 Payload Too Large: request body is too big for any provider.
+    - 422 Unprocessable Entity: validation error in the request payload.
+    """
     if exc is not None:
         # Network-layer: aiohttp.ClientError, asyncio.TimeoutError, OSError, etc.
         return True
     if status_code is None:
         return True
-    if status_code == 429:
+    if status_code in (400, 401, 403, 404, 429):
+        # 400/401/403/404 → "this provider can't serve this model"; try the
+        # next backup (e.g. admin disabled a connection, or the connection's
+        # model list is stale). 429 → rate limit; try the next backup.
         return True
     if 500 <= status_code < 600:
         return True
+    # 413 / 422 (and any other 4xx) — request-shape problems; retrying
+    # would just hit the same error on every provider.
     return False
 
 
