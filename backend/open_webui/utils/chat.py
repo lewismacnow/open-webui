@@ -31,6 +31,7 @@ from open_webui.utils.filter import (
     get_filter_functions,
     process_filter_functions,
 )
+from open_webui.utils.failover import resolve_failover_candidates
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.models import check_model_access, get_all_models
 from open_webui.utils.payload import convert_payload_openai_to_ollama
@@ -42,6 +43,78 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
+
+
+async def _resolve_via_failover_chain(
+    request: Request,
+    model_id: str,
+    form_data: dict,
+    user,
+) -> Optional[dict]:
+    """Find the wrapper whose ``base_model_id`` matches ``model_id`` and
+    resolve a failover chain for it. Returns a minimal model dict built
+    from the first viable candidate so the rest of the flow can proceed;
+    the actual HTTP failover happens in ``generate_openai_chat_completion``.
+
+    Used as a fallback when the static ``app.state.MODELS`` lookup misses
+    (typically because the wrapper's primary provider was disabled and
+    the underlying ``base_model_id`` is no longer in the cache). Without
+    this, the chat UI path raises 'Model not found' *before* the failover
+    resolver gets a chance to try alternative providers.
+
+    The wrapper's own access check is applied here — if the caller can't
+    use the wrapper, we return ``None`` so the upstream 'Model not found'
+    is preserved (it's the same security posture as if the wrapper's
+    base_model_id were still cached).
+    """
+    health_cache = getattr(request.app.state, 'PROVIDER_HEALTH', None)
+
+    for wrapper_dict in (request.app.state.MODELS or {}).values():
+        info = wrapper_dict.get('info') if isinstance(wrapper_dict, dict) else {}
+        if not isinstance(info, dict):
+            continue
+        if info.get('base_model_id') != model_id:
+            continue
+        wrapper_id = wrapper_dict.get('id')
+        if not wrapper_id:
+            continue
+
+        # Caller must already have access to the wrapper itself, otherwise
+        # we'd be routing them to a model they can't see.
+        try:
+            await check_model_access(user, wrapper_dict)
+        except Exception:
+            continue
+
+        wrapper_model_info = await Models.get_model_by_id(wrapper_id)
+        if wrapper_model_info is None:
+            continue
+
+        # Try to resolve a candidate chain for this wrapper. Any failure
+        # here (e.g. a malformed entry) just means we move on to the next
+        # candidate wrapper; only a successfully-built candidate chain
+        # returns a synthetic model.
+        try:
+            candidates = await resolve_failover_candidates(
+                request=request,
+                model_info=wrapper_model_info,
+                payload=form_data,
+                health_cache=health_cache,
+            )
+        except Exception:
+            continue
+        if candidates:
+            first = candidates[0]
+            # Minimal model dict — the actual chat completion reads
+            # ``form_data['model']`` (the rewritten base_model_id), not
+            # ``model``. This dict just lets the downstream checks
+            # (``check_model_access``, arena/pipeline gating) pass.
+            return {
+                'id': first.model_name,
+                'name': first.model_name,
+                'info': {'meta': {}},
+            }
+    return None
 
 
 # When the question has been asked, let silence not be the
@@ -193,7 +266,16 @@ async def generate_chat_completion(
     # round trips on a Redis-backed model pool.
     model = models.get(model_id)
     if model is None:
-        raise Exception('Model not found')
+        # Static cache miss. The model_id here is typically the wrapper's
+        # base_model_id (rewritten earlier in the pipeline). When the
+        # wrapper's primary provider is disabled/removed, that base_model_id
+        # isn't in app.state.MODELS — but the wrapper itself still has a
+        # failover chain that can serve it. Look up the wrapper that uses
+        # this base_model_id and resolve via its chain; the actual HTTP
+        # failover happens downstream in generate_openai_chat_completion.
+        model = await _resolve_via_failover_chain(request, model_id, form_data, user)
+        if model is None:
+            raise Exception('Model not found')
 
     if getattr(request.state, 'direct', False) and model_id == getattr(request.state, 'model', {}).get('id'):
         return await generate_direct_chat_completion(request, form_data, user=user, models=models)
