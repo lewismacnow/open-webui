@@ -670,16 +670,26 @@ def merge_and_sort_query_results(query_results: list[dict], k: int, r: float = 0
                     combined[doc_hash] = (distance, document, metadata)
 
     combined = list(combined.values())
-    # Sort the list based on distances
+    # Sort the list based on distances (1.0 = most similar per the docstring)
     combined.sort(key=lambda x: x[0], reverse=True)
 
-    # Drop results below the relevance threshold. Distances are normalised so
-    # 1.0 = most similar; keep only those >= r. r=0.0 (default) keeps all,
-    # preserving prior behaviour. This is the only place the admin-configured
-    # RAG_RELEVANCE_THRESHOLD takes effect on the NON-hybrid path (hybrid
-    # filtering happens in RerankCompressor.r_score).
-    if r:
-        combined = [item for item in combined if item[0] >= r]
+    # Apply the admin relevance threshold as a SOFT filter against the top-k
+    # window only. Semantics:
+    #   - r = 0 (default): keep everything, preserving prior behaviour.
+    #   - r > 0 and len(combined) > k: filter the top-k window so the worst
+    #     of the kept-window docs can be pruned when we'd otherwise return
+    #     more than k. Anything below position k would never have been shown
+    #     anyway, so we don't bother filtering it.
+    #   - r > 0 and len(combined) <= k: don't apply the filter at all — the
+    #     user would rather see fewer-but-relevant docs than nothing.
+    #     (Hybrid path's equivalent threshold lives in RerankCompressor.r_score.)
+    if r and len(combined) > k:
+        window = combined[:k]
+        kept_window = [item for item in window if item[0] >= r]
+        combined = kept_window + combined[k:]
+    elif r:
+        # <= k total — just return all of them, threshold doesn't reduce anything.
+        pass
 
     # Slice to keep only the top k elements
     sorted_distances, sorted_documents, sorted_metadatas = zip(*combined[:k]) if combined else ([], [], [])
