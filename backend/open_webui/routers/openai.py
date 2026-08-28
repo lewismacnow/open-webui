@@ -5,7 +5,7 @@ import hashlib
 import logging
 import re
 import time
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote, urlparse
 
 import aiofiles
@@ -1493,6 +1493,11 @@ async def generate_chat_completion(
     form_data: dict,
     user=Depends(get_verified_user),
 ):
+    # Used by the API token-usage recorder (see below). Captured at
+    # handler entry so the post-flight `duration_ms` is the full
+    # wall-time of the upstream call.
+    _req_started = time.monotonic()
+
     if not await Config.get('openai.enable'):
         raise HTTPException(status_code=503, detail='OpenAI API is disabled')
 
@@ -1577,13 +1582,23 @@ async def generate_chat_completion(
     for i, candidate in enumerate(candidates):
         is_last = i == len(candidates) - 1
         try:
-            return await _try_provider_candidate(
+            result = await _try_provider_candidate(
                 request=request,
                 candidate=candidate,
                 payload=payload,
                 metadata=metadata,
                 user=user,
             )
+            # Record API token usage for the successful attempt. Fire-and-
+            # forget so the client response isn't blocked on the DB write.
+            _record_api_token_usage(
+                request,
+                user=user,
+                result_or_data=result,
+                endpoint='chat',
+                duration_ms=int((time.monotonic() - _req_started) * 1000),
+            )
+            return result
         except RetryableProviderError as rpe:
             last_error = rpe
             log.info(
@@ -1915,6 +1930,69 @@ async def _try_provider_candidate(
         if not streaming:
             await _release_inflight_once()
             await cleanup_response(r)
+
+
+def _record_api_token_usage(
+    request: Request,
+    *,
+    user,
+    result_or_data,
+    endpoint: str,
+    duration_ms: int,
+) -> None:
+    """Fire-and-forget API token-usage recorder.
+
+    Called from each OpenAI-compatible handler after a successful upstream
+    response. Pulls prompt/completion tokens from the response's ``usage``
+    block and persists one row to ``api_token_usage``. The api_key_id is
+    taken from ``request.state.api_key`` (set by the auth dependency when
+    the call was authenticated by an API key) so the analytics view can
+    attribute per-key usage.
+
+    Errors here are deliberately swallowed — recording is bookkeeping
+    and must never fail the user-facing request.
+    """
+    try:
+        from open_webui.models.api_token_usage import ApiTokenUsages
+        from open_webui.utils.token_recorder import extract_response_tokens
+
+        # `result_or_data` is the dict response (or a dict-like wrapper
+        # from the Responses API). We pull usage defensively.
+        usage_obj: Any = None
+        if isinstance(result_or_data, dict):
+            usage_obj = result_or_data.get('usage')
+        elif hasattr(result_or_data, 'model_dump'):
+            try:
+                usage_obj = result_or_data.model_dump().get('usage')
+            except Exception:
+                usage_obj = None
+        prompt, completion = extract_response_tokens(usage_obj)
+        if not prompt and not completion:
+            return  # upstream didn't report usage (e.g. older models)
+
+        api_key_row = getattr(request.state, 'api_key', None)
+        model_id = (
+            (isinstance(result_or_data, dict) and result_or_data.get('model'))
+            or (hasattr(result_or_data, 'model') and getattr(result_or_data, 'model', None))
+            or 'unknown'
+        )
+        import asyncio as _asyncio
+
+        _asyncio.create_task(
+            ApiTokenUsages.record(
+                user_id=user.id,
+                api_key_id=api_key_row.id if api_key_row else None,
+                model_id=model_id,
+                endpoint=endpoint,
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                duration_ms=duration_ms,
+                status_code=200,
+                trace_id=getattr(request.state, 'trace_id', None),
+            )
+        )
+    except Exception as _exc:
+        log.debug('api_token_usage record skipped: %s', _exc)
 
 
 def _record_provider_failure(request: Request, error: RetryableProviderError) -> None:

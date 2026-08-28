@@ -232,6 +232,38 @@ class TokenUsageResponse(BaseModel):
     total_tokens: int
 
 
+class ApiKeyTokenUsageEntry(BaseModel):
+    api_key_id: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    request_count: int
+
+
+class ApiKeyTokenUsageResponse(BaseModel):
+    keys: list[ApiKeyTokenUsageEntry]
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+    total_request_count: int
+
+
+class EndpointTokenUsageEntry(BaseModel):
+    endpoint: str  # 'chat' | 'embedding' | 'response'
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    request_count: int
+
+
+class EndpointTokenUsageResponse(BaseModel):
+    endpoints: list[EndpointTokenUsageEntry]
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+    total_request_count: int
+
+
 @router.get('/tokens', response_model=TokenUsageResponse)
 async def get_token_usage(
     start_date: Optional[int] = Query(None),
@@ -258,6 +290,60 @@ async def get_token_usage(
         total_input_tokens=total_input,
         total_output_tokens=total_output,
         total_tokens=total_input + total_output,
+    )
+
+
+##########################
+# API token usage analytics
+##########################
+#
+# These endpoints aggregate the `api_token_usage` table populated by
+# the OpenAI-compatible handlers in `routers/openai.py`. They surface
+# API-path usage (currently invisible to Admin > Analytics, which only
+# reads `chat_message.usage`) so the admin can see per-key / per-model
+# / per-endpoint breakdowns.
+##########################
+
+
+@router.get('/api-keys/tokens', response_model=ApiKeyTokenUsageResponse)
+async def get_api_key_token_usage(
+    limit: int = Query(50, description='Max API keys to return'),
+    start_date: Optional[int] = Query(None),
+    end_date: Optional[int] = Query(None),
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Top API keys by total token usage in the window."""
+    from open_webui.models.api_token_usage import ApiTokenUsages
+
+    keys = await ApiTokenUsages.get_top_api_keys(limit=limit, start_date=start_date, end_date=end_date, db=db)
+    return ApiKeyTokenUsageResponse(
+        keys=[ApiKeyTokenUsageEntry(**k) for k in keys],
+        total_prompt_tokens=sum(k['prompt_tokens'] for k in keys),
+        total_completion_tokens=sum(k['completion_tokens'] for k in keys),
+        total_tokens=sum(k['total_tokens'] for k in keys),
+        total_request_count=sum(k['request_count'] for k in keys),
+    )
+
+
+@router.get('/endpoints/tokens', response_model=EndpointTokenUsageResponse)
+async def get_endpoint_token_usage(
+    start_date: Optional[int] = Query(None),
+    end_date: Optional[int] = Query(None),
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Token usage broken down by endpoint surface (chat / embedding /
+    response). Lets the admin see the UI vs API split in one view."""
+    from open_webui.models.api_token_usage import ApiTokenUsages
+
+    endpoints = await ApiTokenUsages.get_by_endpoint(start_date=start_date, end_date=end_date, db=db)
+    return EndpointTokenUsageResponse(
+        endpoints=[EndpointTokenUsageEntry(endpoint=k, **v) for k, v in endpoints.items()],
+        total_prompt_tokens=sum(v['prompt_tokens'] for v in endpoints.values()),
+        total_completion_tokens=sum(v['completion_tokens'] for v in endpoints.values()),
+        total_tokens=sum(v['total_tokens'] for v in endpoints.values()),
+        total_request_count=sum(v['request_count'] for v in endpoints.values()),
     )
 
 

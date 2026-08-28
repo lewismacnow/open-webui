@@ -322,7 +322,7 @@ class UsersTable:
             user = await session.get(User, id)
             return UserModel.model_validate(user) if user else None
 
-    # api key auth helper
+    # api key auth helpers
     async def get_user_by_api_key(
         self,
         api_key: str,
@@ -335,6 +335,22 @@ class UsersTable:
             )
             user = result.scalars().first()
             return UserModel.model_validate(user) if user else None
+
+    async def get_api_key_by_key(
+        self,
+        api_key: str,
+        db: AsyncSession | None = None,
+    ) -> Optional[ApiKeyModel]:
+        """Resolve the API key row (id, user_id, …) from the raw key string.
+
+        Used by the auth dependency to expose ``request.state.api_key`` so
+        downstream hooks (token recorder, cap tracker) can attribute
+        usage to the specific key without re-querying.
+        """
+        async with get_async_db_context(db) as session:
+            row = await session.execute(select(ApiKey).where(ApiKey.key == api_key))
+            key_row = row.scalars().first()
+            return ApiKeyModel.model_validate(key_row) if key_row else None
 
     async def get_user_by_email(
         self,
