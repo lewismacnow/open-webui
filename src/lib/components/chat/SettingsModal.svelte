@@ -50,6 +50,7 @@
 	import AdminApiTools from '$lib/components/admin/Settings/ApiTools.svelte';
 	import WrapperModelProviders from '$lib/components/admin/Settings/WrapperModelProviders.svelte';
 	import ToolsConfig from '$lib/components/admin/Settings/ToolsConfig.svelte';
+	import TokenCaps from '$lib/components/admin/Settings/TokenCaps.svelte';
 	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
 	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
 	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
@@ -165,6 +166,7 @@
 		'admin:documents': 'Tools',
 		'admin:api-tools': 'Tools',
 		'admin:tools-config': 'Tools',
+		'admin:token-caps': 'Tools',
 		'admin:web': 'Tools',
 		'admin:code-execution': 'Tools',
 		'admin:pipelines': 'Tools',
@@ -795,6 +797,23 @@
 			keywords: ['tools', 'grep', 'regex', 'budget', 'timeout', 'ranking', 'knowledge files']
 		},
 		{
+			id: 'admin:token-caps',
+			title: 'Token Caps',
+			keywords: [
+				'token',
+				'cap',
+				'limit',
+				'quota',
+				'budget',
+				'rate',
+				'usage',
+				'api key',
+				'model',
+				'group',
+				'user'
+			]
+		},
+		{
 			id: 'admin:web',
 			title: 'Web Search',
 			keywords: ['web search', 'google', 'bing', 'duckduckgo', 'serp', 'searxng', 'tavily', 'exa']
@@ -1320,6 +1339,8 @@
 				<WrapperModelProviders />
 			{:else if selectedTab === 'admin:tools-config'}
 				<ToolsConfig />
+			{:else if selectedTab === 'admin:token-caps'}
+				<TokenCaps />
 			{:else if selectedTab === 'admin:web'}
 				<AdminWebSearch saveHandler={adminConfigSaveHandler} />
 			{:else if selectedTab === 'admin:code-execution'}
