@@ -2,7 +2,6 @@
 	import { onMount, getContext } from 'svelte';
 	import { models } from '$lib/stores';
 	import { toast } from 'svelte-sonner';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
 	import {
 		getWrapperProviderChains,
 		setWrapperProviderChains,
@@ -10,7 +9,6 @@
 	} from '$lib/apis/configs';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
-	import AdminSettingField from './AdminSettingField.svelte';
 	import AdminSettingSection from './AdminSettingSection.svelte';
 
 	const i18n: any = getContext('i18n');
@@ -25,12 +23,6 @@
 	// Debounced autosave handle (ApiTools-style change-driven save, with a
 	// short debounce because chain edits fire many change events).
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
-
-	// RAG relevance threshold (DB config key 'rag.relevance_threshold').
-	// Local copy + last-saved copy so the dirty check can skip no-op saves.
-	let relevanceThreshold: number = 0;
-	let savedThreshold: number = 0;
-	let thresholdSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Provider candidates: non-preset, non-arena, non-direct (same filter
 	// as FailoverProviders.svelte). No wrapper exclusion — the chain is
@@ -121,78 +113,12 @@
 		scheduleSave();
 	}
 
-	// --- RAG relevance threshold (DB config key 'rag.relevance_threshold') ---
-
-	// Read the persisted threshold from the rag config namespace. Missing
-	// or invalid values fall back to 0 (soft filter off).
-	async function fetchRelevanceThreshold(token: string): Promise<number> {
-		const res = await fetch(`${WEBUI_API_BASE_URL}/configs/namespace/rag`, {
-			headers: {
-				Authorization: `Bearer ${token}`
-			}
-		});
-		if (!res.ok) throw await res.json();
-		const config = await res.json();
-		const raw = config?.['rag.relevance_threshold'];
-		const parsed = typeof raw === 'string' ? parseFloat(raw) : Number(raw);
-		return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0;
-	}
-
-	// Persist via the generic config import endpoint (admin-only; upserts
-	// only the provided key, leaving every other DB config entry intact).
-	async function persistRelevanceThreshold(token: string, value: number): Promise<void> {
-		const res = await fetch(`${WEBUI_API_BASE_URL}/configs/import`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				Authorization: `Bearer ${token}`
-			},
-			body: JSON.stringify({ config: { 'rag.relevance_threshold': value } })
-		});
-		if (!res.ok) throw await res.json();
-	}
-
-	function scheduleThresholdSave() {
-		if (!loaded) return;
-		if (thresholdSaveTimer) clearTimeout(thresholdSaveTimer);
-		thresholdSaveTimer = setTimeout(() => {
-			thresholdSaveTimer = null;
-			saveThreshold();
-		}, 800);
-	}
-
-	async function saveThreshold() {
-		if (thresholdSaveTimer) {
-			clearTimeout(thresholdSaveTimer);
-			thresholdSaveTimer = null;
-		}
-		if (!loaded) return;
-		// Clamp into [0, 1]; an empty/invalid input counts as 0.
-		const value = Math.min(1, Math.max(0, Number(relevanceThreshold) || 0));
-		relevanceThreshold = value;
-		if (value === savedThreshold) return;
-		try {
-			await persistRelevanceThreshold(localStorage.token, value);
-			savedThreshold = value;
-			toast.success($i18n.t('RAG relevance threshold saved'));
-		} catch (e) {
-			toast.error($i18n.t('Failed to save RAG relevance threshold'));
-		}
-	}
-
 	onMount(async () => {
 		try {
 			chain = await getWrapperProviderChains(localStorage.token);
 		} catch (e) {
 			console.error('Failed to load wrapper provider chain:', e);
 			toast.error($i18n.t('Failed to load wrapper model providers'));
-		}
-
-		try {
-			relevanceThreshold = await fetchRelevanceThreshold(localStorage.token);
-			savedThreshold = relevanceThreshold;
-		} catch (e) {
-			console.error('Failed to load RAG relevance threshold:', e);
 		}
 		loaded = true;
 	});
@@ -204,27 +130,7 @@
 	</h2>
 
 	<div class="flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5">
-		<AdminSettingSection title={$i18n.t('RAG')} first>
-			<AdminSettingField
-				label={$i18n.t('RAG relevance threshold')}
-				description={$i18n.t(
-					'Soft filter for RAG results. 0 = return everything (default). Higher values drop low-similarity docs from the top-k window. Range: 0.0–1.0.'
-				)}
-			>
-				<input
-					type="number"
-					step="0.01"
-					min="0"
-					max="1"
-					class="w-28 text-sm bg-transparent outline-none border border-gray-200 dark:border-gray-700 rounded px-1.5 py-0.5"
-					bind:value={relevanceThreshold}
-					on:change={scheduleThresholdSave}
-					on:blur={saveThreshold}
-				/>
-			</AdminSettingField>
-		</AdminSettingSection>
-
-		<AdminSettingSection title={$i18n.t('Global Provider Chain')}>
+		<AdminSettingSection title={$i18n.t('Global Provider Chain')} first>
 			<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
 				{$i18n.t(
 					'Global provider chain — applies to every wrapper model set to use the global chain (configured per-wrapper via the model editor).'
@@ -369,10 +275,7 @@
 		<button
 			type="button"
 			class="px-3.5 py-1.5 text-sm font-medium bg-black dark:bg-white text-white dark:text-black rounded-lg transition disabled:opacity-50"
-			on:click={() => {
-				save();
-				saveThreshold();
-			}}
+			on:click={save}
 			disabled={!loaded || saving}
 		>
 			{$i18n.t('Save')}

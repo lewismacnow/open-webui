@@ -1356,24 +1356,6 @@
 								/>
 							</AdminSettingField>
 
-							<AdminSettingField
-								label={$i18n.t('Relevance Threshold')}
-								description={$i18n.t(
-									'Only return documents with a score greater than or equal to this value.'
-								)}
-							>
-								<input
-									class={inputClass}
-									type="number"
-									step="0.01"
-									placeholder={$i18n.t('Enter Score')}
-									bind:value={RAGConfig.RELEVANCE_THRESHOLD}
-									autocomplete="off"
-									min="0.0"
-									title={$i18n.t('The score should be a value between 0.0 (0%) and 1.0 (100%).')}
-								/>
-							</AdminSettingField>
-
 							<AdminSettingRow
 								label={$i18n.t('BM25 Weight')}
 								description={$i18n.t('Balance semantic and lexical weighting for hybrid search.')}
@@ -1424,6 +1406,25 @@
 						{/if}
 					{/if}
 				{/if}
+
+				<AdminSettingField
+					label={$i18n.t('Relevance Threshold')}
+					description={$i18n.t(
+						'Soft filter for RAG results. 0 = return everything (default). Higher values drop low-similarity docs from the top-k window. Range: 0.0–1.0.'
+					)}
+				>
+					<input
+						class={inputClass}
+						type="number"
+						step="0.01"
+						min="0"
+						max="1"
+						placeholder={$i18n.t('Enter Score')}
+						bind:value={RAGConfig.RELEVANCE_THRESHOLD}
+						autocomplete="off"
+						title={$i18n.t('The score should be a value between 0.0 (0%) and 1.0 (100%).')}
+					/>
+				</AdminSettingField>
 
 				<AdminSettingField
 					label={$i18n.t('RAG Template')}
@@ -1496,76 +1497,74 @@
 							min="0"
 						/>
 					</AdminSettingField>
-				<AdminSettingField
-					label={$i18n.t('Image RAG Query Generation Prompt')}
-					description={$i18n.t(
-						'Prompt used to generate RAG search queries from images when no text is provided. Leave empty for default.'
-					)}
-				>
-					<Textarea
-						className={textareaClass}
-						placeholder={$i18n.t(
-							'Leave empty to use the default prompt, or enter a custom prompt'
+					<AdminSettingField
+						label={$i18n.t('Image RAG Query Generation Prompt')}
+						description={$i18n.t(
+							'Prompt used to generate RAG search queries from images when no text is provided. Leave empty for default.'
 						)}
-						bind:value={RAGConfig.IMAGE_RAG_QUERY_GENERATION_PROMPT_TEMPLATE}
-					/>
-				</AdminSettingField>
+					>
+						<Textarea
+							className={textareaClass}
+							placeholder={$i18n.t(
+								'Leave empty to use the default prompt, or enter a custom prompt'
+							)}
+							bind:value={RAGConfig.IMAGE_RAG_QUERY_GENERATION_PROMPT_TEMPLATE}
+						/>
+					</AdminSettingField>
 
-				<AdminSettingField
-					label={$i18n.t('Vision Support Model')}
-					description={$i18n.t(
-						'Used to describe images for RAG when the chatting model does not support vision. Leave disabled to use only vision-capable chatting models.'
-					)}
-				>
-					<select
-						class={inputClass}
-						bind:value={visionSupportModel}
-						on:change={async () => {
-							const res = await setRagVisionConfig(
-								localStorage.token,
-								{
+					<AdminSettingField
+						label={$i18n.t('Vision Support Model')}
+						description={$i18n.t(
+							'Used to describe images for RAG when the chatting model does not support vision. Leave disabled to use only vision-capable chatting models.'
+						)}
+					>
+						<select
+							class={inputClass}
+							bind:value={visionSupportModel}
+							on:change={async () => {
+								const res = await setRagVisionConfig(localStorage.token, {
 									VISION_SUPPORT_MODEL: visionSupportModel,
 									VISION_SYSTEM_PROMPT: visionSystemPrompt
+								}).catch((error) => {
+									toast.error(`${error}`);
+									return null;
+								});
+								if (res !== null) {
+									toast.success($i18n.t('Vision Support Model updated successfully'));
 								}
-							).catch((error) => {
-								toast.error(`${error}`);
-								return null;
-							});
-							if (res !== null) {
-								toast.success($i18n.t('Vision Support Model updated successfully'));
-							}
-						}}
+							}}
+						>
+							<option value="">{$i18n.t('Disabled (vision models only)')}</option>
+							{#each $models as model}
+								<option value={model.id}>
+									{model.name}
+									{model?.connection_type === 'local' ? `(${$i18n.t('Local')})` : ''}
+								</option>
+							{/each}
+						</select>
+					</AdminSettingField>
+
+					<AdminSettingField
+						label={$i18n.t('Vision Support System Prompt')}
+						description={$i18n.t(
+							"Optional system prompt sent to the Vision Support Model when describing images. When set, this replaces the default describe prompt and the chatting model's system prompt, giving you full control over how images are described and OCR'd. Leave empty to use the built-in default."
+						)}
 					>
-						<option value="">{$i18n.t('Disabled (vision models only)')}</option>
-						{#each $models as model}
-							<option value={model.id}>
-								{model.name}
-								{model?.connection_type === 'local' ? `(${$i18n.t('Local')})` : ''}
-							</option>
-						{/each}
-					</select>
-				</AdminSettingField>
-
-				<AdminSettingField
-					label={$i18n.t('Vision Support System Prompt')}
-					description={$i18n.t(
-						'Optional system prompt sent to the Vision Support Model when describing images. When set, this replaces the default describe prompt and the chatting model\'s system prompt, giving you full control over how images are described and OCR\'d. Leave empty to use the built-in default.'
-					)}
-				>
-					<Textarea
-						bind:value={visionSystemPrompt}
-						on:change={async () => {
-							await setRagVisionConfig(localStorage.token, {
-								VISION_SUPPORT_MODEL: visionSupportModel,
-								VISION_SYSTEM_PROMPT: visionSystemPrompt
-							});
-						}}
-						placeholder={$i18n.t('Describe images for the non-vision chat model, including visual details and full OCR of any visible text...')}
-						rows={6}
-						class={textareaClass}
-					/>
-				</AdminSettingField>
-
+						<Textarea
+							bind:value={visionSystemPrompt}
+							on:change={async () => {
+								await setRagVisionConfig(localStorage.token, {
+									VISION_SUPPORT_MODEL: visionSupportModel,
+									VISION_SYSTEM_PROMPT: visionSystemPrompt
+								});
+							}}
+							placeholder={$i18n.t(
+								'Describe images for the non-vision chat model, including visual details and full OCR of any visible text...'
+							)}
+							rows={6}
+							class={textareaClass}
+						/>
+					</AdminSettingField>
 				</div>
 
 				<div class="grid grid-cols-1 gap-x-3 gap-y-2.5 sm:grid-cols-2">
