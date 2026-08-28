@@ -46,11 +46,12 @@ def _get_encoding(model_id: str | None) -> Optional[Any]:
     """
     if not _TIKTOKEN_AVAILABLE or tiktoken is None:
         return None
-    # Strip any model-name suffix (e.g. "gpt-4o-2024-08-06") — tiktoken
-    # expects the family root.
-    family = (model_id or '').split('-')[0] if model_id else ''
-    if family in _ENCODING_CACHE:
-        return _ENCODING_CACHE[family]
+    # Cache key is the FULL model id (review warning W7: keying on the
+    # first dash-segment made gpt-4 (cl100k) and gpt-4o (o200k) share
+    # one cached encoding depending on which was seen first).
+    cache_key = model_id or '_default'
+    if cache_key in _ENCODING_CACHE:
+        return _ENCODING_CACHE[cache_key]
     try:
         enc = tiktoken.encoding_for_model(model_id or 'gpt-4o')
     except Exception:
@@ -59,7 +60,7 @@ def _get_encoding(model_id: str | None) -> Optional[Any]:
         except Exception:
             log.debug('tiktoken: no encoding available for %r', model_id)
             return None
-    _ENCODING_CACHE[family or '_default'] = enc
+    _ENCODING_CACHE[cache_key] = enc
     return enc
 
 
@@ -118,6 +119,44 @@ def count_request_tokens(messages: Iterable[dict] | None, model_id: str | None) 
         # Role marker contribution (already covered by the +3 above for
         # the role name; we don't need to encode the literal role text).
     total += 3  # <|im_end|> reply primer
+    return total
+
+
+def count_text_tokens(text_or_input: Any, model_id: str | None) -> int:
+    """Pre-flight estimate for embeddings / responses inputs.
+
+    ``input`` can be a plain string, a list of strings (OpenAI
+    embeddings format), or a list of content dicts (Responses API
+    items carrying ``text`` / ``input_text``). Uses the same encoding
+    strategy as ``count_request_tokens``: tiktoken when available,
+    chars/4 heuristic as the fallback.
+    """
+    if text_or_input is None:
+        return 0
+
+    texts: list[str] = []
+    if isinstance(text_or_input, str):
+        texts = [text_or_input]
+    elif isinstance(text_or_input, list):
+        for item in text_or_input:
+            if isinstance(item, str):
+                texts.append(item)
+            elif isinstance(item, dict):
+                texts.append(str(item.get('text') or item.get('input_text') or ''))
+    else:
+        texts = [str(text_or_input)]
+
+    texts = [t for t in texts if t]
+    if not texts:
+        return 0
+
+    enc = _get_encoding(model_id)
+    if enc is None:
+        return max(1, sum(len(t) for t in texts) // 4)
+
+    total = 0
+    for t in texts:
+        total += len(enc.encode(t))
     return total
 
 

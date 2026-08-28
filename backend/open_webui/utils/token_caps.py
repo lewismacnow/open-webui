@@ -103,17 +103,21 @@ class _TokenCaps:
         return getattr(app_state, 'redis', None) is not None
 
     # ---------- redis / memory helpers ----------
-    def _get_count(self, app_state: Any, target_type: str, target_id: str, window: str, bucket: int) -> int:
+    async def _get_count(self, app_state: Any, target_type: str, target_id: str, window: str, bucket: int) -> int:
         key = self._bucket_key(target_type, target_id, window, bucket)
         if self._redis_available(app_state):
             try:
-                v = app_state.redis.get(key)
+                # app.state.redis is the ASYNC client — must await (review
+                # finding B2: the previous sync-style call returned an
+                # unawaited coroutine, TypeError'd inside int(), and silently
+                # degraded every check to the per-process memory fallback).
+                v = await app_state.redis.get(key)
                 return int(v) if v else 0
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning('token_caps: Redis get failed (%s), using memory fallback', e)
         return self._memory.get(key, 0)
 
-    def _incr(
+    async def _incr(
         self,
         app_state: Any,
         target_type: str,
@@ -125,15 +129,19 @@ class _TokenCaps:
         key = self._bucket_key(target_type, target_id, window, bucket)
         if self._redis_available(app_state):
             try:
-                new = app_state.redis.incrby(key, amount)
+                new = await app_state.redis.incrby(key, amount)
                 # First-increment in a bucket — set TTL slightly beyond the
                 # window so stale buckets self-clean.
                 ttl = WINDOW_SECONDS.get(window, 86400) + 60
-                app_state.redis.expire(key, ttl)
+                await app_state.redis.expire(key, ttl)
                 return int(new)
-            except Exception:
-                pass
-        # Memory fallback
+            except Exception as e:
+                log.warning('token_caps: Redis incr failed (%s), using memory fallback', e)
+        # Memory fallback. Guard against unbounded growth (review W5):
+        # keys embed bucket_start so stale entries never collide but also
+        # never evict — wholesale clear past the threshold.
+        if len(self._memory) > 10_000:
+            self._memory.clear()
         cur = self._memory.get(key, 0)
         new = cur + amount
         self._memory[key] = max(0, new)
@@ -161,7 +169,7 @@ class _TokenCaps:
             out.append(('model', model_id))
         return out
 
-    def check(
+    async def check(
         self,
         app_state: Any,
         caps: dict[tuple[str, str], TokenCap],
@@ -190,7 +198,7 @@ class _TokenCaps:
                 if not limit or limit <= 0:
                     continue
                 bucket = _window_start_epoch(window, now)
-                current = self._get_count(app_state, target_type, target_id, window, bucket)
+                current = await self._get_count(app_state, target_type, target_id, window, bucket)
                 would_be = current + projected_tokens
                 if would_be > limit:
                     return CapHit(
@@ -202,7 +210,7 @@ class _TokenCaps:
                     )
         return None
 
-    def record(
+    async def record(
         self,
         app_state: Any,
         targets: list[tuple[str, str]],
@@ -215,7 +223,7 @@ class _TokenCaps:
         for target_type, target_id in targets:
             for window in ('hourly', 'daily', 'weekly', 'monthly'):
                 bucket = _window_start_epoch(window, now)
-                self._incr(app_state, target_type, target_id, window, bucket, tokens)
+                await self._incr(app_state, target_type, target_id, window, bucket, tokens)
 
 
 TokenCaps = _TokenCaps()

@@ -12,8 +12,13 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
+# NOTE (review finding B4): the original down_revision pointed at
+# '56359461a091', which 4de81c2a3af1_add_pinned_note_table.py already
+# claims as its parent — creating a second Alembic head and breaking
+# `alembic upgrade head` on every deploy. Re-pointed at the true head
+# of the chain, kb04mergeheads (nothing else descends from it).
 revision: str = '5643b1c2d4f5'
-down_revision: Union[str, None] = '56359461a091'
+down_revision: Union[str, None] = 'kb04mergeheads'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

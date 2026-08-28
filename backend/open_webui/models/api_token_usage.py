@@ -14,13 +14,11 @@ fields are intentionally narrow (no message body, no chat_id) — this
 is bookkeeping data, not a chat transcript.
 """
 
-import json
 import time
 import uuid
 from typing import Any, Optional
 
 from open_webui.internal.db import Base, get_async_db_context
-from open_webui.models.users import ApiKey
 from sqlalchemy import (
     BigInteger,
     Column,
@@ -58,7 +56,7 @@ class ApiTokenUsage(Base):
     duration_ms = Column(Integer, nullable=False, default=0)
     status_code = Column(Integer, nullable=False, default=200)
     trace_id = Column(Text, nullable=True)  # groups failover attempts of one logical request
-    created_at = Column(BigInteger, nullable=False, default=lambda: int(time.time() * 1000))
+    created_at = Column(BigInteger, nullable=False, default=lambda: int(time.time()))
 
     __table_args__ = (
         Index('ix_api_token_usage_user_created', 'user_id', 'created_at'),
@@ -99,7 +97,7 @@ class ApiTokenUsageTable:
                     duration_ms=max(0, int(duration_ms or 0)),
                     status_code=int(status_code or 200),
                     trace_id=trace_id,
-                    created_at=int(time.time() * 1000),
+                    created_at=int(time.time()),
                 )
             )
             await session.commit()
