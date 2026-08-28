@@ -1501,6 +1501,68 @@ async def generate_chat_completion(
     if not await Config.get('openai.enable'):
         raise HTTPException(status_code=503, detail='OpenAI API is disabled')
 
+    # Token-cap pre-flight: load all configured caps for the applicable
+    # targets (user, user's groups, the model, the API key when present),
+    # then check whether projected prompt tokens would exceed any of
+    # them. Pre-flight estimate is the tiktoken count of the request's
+    # messages; the upstream's post-flight usage is authoritative for
+    # the recorded total but the pre-flight check is what stops an
+    # over-quota request before spending any upstream budget.
+    from open_webui.utils.token_caps import TokenCaps, _window_start_epoch, CapHit
+    from open_webui.utils.token_recorder import count_request_tokens
+
+    _token_caps = TokenCaps
+    _token_cap_targets: list[tuple[str, str]] = []
+    _token_cap_caps_map: dict[tuple[str, str], Any] = {}
+    try:
+        _cap_storage = (await Config.get('token_caps')) or []
+        if isinstance(_cap_storage, list) and _cap_storage:
+            for _entry in _cap_storage:
+                if not isinstance(_entry, dict):
+                    continue
+                _ttype = _entry.get('target_type')
+                _tid = _entry.get('target_id')
+                if not _ttype or not _tid:
+                    continue
+                _token_cap_caps_map[(_ttype, _tid)] = _entry
+    except Exception:
+        pass
+    # Collect applicable targets
+    try:
+        _groups_attr = getattr(user, 'groups', None) or []
+        _group_ids = [g.id for g in _groups_attr] if hasattr(_groups_attr, '__iter__') else []
+    except Exception:
+        _group_ids = []
+    _api_key_row = getattr(request.state, 'api_key', None)
+    _token_cap_targets.extend(
+        _token_caps.collect_applicable_targets(
+            user_id=user.id,
+            group_ids=_group_ids,
+            model_id=payload.get('model'),
+            api_key_user_id=(_api_key_row.user_id if _api_key_row else None),
+        )
+    )
+    # Add the api_key as its own target (the spec says api_key cap is
+    # summed with the owner's user cap — independent counters, both
+    # apply to an api-key call).
+    if _api_key_row is not None:
+        _token_cap_targets.append(('api_key', _api_key_row.id))
+    if _token_cap_caps_map and _token_cap_targets:
+        _projected = count_request_tokens(payload.get('messages'), payload.get('model'))
+        _hit = _token_caps.check(request.app.state, _token_cap_caps_map, _token_cap_targets, _projected)
+        if _hit is not None:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    'error': 'Token cap exceeded',
+                    'cap': f'{_hit.cap.target_type}:{_hit.cap.target_id}',
+                    'window': _hit.window,
+                    'limit': _hit.limit,
+                    'current': _hit.current,
+                    'would_be': _hit.would_be,
+                },
+            )
+
     # NOTE: We intentionally do NOT use Depends(get_async_session) here.
     # Database operations (get_model_by_id, AccessGrants.has_access) manage their own short-lived sessions.
     # This prevents holding a connection during the entire LLM call (30-60+ seconds),
@@ -1598,6 +1660,19 @@ async def generate_chat_completion(
                 endpoint='chat',
                 duration_ms=int((time.monotonic() - _req_started) * 1000),
             )
+            # Post-flight cap increment: tick the counters for every
+            # applicable target by the upstream's total_tokens. The
+            # check above already enforced the cap pre-flight; this
+            # just brings the counters in line with the actual usage.
+            try:
+                _usage = (result.get('usage') if isinstance(result, dict) else None) or {}
+                _post_total = int(_usage.get('total_tokens') or 0) or (
+                    int(_usage.get('prompt_tokens') or 0) + int(_usage.get('completion_tokens') or 0)
+                )
+                if _post_total > 0 and _token_cap_targets:
+                    _token_caps.record(request.app.state, _token_cap_targets, _post_total)
+            except Exception as _cap_exc:
+                log.debug('cap post-flight record skipped: %s', _cap_exc)
             return result
         except RetryableProviderError as rpe:
             last_error = rpe

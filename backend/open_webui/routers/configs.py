@@ -217,6 +217,91 @@ async def set_tools_config(
 
 
 ############################
+# Token Caps
+############################
+#
+# Per-target (user / group / model / api_key) token usage caps. Admin
+# input is in "millions of tokens" (1 = 1M tokens) per the spec; the
+# endpoint multiplies by 1_000_000 and the cap tracker stores raw
+# tokens. 0 = no cap.
+#
+# The api_key's own cap is summed with the owning user cap (same
+# pool): usage against an API key counts against BOTH targets. The
+# pre-flight check iterates all applicable targets and returns the
+# first-hit cap; the post-flight increment updates all targets. See
+# utils/token_caps.py for the tracker.
+############################
+
+
+class TokenCapForm(BaseModel):
+    target_type: str  # 'user' | 'group' | 'model' | 'api_key'
+    target_id: str
+    # Admin input is in millions of tokens (1 = 1M tokens). The endpoint
+    # multiplies by 1_000_000 and the cap tracker stores raw tokens.
+    hourly_millions: float = 0
+    daily_millions: float = 0
+    weekly_millions: float = 0
+    monthly_millions: float = 0
+
+
+class TokenCapsConfigForm(BaseModel):
+    caps: list[TokenCapForm] = []
+
+
+def _to_raw_tokens(cap: TokenCapForm) -> dict:
+    """Convert the admin form's millions-of-tokens into raw tokens."""
+    return {
+        'target_type': cap.target_type,
+        'target_id': cap.target_id,
+        'hourly': int(cap.hourly_millions * 1_000_000),
+        'daily': int(cap.daily_millions * 1_000_000),
+        'weekly': int(cap.weekly_millions * 1_000_000),
+        'monthly': int(cap.monthly_millions * 1_000_000),
+    }
+
+
+@router.get('/token-caps', response_model=TokenCapsConfigForm)
+async def get_token_caps_config(request: Request, user=Depends(get_admin_user)):
+    """Return the global per-target token-usage caps. Admin-only."""
+    stored = (await Config.get('token_caps')) or []
+    if not isinstance(stored, list):
+        stored = []
+    caps = [
+        TokenCapForm(
+            target_type=entry.get('target_type', 'user'),
+            target_id=entry.get('target_id', ''),
+            hourly_millions=(entry.get('hourly') or 0) / 1_000_000,
+            daily_millions=(entry.get('daily') or 0) / 1_000_000,
+            weekly_millions=(entry.get('weekly') or 0) / 1_000_000,
+            monthly_millions=(entry.get('monthly') or 0) / 1_000_000,
+        )
+        for entry in stored
+        if isinstance(entry, dict)
+    ]
+    return TokenCapsConfigForm(caps=caps)
+
+
+@router.post('/token-caps', response_model=TokenCapsConfigForm)
+async def set_token_caps_config(
+    request: Request,
+    form_data: TokenCapsConfigForm,
+    user=Depends(get_admin_user),
+):
+    """Replace the per-target token-usage caps. Empty list = no caps.
+
+    The frontend sends ``hourly_millions`` (and the three siblings) as
+    floats; we convert to raw tokens at the boundary and persist the
+    list. TokenCaps.check will sum across all applicable targets per
+    request, so an api_key's own cap and the owning user's cap both
+    apply to an api-key-authenticated call (per the spec: 'api_key cap
+    summed with the owner's user cap').
+    """
+    cleaned = [_to_raw_tokens(cap) for cap in form_data.caps]
+    await Config.upsert({'token_caps': cleaned})
+    return await get_token_caps_config(request, user)
+
+
+############################
 # Connections Config
 ############################
 
