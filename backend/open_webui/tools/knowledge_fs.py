@@ -29,11 +29,61 @@ log = logging.getLogger(__name__)
 DEFAULT_HEAD_LINES = 10
 DEFAULT_TAIL_LINES = 10
 
-# Matching time allowed per tool call. Backtracking cost is exponential in the length of the
-# matched text, so capping the pattern or the line does not bound it.
-MATCH_BUDGET_SECONDS = 2.0
-MAX_REGEX_QUANTIFIER_COUNT = 2_000
-MAX_REGEX_QUANTIFIER_EXPANSION = 100_000
+# Tool config — values are sourced from the ``tools.*`` DB config
+# namespace (admin-controllable via Admin → Tools Config). Defaults here
+# are used until the admin saves overrides via the configs router. The
+# router also calls ``set_tools_config_value`` after a successful upsert
+# so the live process sees the new value without a restart.
+_TOOLS_CONFIG_CACHE: dict[str, float | int] = {
+    # grep_knowledge_files + view_file + kb_exec — per-call soft limit on
+    # regex matching time. Default 5.0s (was hardcoded at 2.0; the user hit
+    # that on a 60+-alternation pattern against a ServiceNow KB).
+    'tools.match_budget_seconds': 5.0,
+    # Safety net for catastrophic backtracking (regex engine guard).
+    'tools.max_regex_quantifier_count': 2_000,
+    'tools.max_regex_quantifier_expansion': 100_000,
+    # grep_knowledge_files — cap the total output characters returned.
+    'tools.kb_exec_max_output_chars': 30_000,
+    # grep_knowledge_files — cap the number of files scanned per call.
+    'tools.kb_exec_max_grep_files': 200,
+    # grep_knowledge_files — cap matches per file.
+    'tools.knowledge_grep_max_matches': 50,
+    # view_file — absolute cap on chars per file (across pagination).
+    'tools.view_file_max_chars': 100_000,
+    # view_file — default chars returned when offset=0.
+    'tools.view_file_default_max_chars': 10_000,
+}
+
+
+def set_tools_config_value(key: str, value: float | int) -> None:
+    """Update the in-process cache. Called by the configs router after a
+    successful POST so the running process picks up the new value without
+    a restart. Keys not in the cache are ignored (defence against typos).
+    """
+    if key in _TOOLS_CONFIG_CACHE:
+        _TOOLS_CONFIG_CACHE[key] = value
+
+
+# Backwards-compat module-level constants read by the existing call sites
+# below. They dereference the cache at call time (so admin updates are
+# picked up), not at import time. The values shown here are only the
+# *initial* defaults before any admin save.
+def _match_budget_seconds() -> float:
+    """Read the live match budget from the cache. Module-level alias
+    would snapshot the value at import, so call this per-build instead."""
+    return float(_TOOLS_CONFIG_CACHE['tools.match_budget_seconds'])
+
+
+def _max_regex_quantifier_count() -> int:
+    return int(_TOOLS_CONFIG_CACHE['tools.max_regex_quantifier_count'])
+
+
+def _max_regex_quantifier_expansion() -> int:
+    return int(_TOOLS_CONFIG_CACHE['tools.max_regex_quantifier_expansion'])
+
+
+# Kept as a module-level constant: regex compilation is a one-shot cost
+# and the pattern itself is immutable.
 _COUNTED_QUANTIFIER_RE = re.compile(r'(?<!\\)\{(\d+)(?:,\d*)?\}')
 
 
@@ -45,7 +95,7 @@ class MatchBudget:
     """Matching time remaining, counted only inside search() so awaits do not consume it."""
 
     def __init__(self):
-        self.remaining = MATCH_BUDGET_SECONDS
+        self.remaining = _match_budget_seconds()
 
 
 # Scoped to the running task, so one budget covers every matcher a command builds without
@@ -92,13 +142,13 @@ def validate_regex_quantifiers(pattern: str) -> str | None:
     quantifier_expansion = 1
     for quantifier in _COUNTED_QUANTIFIER_RE.finditer(pattern):
         count_text = quantifier.group(1)
-        count = int(count_text) if len(count_text) <= 6 else MAX_REGEX_QUANTIFIER_COUNT + 1
-        if count > MAX_REGEX_QUANTIFIER_COUNT:
-            return f'Regex quantifier counts over {MAX_REGEX_QUANTIFIER_COUNT:g} are not supported'
+        count = int(count_text) if len(count_text) <= 6 else _max_regex_quantifier_count() + 1
+        if count > _max_regex_quantifier_count():
+            return f'Regex quantifier counts over {_max_regex_quantifier_count():g} are not supported'
 
         # ponytail: conservative expansion catches nested quantifier bombs without mirroring regex syntax.
         quantifier_expansion *= max(count, 1)
-        if quantifier_expansion > MAX_REGEX_QUANTIFIER_EXPANSION:
+        if quantifier_expansion > _max_regex_quantifier_expansion():
             return 'Regex quantifiers expand too much, lower the counts'
 
     return None
@@ -130,7 +180,7 @@ def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool 
                     raise TimeoutError
                 return bool(compiled.search(line, timeout=budget.remaining))
             except TimeoutError:
-                raise MatchBudgetExceeded(f'Search exceeded {MATCH_BUDGET_SECONDS:g}s, narrow the pattern') from None
+                raise MatchBudgetExceeded(f'Search exceeded {_match_budget_seconds():g}s, narrow the pattern') from None
             finally:
                 budget.remaining -= time.monotonic() - started
 

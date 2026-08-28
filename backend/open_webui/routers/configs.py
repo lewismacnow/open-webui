@@ -126,6 +126,97 @@ async def get_config_namespace(namespace: str, user=Depends(get_admin_user)):
 
 
 ############################
+# Tools Config
+############################
+
+
+class ToolsConfigForm(BaseModel):
+    """Admin-configurable knobs for the built-in knowledge tools
+    (grep / view / exec). Values are stored under the ``tools.*`` DB
+    config namespace and consumed by ``utils/knowledge_fs.py`` at call
+    time, so changes take effect without a backend restart.
+    """
+
+    # grep_knowledge_files + view_file + kb_exec — soft limit on per-call
+    # regex matching time. Default 5.0s (was hardcoded at 2.0; the user hit
+    # that on a 60+-alternation pattern against a ServiceNow KB).
+    match_budget_seconds: float = 5.0
+    # Safety net for catastrophic backtracking (regex engine guard).
+    max_regex_quantifier_count: int = 2_000
+    max_regex_quantifier_expansion: int = 100_000
+    # grep_knowledge_files — cap the total output characters returned.
+    kb_exec_max_output_chars: int = 30_000
+    # grep_knowledge_files — cap the number of files scanned per call.
+    kb_exec_max_grep_files: int = 200
+    # grep_knowledge_files — cap matches per file.
+    knowledge_grep_max_matches: int = 50
+    # view_file — absolute cap on chars per file (across pagination).
+    view_file_max_chars: int = 100_000
+    # view_file — default chars returned when offset=0.
+    view_file_default_max_chars: int = 10_000
+
+
+@router.get('/tools', response_model=ToolsConfigForm)
+async def get_tools_config(request: Request, user=Depends(get_admin_user)):
+    stored = await Config.get_many(
+        'tools.match_budget_seconds',
+        'tools.max_regex_quantifier_count',
+        'tools.max_regex_quantifier_expansion',
+        'tools.kb_exec_max_output_chars',
+        'tools.kb_exec_max_grep_files',
+        'tools.knowledge_grep_max_matches',
+        'tools.view_file_max_chars',
+        'tools.view_file_default_max_chars',
+    )
+    return ToolsConfigForm(
+        match_budget_seconds=stored.get('tools.match_budget_seconds', 5.0),
+        max_regex_quantifier_count=stored.get('tools.max_regex_quantifier_count', 2_000),
+        max_regex_quantifier_expansion=stored.get('tools.max_regex_quantifier_expansion', 100_000),
+        kb_exec_max_output_chars=stored.get('tools.kb_exec_max_output_chars', 30_000),
+        kb_exec_max_grep_files=stored.get('tools.kb_exec_max_grep_files', 200),
+        knowledge_grep_max_matches=stored.get('tools.knowledge_grep_max_matches', 50),
+        view_file_max_chars=stored.get('tools.view_file_max_chars', 100_000),
+        view_file_default_max_chars=stored.get('tools.view_file_default_max_chars', 10_000),
+    )
+
+
+@router.post('/tools', response_model=ToolsConfigForm)
+async def set_tools_config(
+    request: Request,
+    form_data: ToolsConfigForm,
+    user=Depends(get_admin_user),
+):
+    """Persist the admin knobs. Empty / zero / negative values fall back to
+    the framework default (defined on ``ToolsConfigForm``).
+    """
+    cleaned = {
+        'tools.match_budget_seconds': max(0.1, float(form_data.match_budget_seconds)),
+        'tools.max_regex_quantifier_count': max(100, int(form_data.max_regex_quantifier_count)),
+        'tools.max_regex_quantifier_expansion': max(100, int(form_data.max_regex_quantifier_expansion)),
+        'tools.kb_exec_max_output_chars': max(1_000, int(form_data.kb_exec_max_output_chars)),
+        'tools.kb_exec_max_grep_files': max(1, int(form_data.kb_exec_max_grep_files)),
+        'tools.knowledge_grep_max_matches': max(1, int(form_data.knowledge_grep_max_matches)),
+        'tools.view_file_max_chars': max(1_000, int(form_data.view_file_max_chars)),
+        'tools.view_file_default_max_chars': max(100, int(form_data.view_file_default_max_chars)),
+    }
+    await Config.upsert(cleaned)
+    # Refresh the in-process cache so the running process picks up the new
+    # values without a restart. The cache is read on every regex build
+    # (knowledge_fs.py:_match_budget_seconds et al.).
+    try:
+        from open_webui.tools.knowledge_fs import set_tools_config_value
+
+        set_tools_config_value('tools.match_budget_seconds', cleaned['tools.match_budget_seconds'])
+        set_tools_config_value('tools.max_regex_quantifier_count', cleaned['tools.max_regex_quantifier_count'])
+        set_tools_config_value('tools.max_regex_quantifier_expansion', cleaned['tools.max_regex_quantifier_expansion'])
+    except Exception:
+        # Cache refresh is best-effort; the DB write succeeded so the next
+        # backend restart will pick the new values up.
+        pass
+    return await get_tools_config(request, user)
+
+
+############################
 # Connections Config
 ############################
 
