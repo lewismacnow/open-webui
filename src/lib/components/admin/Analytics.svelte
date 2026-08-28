@@ -17,21 +17,66 @@
 	let apiKeyUsage: ApiKeyTokenUsageResponse | null = null;
 	let endpointUsage: EndpointTokenUsageResponse | null = null;
 
+	// Date range for the API-token-usage sections (YYYY-MM-DD strings from
+	// the date inputs; empty = all-time). The Dashboard's own range state
+	// is private to the Dashboard component — it exposes no events or
+	// bindable props — so these sections carry a small range input of
+	// their own rather than sharing it.
+	let rangeStart = '';
+	let rangeEnd = '';
+
+	// Out-of-order response guard: ignore stale fetches when the range
+	// changes mid-flight.
+	let usageReqSeq = 0;
+
+	// Convert the picked dates to epoch SECONDS (the unit the analytics
+	// endpoints expect — same convention as the Dashboard's getDateRange,
+	// including an inclusive end-of-day bound).
+	function rangeToEpoch(start: string, end: string): { start: number | null; end: number | null } {
+		if (!start && !end) {
+			return { start: null, end: null };
+		}
+		const day = 86400;
+		return {
+			start: start ? Math.floor(new Date(start).getTime() / 1000) : null,
+			end: end ? Math.floor(new Date(end).getTime() / 1000) + day - 1 : null
+		};
+	}
+
 	// API-path token usage (`api_token_usage` table) — a separate data
 	// source from the chat analytics dashboard above (which reads
-	// `chat_message.usage`). Loaded all-time; the dashboard's date
-	// filters do not apply to these sections.
-	async function loadApiTokenUsage() {
+	// `chat_message.usage`). No range selected = all-time.
+	async function loadApiTokenUsage(rangeStart: string, rangeEnd: string) {
+		const seq = ++usageReqSeq;
+		const range = rangeToEpoch(rangeStart, rangeEnd);
+
 		try {
-			apiKeyUsage = await getApiKeyTokenUsage(localStorage.token, 50);
+			const res = await getApiKeyTokenUsage(
+				localStorage.token,
+				50,
+				range.start ?? undefined,
+				range.end ?? undefined
+			);
+			if (seq === usageReqSeq) apiKeyUsage = res;
 		} catch (e) {
 			console.error('Failed to load API key token usage:', e);
 		}
 		try {
-			endpointUsage = await getEndpointTokenUsage(localStorage.token);
+			const res = await getEndpointTokenUsage(
+				localStorage.token,
+				range.start ?? undefined,
+				range.end ?? undefined
+			);
+			if (seq === usageReqSeq) endpointUsage = res;
 		} catch (e) {
 			console.error('Failed to load endpoint token usage:', e);
 		}
+	}
+
+	// Refetch whenever the range changes. Also fires once on first load
+	// (loaded flips true with empty range = all-time initial load).
+	$: if (loaded) {
+		loadApiTokenUsage(rangeStart, rangeEnd);
 	}
 
 	// Backend sorts by total tokens, but sort client-side too so the
@@ -49,7 +94,6 @@
 		if ($user?.role !== 'admin') {
 			await goto('/');
 		}
-		await loadApiTokenUsage();
 		loaded = true;
 	});
 </script>
@@ -62,17 +106,48 @@
 		     analytics above). Mirrors the Usage section on Admin → Token
 		     Caps for admins who live on this page. -->
 		<div class="px-4 mt-4 space-y-4">
-			<div class="flex items-center justify-between">
+			<div class="flex items-center justify-between flex-wrap gap-2">
 				<h3 class="text-xs text-gray-400 dark:text-gray-600">
 					{$i18n.t('API Token Usage')}
 				</h3>
-				<button
-					type="button"
-					class="text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
-					on:click={loadApiTokenUsage}
-				>
-					{$i18n.t('Refresh')}
-				</button>
+				<div class="flex items-center gap-2">
+					<!-- Range drives only the two API-token-usage sections;
+					     empty inputs = all-time. -->
+					<input
+						type="date"
+						class="h-7 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300"
+						bind:value={rangeStart}
+						aria-label={$i18n.t('Start date')}
+						title={$i18n.t('Start date')}
+					/>
+					<span class="text-xs text-gray-400 dark:text-gray-600">–</span>
+					<input
+						type="date"
+						class="h-7 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300"
+						bind:value={rangeEnd}
+						aria-label={$i18n.t('End date')}
+						title={$i18n.t('End date')}
+					/>
+					{#if rangeStart || rangeEnd}
+						<button
+							type="button"
+							class="text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
+							on:click={() => {
+								rangeStart = '';
+								rangeEnd = '';
+							}}
+						>
+							{$i18n.t('All time')}
+						</button>
+					{/if}
+					<button
+						type="button"
+						class="text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
+						on:click={() => loadApiTokenUsage(rangeStart, rangeEnd)}
+					>
+						{$i18n.t('Refresh')}
+					</button>
+				</div>
 			</div>
 
 			<!-- API token usage by key -->
