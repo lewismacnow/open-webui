@@ -868,6 +868,301 @@ export const setWrapperProviderChains = async (
 	return res?.WRAPPER_PROVIDER_CHAINS ?? [];
 };
 
+// --- Tools Config ---
+
+export type ToolsConfig = {
+	match_budget_seconds: number;
+	max_regex_quantifier_count: number;
+	max_regex_quantifier_expansion: number;
+	kb_exec_max_output_chars: number;
+	kb_exec_max_grep_files: number;
+	knowledge_grep_max_matches: number;
+	view_file_max_chars: number;
+	view_file_default_max_chars: number;
+};
+
+export const getToolsConfig = async (token: string): Promise<ToolsConfig> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/tools`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return {
+		match_budget_seconds: res?.match_budget_seconds ?? 5,
+		max_regex_quantifier_count: res?.max_regex_quantifier_count ?? 2000,
+		max_regex_quantifier_expansion: res?.max_regex_quantifier_expansion ?? 100000,
+		kb_exec_max_output_chars: res?.kb_exec_max_output_chars ?? 30000,
+		kb_exec_max_grep_files: res?.kb_exec_max_grep_files ?? 200,
+		knowledge_grep_max_matches: res?.knowledge_grep_max_matches ?? 50,
+		view_file_max_chars: res?.view_file_max_chars ?? 100000,
+		view_file_default_max_chars: res?.view_file_default_max_chars ?? 10000
+	};
+};
+
+export const setToolsConfig = async (token: string, config: ToolsConfig): Promise<ToolsConfig> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/tools`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			match_budget_seconds: config.match_budget_seconds,
+			max_regex_quantifier_count: config.max_regex_quantifier_count,
+			max_regex_quantifier_expansion: config.max_regex_quantifier_expansion,
+			kb_exec_max_output_chars: config.kb_exec_max_output_chars,
+			kb_exec_max_grep_files: config.kb_exec_max_grep_files,
+			knowledge_grep_max_matches: config.knowledge_grep_max_matches,
+			view_file_max_chars: config.view_file_max_chars,
+			view_file_default_max_chars: config.view_file_default_max_chars
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return {
+		match_budget_seconds: res?.match_budget_seconds ?? config.match_budget_seconds,
+		max_regex_quantifier_count:
+			res?.max_regex_quantifier_count ?? config.max_regex_quantifier_count,
+		max_regex_quantifier_expansion:
+			res?.max_regex_quantifier_expansion ?? config.max_regex_quantifier_expansion,
+		kb_exec_max_output_chars: res?.kb_exec_max_output_chars ?? config.kb_exec_max_output_chars,
+		kb_exec_max_grep_files: res?.kb_exec_max_grep_files ?? config.kb_exec_max_grep_files,
+		knowledge_grep_max_matches:
+			res?.knowledge_grep_max_matches ?? config.knowledge_grep_max_matches,
+		view_file_max_chars: res?.view_file_max_chars ?? config.view_file_max_chars,
+		view_file_default_max_chars:
+			res?.view_file_default_max_chars ?? config.view_file_default_max_chars
+	};
+};
+
+// --- Token Caps ---
+
+export type TokenCap = {
+	target_type: 'user' | 'group' | 'model' | 'api_key';
+	target_id: string;
+	// Admin-facing values are in millions of tokens (1 = 1M tokens).
+	// 0 means unlimited. The backend multiplies by 1_000_000 to store
+	// raw tokens.
+	hourly_millions: number;
+	daily_millions: number;
+	weekly_millions: number;
+	monthly_millions: number;
+};
+
+export type TokenCapsConfig = { caps: TokenCap[] };
+
+export const getTokenCaps = async (token: string): Promise<TokenCapsConfig> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/token-caps`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return { caps: res?.caps ?? [] };
+};
+
+export const setTokenCaps = async (
+	token: string,
+	config: TokenCapsConfig
+): Promise<TokenCapsConfig> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/token-caps`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({ caps: config.caps })
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return { caps: res?.caps ?? config.caps };
+};
+
+// --- API Token Usage Analytics ---
+//
+// These aggregate the `api_token_usage` table populated on the
+// OpenAI-compatible API path (invisible to the chat-based analytics
+// dashboard, which only reads `chat_message.usage`).
+
+export type ApiKeyTokenUsageEntry = {
+	api_key_id: string;
+	prompt_tokens: number;
+	completion_tokens: number;
+	total_tokens: number;
+	request_count: number;
+};
+
+export type ApiKeyTokenUsageResponse = {
+	keys: ApiKeyTokenUsageEntry[];
+	total_prompt_tokens: number;
+	total_completion_tokens: number;
+	total_tokens: number;
+	total_request_count: number;
+};
+
+export const getApiKeyTokenUsage = async (
+	token: string,
+	limit?: number,
+	startDate?: number,
+	endDate?: number
+): Promise<ApiKeyTokenUsageResponse> => {
+	let error = null;
+
+	const searchParams = new URLSearchParams();
+	if (limit != null) searchParams.set('limit', `${limit}`);
+	if (startDate != null) searchParams.set('start_date', `${startDate}`);
+	if (endDate != null) searchParams.set('end_date', `${endDate}`);
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/analytics/api-keys/tokens?${searchParams.toString()}`,
+		{
+			method: 'GET',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${token}`
+			}
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return {
+		keys: res?.keys ?? [],
+		total_prompt_tokens: res?.total_prompt_tokens ?? 0,
+		total_completion_tokens: res?.total_completion_tokens ?? 0,
+		total_tokens: res?.total_tokens ?? 0,
+		total_request_count: res?.total_request_count ?? 0
+	};
+};
+
+export type EndpointTokenUsageEntry = {
+	endpoint: string;
+	prompt_tokens: number;
+	completion_tokens: number;
+	total_tokens: number;
+	request_count: number;
+};
+
+export type EndpointTokenUsageResponse = {
+	endpoints: EndpointTokenUsageEntry[];
+	total_prompt_tokens: number;
+	total_completion_tokens: number;
+	total_tokens: number;
+	total_request_count: number;
+};
+
+export const getEndpointTokenUsage = async (
+	token: string,
+	startDate?: number,
+	endDate?: number
+): Promise<EndpointTokenUsageResponse> => {
+	let error = null;
+
+	const searchParams = new URLSearchParams();
+	if (startDate != null) searchParams.set('start_date', `${startDate}`);
+	if (endDate != null) searchParams.set('end_date', `${endDate}`);
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/analytics/endpoints/tokens?${searchParams.toString()}`,
+		{
+			method: 'GET',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${token}`
+			}
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return {
+		endpoints: res?.endpoints ?? [],
+		total_prompt_tokens: res?.total_prompt_tokens ?? 0,
+		total_completion_tokens: res?.total_completion_tokens ?? 0,
+		total_tokens: res?.total_tokens ?? 0,
+		total_request_count: res?.total_request_count ?? 0
+	};
+};
+
 // --- Vision Image RAG ---
 
 /**

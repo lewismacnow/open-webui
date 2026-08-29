@@ -126,6 +126,182 @@ async def get_config_namespace(namespace: str, user=Depends(get_admin_user)):
 
 
 ############################
+# Tools Config
+############################
+
+
+class ToolsConfigForm(BaseModel):
+    """Admin-configurable knobs for the built-in knowledge tools
+    (grep / view / exec). Values are stored under the ``tools.*`` DB
+    config namespace and consumed by ``utils/knowledge_fs.py`` at call
+    time, so changes take effect without a backend restart.
+    """
+
+    # grep_knowledge_files + view_file + kb_exec — soft limit on per-call
+    # regex matching time. Default 5.0s (was hardcoded at 2.0; the user hit
+    # that on a 60+-alternation pattern against a ServiceNow KB).
+    match_budget_seconds: float = 5.0
+    # Safety net for catastrophic backtracking (regex engine guard).
+    max_regex_quantifier_count: int = 2_000
+    max_regex_quantifier_expansion: int = 100_000
+    # grep_knowledge_files — cap the total output characters returned.
+    kb_exec_max_output_chars: int = 30_000
+    # grep_knowledge_files — cap the number of files scanned per call.
+    kb_exec_max_grep_files: int = 200
+    # grep_knowledge_files — cap matches per file.
+    knowledge_grep_max_matches: int = 50
+    # view_file — absolute cap on chars per file (across pagination).
+    view_file_max_chars: int = 100_000
+    # view_file — default chars returned when offset=0.
+    view_file_default_max_chars: int = 10_000
+
+
+@router.get('/tools', response_model=ToolsConfigForm)
+async def get_tools_config(request: Request, user=Depends(get_admin_user)):
+    stored = await Config.get_many(
+        'tools.match_budget_seconds',
+        'tools.max_regex_quantifier_count',
+        'tools.max_regex_quantifier_expansion',
+        'tools.kb_exec_max_output_chars',
+        'tools.kb_exec_max_grep_files',
+        'tools.knowledge_grep_max_matches',
+        'tools.view_file_max_chars',
+        'tools.view_file_default_max_chars',
+    )
+    return ToolsConfigForm(
+        match_budget_seconds=stored.get('tools.match_budget_seconds', 5.0),
+        max_regex_quantifier_count=stored.get('tools.max_regex_quantifier_count', 2_000),
+        max_regex_quantifier_expansion=stored.get('tools.max_regex_quantifier_expansion', 100_000),
+        kb_exec_max_output_chars=stored.get('tools.kb_exec_max_output_chars', 30_000),
+        kb_exec_max_grep_files=stored.get('tools.kb_exec_max_grep_files', 200),
+        knowledge_grep_max_matches=stored.get('tools.knowledge_grep_max_matches', 50),
+        view_file_max_chars=stored.get('tools.view_file_max_chars', 100_000),
+        view_file_default_max_chars=stored.get('tools.view_file_default_max_chars', 10_000),
+    )
+
+
+@router.post('/tools', response_model=ToolsConfigForm)
+async def set_tools_config(
+    request: Request,
+    form_data: ToolsConfigForm,
+    user=Depends(get_admin_user),
+):
+    """Persist the admin knobs. Empty / zero / negative values fall back to
+    the framework default (defined on ``ToolsConfigForm``).
+    """
+    cleaned = {
+        'tools.match_budget_seconds': max(0.1, float(form_data.match_budget_seconds)),
+        'tools.max_regex_quantifier_count': max(100, int(form_data.max_regex_quantifier_count)),
+        'tools.max_regex_quantifier_expansion': max(100, int(form_data.max_regex_quantifier_expansion)),
+        'tools.kb_exec_max_output_chars': max(1_000, int(form_data.kb_exec_max_output_chars)),
+        'tools.kb_exec_max_grep_files': max(1, int(form_data.kb_exec_max_grep_files)),
+        'tools.knowledge_grep_max_matches': max(1, int(form_data.knowledge_grep_max_matches)),
+        'tools.view_file_max_chars': max(1_000, int(form_data.view_file_max_chars)),
+        'tools.view_file_default_max_chars': max(100, int(form_data.view_file_default_max_chars)),
+    }
+    await Config.upsert(cleaned)
+    # Refresh the in-process cache so the running process picks up the new
+    # values without a restart. The cache is read on every regex build
+    # (knowledge_fs.py:_match_budget_seconds et al.).
+    try:
+        from open_webui.tools.knowledge_fs import set_tools_config_value
+
+        set_tools_config_value('tools.match_budget_seconds', cleaned['tools.match_budget_seconds'])
+        set_tools_config_value('tools.max_regex_quantifier_count', cleaned['tools.max_regex_quantifier_count'])
+        set_tools_config_value('tools.max_regex_quantifier_expansion', cleaned['tools.max_regex_quantifier_expansion'])
+    except Exception:
+        # Cache refresh is best-effort; the DB write succeeded so the next
+        # backend restart will pick the new values up.
+        pass
+    return await get_tools_config(request, user)
+
+
+############################
+# Token Caps
+############################
+#
+# Per-target (user / group / model / api_key) token usage caps. Admin
+# input is in "millions of tokens" (1 = 1M tokens) per the spec; the
+# endpoint multiplies by 1_000_000 and the cap tracker stores raw
+# tokens. 0 = no cap.
+#
+# The api_key's own cap is summed with the owning user cap (same
+# pool): usage against an API key counts against BOTH targets. The
+# pre-flight check iterates all applicable targets and returns the
+# first-hit cap; the post-flight increment updates all targets. See
+# utils/token_caps.py for the tracker.
+############################
+
+
+class TokenCapForm(BaseModel):
+    target_type: str  # 'user' | 'group' | 'model' | 'api_key'
+    target_id: str
+    # Admin input is in millions of tokens (1 = 1M tokens). The endpoint
+    # multiplies by 1_000_000 and the cap tracker stores raw tokens.
+    hourly_millions: float = 0
+    daily_millions: float = 0
+    weekly_millions: float = 0
+    monthly_millions: float = 0
+
+
+class TokenCapsConfigForm(BaseModel):
+    caps: list[TokenCapForm] = []
+
+
+def _to_raw_tokens(cap: TokenCapForm) -> dict:
+    """Convert the admin form's millions-of-tokens into raw tokens."""
+    return {
+        'target_type': cap.target_type,
+        'target_id': cap.target_id,
+        'hourly': int(cap.hourly_millions * 1_000_000),
+        'daily': int(cap.daily_millions * 1_000_000),
+        'weekly': int(cap.weekly_millions * 1_000_000),
+        'monthly': int(cap.monthly_millions * 1_000_000),
+    }
+
+
+@router.get('/token-caps', response_model=TokenCapsConfigForm)
+async def get_token_caps_config(request: Request, user=Depends(get_admin_user)):
+    """Return the global per-target token-usage caps. Admin-only."""
+    stored = (await Config.get('token_caps')) or []
+    if not isinstance(stored, list):
+        stored = []
+    caps = [
+        TokenCapForm(
+            target_type=entry.get('target_type', 'user'),
+            target_id=entry.get('target_id', ''),
+            hourly_millions=(entry.get('hourly') or 0) / 1_000_000,
+            daily_millions=(entry.get('daily') or 0) / 1_000_000,
+            weekly_millions=(entry.get('weekly') or 0) / 1_000_000,
+            monthly_millions=(entry.get('monthly') or 0) / 1_000_000,
+        )
+        for entry in stored
+        if isinstance(entry, dict)
+    ]
+    return TokenCapsConfigForm(caps=caps)
+
+
+@router.post('/token-caps', response_model=TokenCapsConfigForm)
+async def set_token_caps_config(
+    request: Request,
+    form_data: TokenCapsConfigForm,
+    user=Depends(get_admin_user),
+):
+    """Replace the per-target token-usage caps. Empty list = no caps.
+
+    The frontend sends ``hourly_millions`` (and the three siblings) as
+    floats; we convert to raw tokens at the boundary and persist the
+    list. TokenCaps.check will sum across all applicable targets per
+    request, so an api_key's own cap and the owning user's cap both
+    apply to an api-key-authenticated call (per the spec: 'api_key cap
+    summed with the owner's user cap').
+    """
+    cleaned = [_to_raw_tokens(cap) for cap in form_data.caps]
+    await Config.upsert({'token_caps': cleaned})
+    return await get_token_caps_config(request, user)
+
+
+############################
 # Connections Config
 ############################
 

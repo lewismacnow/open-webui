@@ -5,7 +5,7 @@ import hashlib
 import logging
 import re
 import time
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote, urlparse
 
 import aiofiles
@@ -1493,8 +1493,23 @@ async def generate_chat_completion(
     form_data: dict,
     user=Depends(get_verified_user),
 ):
+    # Used by the API token-usage recorder (see below). Captured at
+    # handler entry so the post-flight `duration_ms` is the full
+    # wall-time of the upstream call.
+    _req_started = time.monotonic()
+
     if not await Config.get('openai.enable'):
         raise HTTPException(status_code=503, detail='OpenAI API is disabled')
+
+    # Token-cap pre-flight (shared with embeddings/responses — see
+    # _enforce_token_caps). Runs BEFORE `payload = {**form_data}` below,
+    # so it reads from `form_data` directly (review finding B1 — the
+    # original inline block referenced `payload` before its first
+    # assignment and UnboundLocalError'd every request).
+    from open_webui.utils.token_recorder import count_request_tokens
+
+    _prompt_estimate = count_request_tokens(form_data.get('messages'), form_data.get('model'))
+    _token_cap_targets = await _enforce_token_caps(request, user, form_data.get('model'), _prompt_estimate)
 
     # NOTE: We intentionally do NOT use Depends(get_async_session) here.
     # Database operations (get_model_by_id, AccessGrants.has_access) manage their own short-lived sessions.
@@ -1577,13 +1592,56 @@ async def generate_chat_completion(
     for i, candidate in enumerate(candidates):
         is_last = i == len(candidates) - 1
         try:
-            return await _try_provider_candidate(
+            result = await _try_provider_candidate(
                 request=request,
                 candidate=candidate,
                 payload=payload,
                 metadata=metadata,
                 user=user,
             )
+            # Record API token usage + tick the cap counters. Non-streaming
+            # paths complete both here; streaming paths defer to when the
+            # body actually drains via _track_stream_usage_and_caps
+            # (review finding B5 — the previous code recorded nothing for
+            # streams because a StreamingResponse is not a dict).
+            if hasattr(result, 'body_iterator'):
+                result.body_iterator = _track_stream_usage_and_caps(
+                    result.body_iterator,
+                    request=request,
+                    user=user,
+                    model_id=(payload.get('model') or 'unknown'),
+                    endpoint='chat',
+                    started=_req_started,
+                    prompt_estimate=_prompt_estimate,
+                    cap_targets=_token_cap_targets,
+                )
+            else:
+                _record_api_token_usage(
+                    request,
+                    user=user,
+                    result_or_data=result,
+                    endpoint='chat',
+                    duration_ms=int((time.monotonic() - _req_started) * 1000),
+                    prompt_estimate=_prompt_estimate,
+                )
+                # Post-flight cap increment: tick the counters for every
+                # applicable target by the upstream's total_tokens. The
+                # check above already enforced the cap pre-flight; this
+                # just brings the counters in line with the actual usage.
+                try:
+                    _usage = (result.get('usage') if isinstance(result, dict) else None) or {}
+                    _post_total = (
+                        int(_usage.get('total_tokens') or 0)
+                        or (int(_usage.get('prompt_tokens') or 0) + int(_usage.get('completion_tokens') or 0))
+                        or _prompt_estimate
+                    )
+                    if _post_total > 0 and _token_cap_targets:
+                        from open_webui.utils.token_caps import TokenCaps as _TrackerSingleton
+
+                        await _TrackerSingleton.record(request.app.state, _token_cap_targets, _post_total)
+                except Exception as _cap_exc:
+                    log.debug('cap post-flight record skipped: %s', _cap_exc)
+            return result
         except RetryableProviderError as rpe:
             last_error = rpe
             log.info(
@@ -1917,6 +1975,236 @@ async def _try_provider_candidate(
             await cleanup_response(r)
 
 
+def _record_api_token_usage(
+    request: Request,
+    *,
+    user,
+    result_or_data,
+    endpoint: str,
+    duration_ms: int,
+    usage_override: Optional[dict] = None,
+    prompt_estimate: int = 0,
+) -> None:
+    """Fire-and-forget API token-usage recorder.
+
+    Called from each OpenAI-compatible handler after a successful upstream
+    response. Pulls prompt/completion tokens from the response's ``usage``
+    block and persists one row to ``api_token_usage``. The api_key_id is
+    taken from ``request.state.api_key`` (set by the auth dependency when
+    the call was authenticated by an API key) so the analytics view can
+    attribute per-key usage.
+
+    Errors here are deliberately swallowed — recording is bookkeeping
+    and must never fail the user-facing request.
+    """
+    try:
+        from open_webui.models.api_token_usage import ApiTokenUsages
+        from open_webui.utils.token_recorder import extract_response_tokens
+
+        # `result_or_data` is the dict response (or a dict-like wrapper
+        # from the Responses API). We pull usage defensively. The
+        # streaming wrapper passes `usage_override` directly (it parsed
+        # the SSE chunks itself).
+        usage_obj: Any = usage_override
+        if usage_obj is None:
+            if isinstance(result_or_data, dict):
+                usage_obj = result_or_data.get('usage')
+            elif hasattr(result_or_data, 'model_dump'):
+                try:
+                    usage_obj = result_or_data.model_dump().get('usage')
+                except Exception:
+                    usage_obj = None
+        prompt, completion = extract_response_tokens(usage_obj)
+        if not prompt and not completion:
+            # Upstream didn't report usage (e.g. older models, or a
+            # stream that never emitted a usage chunk). Fall back to the
+            # pre-flight tiktoken estimate so the row and the cap
+            # counters still reflect the request (review W8) rather
+            # than silently dropping it.
+            if not prompt_estimate:
+                return
+            prompt = prompt_estimate
+
+        api_key_row = getattr(request.state, 'api_key', None)
+        model_id = (
+            (isinstance(result_or_data, dict) and result_or_data.get('model'))
+            or (hasattr(result_or_data, 'model') and getattr(result_or_data, 'model', None))
+            or 'unknown'
+        )
+        import asyncio as _asyncio
+
+        _asyncio.create_task(
+            ApiTokenUsages.record(
+                user_id=user.id,
+                api_key_id=api_key_row.id if api_key_row else None,
+                model_id=model_id,
+                endpoint=endpoint,
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                duration_ms=duration_ms,
+                status_code=200,
+                trace_id=getattr(request.state, 'trace_id', None),
+            )
+        )
+    except Exception as _exc:
+        log.debug('api_token_usage record skipped: %s', _exc)
+
+
+async def _track_stream_usage_and_caps(
+    body,
+    *,
+    request: Request,
+    user,
+    model_id: str,
+    endpoint: str,
+    started: float,
+    prompt_estimate: int,
+    cap_targets: list,
+):
+    """Wrap a streaming response body so API token usage is recorded and
+    cap counters incremented when the stream actually drains (or errors /
+    client-disconnects) — NOT when the StreamingResponse object is returned
+    (review finding B5: the previous code recorded nothing for streams).
+
+    Scans SSE ``data:`` lines for a usage block (the final chunk carries
+    one when ``stream_options.include_usage`` was set, which
+    process_chat_payload already requests for usage-capable models).
+    Falls back to the pre-flight tiktoken estimate when the upstream
+    never reports one (review W8).
+    """
+    from open_webui.utils.json_codec import JSONCodec
+    from open_webui.utils.token_caps import TokenCaps as _Tracker
+    from open_webui.utils.token_recorder import extract_response_tokens
+
+    last_usage: Optional[dict] = None
+    try:
+        async for chunk in body:
+            try:
+                text = chunk.decode('utf-8', errors='ignore') if isinstance(chunk, (bytes, bytearray)) else str(chunk)
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line.startswith('data:'):
+                        continue
+                    data_str = line[5:].strip()
+                    if not data_str or data_str == '[DONE]':
+                        continue
+                    try:
+                        obj = JSONCodec.loads(data_str)
+                    except Exception:
+                        continue
+                    if isinstance(obj, dict) and obj.get('usage'):
+                        last_usage = obj['usage']
+            except Exception:
+                pass
+            yield chunk
+    finally:
+        try:
+            prompt, completion = extract_response_tokens(last_usage)
+            if not prompt and not completion:
+                prompt = prompt_estimate
+            _record_api_token_usage(
+                request,
+                user=user,
+                result_or_data={'model': model_id},
+                endpoint=endpoint,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                usage_override={'prompt_tokens': prompt, 'completion_tokens': completion},
+                prompt_estimate=prompt_estimate,
+            )
+            total = prompt + completion
+            if total > 0 and cap_targets:
+                await _Tracker.record(request.app.state, cap_targets, total)
+        except Exception as _exc:
+            log.debug('stream usage/cap tracking skipped: %s', _exc)
+
+
+async def _enforce_token_caps(
+    request: Request,
+    user,
+    model_id: Optional[str],
+    projected_tokens: int,
+) -> list[tuple[str, str]]:
+    """Shared token-cap pre-flight for the OpenAI-compatible handlers
+    (chat / embeddings / responses).
+
+    Loads the configured caps from the ``token_caps`` DB config, collects
+    the applicable targets (user + the user's groups + the model + the
+    API key when the call was key-authenticated), and raises
+    ``HTTPException(429)`` with a structured body when
+    ``projected_tokens`` would exceed any cap. Returns the targets list
+    for the caller's post-flight increment (empty when no caps are
+    configured — the common case, so the whole function is a no-op then).
+
+    The api_key target is appended IN ADDITION to the owning user's
+    target (spec: "api_key cap summed with the owner's user cap" —
+    independent counters, both apply to a key-authenticated call).
+    """
+    from open_webui.utils.token_caps import TokenCap as _TokenCapDataclass
+    from open_webui.utils.token_caps import TokenCaps as _Tracker
+
+    targets: list[tuple[str, str]] = []
+    caps_map: dict[tuple[str, str], _TokenCapDataclass] = {}
+    try:
+        storage = (await Config.get('token_caps')) or []
+        if isinstance(storage, list):
+            for entry in storage:
+                if not isinstance(entry, dict):
+                    continue
+                ttype = entry.get('target_type')
+                tid = entry.get('target_id')
+                if not ttype or not tid:
+                    continue
+                caps_map[(ttype, tid)] = _TokenCapDataclass(
+                    target_type=ttype,
+                    target_id=tid,
+                    hourly=int(entry.get('hourly') or 0),
+                    daily=int(entry.get('daily') or 0),
+                    weekly=int(entry.get('weekly') or 0),
+                    monthly=int(entry.get('monthly') or 0),
+                )
+    except Exception:
+        pass
+
+    # `user.groups` on the ORM model always validates to [] — query the
+    # membership table instead (same as builtin.py's grep_knowledge_files).
+    group_ids: list[str] = []
+    try:
+        from open_webui.models.groups import Groups
+
+        user_groups = await Groups.get_groups_by_member_id(user.id)
+        group_ids = [g.id for g in user_groups or []]
+    except Exception:
+        group_ids = []
+
+    api_key_row = getattr(request.state, 'api_key', None)
+    targets.extend(
+        _Tracker.collect_applicable_targets(
+            user_id=user.id,
+            group_ids=group_ids,
+            model_id=model_id,
+            api_key_user_id=(api_key_row.user_id if api_key_row else None),
+        )
+    )
+    if api_key_row is not None:
+        targets.append(('api_key', api_key_row.id))
+
+    if caps_map and targets:
+        hit = await _Tracker.check(request.app.state, caps_map, targets, projected_tokens)
+        if hit is not None:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    'error': 'Token cap exceeded',
+                    'cap': f'{hit.cap.target_type}:{hit.cap.target_id}',
+                    'window': hit.window,
+                    'limit': hit.limit,
+                    'current': hit.current,
+                    'would_be': hit.would_be,
+                },
+            )
+    return targets
+
+
 def _record_provider_failure(request: Request, error: RetryableProviderError) -> None:
     """Mark a provider as unhealthy in the app-state cache.
 
@@ -1952,6 +2240,16 @@ async def embeddings(request: Request, form_data: dict, user):
     Returns:
         dict: OpenAI-compatible embeddings response.
     """
+    _req_started = time.monotonic()
+
+    # Token-cap pre-flight (same shared helper as the chat path). The
+    # projected count is the tiktoken estimate of the embeddings input
+    # (string or list of strings).
+    from open_webui.utils.token_recorder import count_text_tokens
+
+    _prompt_estimate = count_text_tokens(form_data.get('input'), form_data.get('model'))
+    _token_cap_targets = await _enforce_token_caps(request, user, form_data.get('model'), _prompt_estimate)
+
     idx = 0
     # Prepare payload/body
     body = JSONCodec.dumps(form_data)
@@ -2008,7 +2306,18 @@ async def embeddings(request: Request, form_data: dict, user):
         if 'text/event-stream' in r.headers.get('Content-Type', ''):
             streaming = True
             return StreamingResponse(
-                stream_wrapper(r, passthrough=True),
+                # Wrap so usage is recorded + caps incremented when the
+                # stream drains (same pattern as the chat path).
+                _track_stream_usage_and_caps(
+                    stream_wrapper(r, passthrough=True),
+                    request=request,
+                    user=user,
+                    model_id=(form_data.get('model') or 'unknown'),
+                    endpoint='embedding',
+                    started=_req_started,
+                    prompt_estimate=_prompt_estimate,
+                    cap_targets=_token_cap_targets,
+                ),
                 status_code=r.status,
                 headers=_clean_proxy_headers(r.headers),
             )
@@ -2034,6 +2343,31 @@ async def embeddings(request: Request, form_data: dict, user):
                 else:
                     return PlainTextResponse(status_code=r.status, content=response_data)
 
+            # Record usage + tick cap counters for the successful call.
+            _record_api_token_usage(
+                request,
+                user=user,
+                result_or_data=response_data,
+                endpoint='embedding',
+                duration_ms=int((time.monotonic() - _req_started) * 1000),
+                prompt_estimate=_prompt_estimate,
+            )
+            try:
+                _usage = response_data.get('usage') if isinstance(response_data, dict) else None
+                _post_total = (
+                    int((_usage or {}).get('total_tokens') or 0)
+                    or (
+                        int((_usage or {}).get('prompt_tokens') or 0)
+                        + int((_usage or {}).get('completion_tokens') or 0)
+                    )
+                    or _prompt_estimate
+                )
+                if _post_total > 0 and _token_cap_targets:
+                    from open_webui.utils.token_caps import TokenCaps as _TrackerSingleton
+
+                    await _TrackerSingleton.record(request.app.state, _token_cap_targets, _post_total)
+            except Exception as _cap_exc:
+                log.debug('embedding cap post-flight skipped: %s', _cap_exc)
             return response_data
     except Exception as e:
         log.exception(e)
@@ -2076,6 +2410,16 @@ async def responses(
     Forward requests to the OpenAI Responses API endpoint.
     Routes to the correct upstream backend based on the model field.
     """
+    _req_started = time.monotonic()
+
+    # Token-cap pre-flight (same shared helper as the chat / embeddings
+    # paths). The Responses API input is a string or a list of content
+    # items — count_text_tokens handles both shapes.
+    from open_webui.utils.token_recorder import count_text_tokens
+
+    _prompt_estimate = count_text_tokens(form_data.input, form_data.model)
+    _token_cap_targets = await _enforce_token_caps(request, user, form_data.model, _prompt_estimate)
+
     payload = form_data.model_dump(exclude_none=True)
     is_streaming_request = bool(payload.get('stream', False))
 
@@ -2136,7 +2480,18 @@ async def responses(
         if 'text/event-stream' in r.headers.get('Content-Type', ''):
             streaming = True
             return StreamingResponse(
-                stream_wrapper(r, passthrough=True),
+                # Wrap so usage is recorded + caps incremented when the
+                # stream drains (same pattern as the chat / embeddings paths).
+                _track_stream_usage_and_caps(
+                    stream_wrapper(r, passthrough=True),
+                    request=request,
+                    user=user,
+                    model_id=(payload.get('model') or 'unknown'),
+                    endpoint='response',
+                    started=_req_started,
+                    prompt_estimate=_prompt_estimate,
+                    cap_targets=_token_cap_targets,
+                ),
                 status_code=r.status,
                 headers=_clean_proxy_headers(r.headers),
             )
@@ -2162,6 +2517,32 @@ async def responses(
                 else:
                     return PlainTextResponse(status_code=r.status, content=response_data)
 
+            # Record usage + tick cap counters for the successful call.
+            _record_api_token_usage(
+                request,
+                user=user,
+                result_or_data=response_data,
+                endpoint='response',
+                duration_ms=int((time.monotonic() - _req_started) * 1000),
+                prompt_estimate=_prompt_estimate,
+            )
+            try:
+                _usage = response_data.get('usage') if isinstance(response_data, dict) else None
+                _post_total = (
+                    int((_usage or {}).get('total_tokens') or 0)
+                    or (
+                        int((_usage or {}).get('prompt_tokens') or 0)
+                        + int((_usage or {}).get('completion_tokens') or 0)
+                        or int((_usage or {}).get('input_tokens') or 0) + int((_usage or {}).get('output_tokens') or 0)
+                    )
+                    or _prompt_estimate
+                )
+                if _post_total > 0 and _token_cap_targets:
+                    from open_webui.utils.token_caps import TokenCaps as _TrackerSingleton
+
+                    await _TrackerSingleton.record(request.app.state, _token_cap_targets, _post_total)
+            except Exception as _cap_exc:
+                log.debug('response cap post-flight skipped: %s', _cap_exc)
             return response_data
 
     except HTTPException:

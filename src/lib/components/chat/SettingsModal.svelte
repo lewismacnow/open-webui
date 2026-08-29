@@ -49,6 +49,8 @@
 	import AdminDocuments from '$lib/components/admin/Settings/Documents.svelte';
 	import AdminApiTools from '$lib/components/admin/Settings/ApiTools.svelte';
 	import WrapperModelProviders from '$lib/components/admin/Settings/WrapperModelProviders.svelte';
+	import ToolsConfig from '$lib/components/admin/Settings/ToolsConfig.svelte';
+	import TokenCaps from '$lib/components/admin/Settings/TokenCaps.svelte';
 	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
 	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
 	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
@@ -163,6 +165,8 @@
 		'admin:integrations': 'Tools',
 		'admin:documents': 'Tools',
 		'admin:api-tools': 'Tools',
+		'admin:tools-config': 'Tools',
+		'admin:token-caps': 'Tools',
 		'admin:web': 'Tools',
 		'admin:code-execution': 'Tools',
 		'admin:pipelines': 'Tools',
@@ -775,7 +779,39 @@
 		{
 			id: 'admin:api-tools',
 			title: 'API Tools',
-			keywords: ['api tools', 'tool servers', 'mcp', 'web search', 'knowledge', 'builtin tools', 'function calling', 'allowlist', 'policy']
+			keywords: [
+				'api tools',
+				'tool servers',
+				'mcp',
+				'web search',
+				'knowledge',
+				'builtin tools',
+				'function calling',
+				'allowlist',
+				'policy'
+			]
+		},
+		{
+			id: 'admin:tools-config',
+			title: 'Tools Config',
+			keywords: ['tools', 'grep', 'regex', 'budget', 'timeout', 'ranking', 'knowledge files']
+		},
+		{
+			id: 'admin:token-caps',
+			title: 'Token Caps',
+			keywords: [
+				'token',
+				'cap',
+				'limit',
+				'quota',
+				'budget',
+				'rate',
+				'usage',
+				'api key',
+				'model',
+				'group',
+				'user'
+			]
 		},
 		{
 			id: 'admin:web',
@@ -1295,13 +1331,17 @@
 				<AdminAnalytics />
 			{:else if selectedTab === 'admin:integrations'}
 				<AdminIntegrations {saveSettings} />
-		{:else if selectedTab === 'admin:documents'}
-			<AdminDocuments on:save={adminConfigSaveHandler} />
-		{:else if selectedTab === 'admin:api-tools'}
-			<AdminApiTools />
-		{:else if selectedTab === 'admin:wrapper-model-providers'}
-			<WrapperModelProviders />
-		{:else if selectedTab === 'admin:web'}
+			{:else if selectedTab === 'admin:documents'}
+				<AdminDocuments on:save={adminConfigSaveHandler} />
+			{:else if selectedTab === 'admin:api-tools'}
+				<AdminApiTools />
+			{:else if selectedTab === 'admin:wrapper-model-providers'}
+				<WrapperModelProviders />
+			{:else if selectedTab === 'admin:tools-config'}
+				<ToolsConfig />
+			{:else if selectedTab === 'admin:token-caps'}
+				<TokenCaps />
+			{:else if selectedTab === 'admin:web'}
 				<AdminWebSearch saveHandler={adminConfigSaveHandler} />
 			{:else if selectedTab === 'admin:code-execution'}
 				<AdminCodeExecution saveHandler={adminConfigSaveHandler} />

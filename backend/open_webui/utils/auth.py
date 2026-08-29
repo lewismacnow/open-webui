@@ -460,6 +460,12 @@ async def get_current_user(
 
 async def get_current_user_by_api_key(request, api_key: str):
     # Each function call manages its own short-lived session internally
+    api_key_row = await Users.get_api_key_by_key(api_key)
+    if api_key_row is not None:
+        # Expose the resolved API key row so downstream hooks (token recorder,
+        # token-cap tracker, analytics) can attribute the request to the
+        # specific key without re-querying.
+        request.state.api_key = api_key_row
     user = await Users.get_user_by_api_key(api_key)
 
     if user is None:
