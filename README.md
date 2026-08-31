@@ -2,7 +2,7 @@
 
 > **Forked from [https://github.com/open-webui/open-webui](https://github.com/open-webui/open-webui), with the following tweaks and enhancements:**
 >
-> **Latest sync:** upstream **v0.11.1** (released 2026-08-25). Fork tag: `v0.11.1-fork.1` (commit `df3cdf1d6`).
+> **Latest sync:** upstream **v0.11.1** (released 2026-08-25). Fork tag: `v0.11.1-fork.1` (commit `3e6c8f43c`).
 >
 > This is a customised fork. Upstream is treated as a source of enhancements that we periodically merge in; our own changes are maintained on top. The high-level deviations from upstream are:
 >
