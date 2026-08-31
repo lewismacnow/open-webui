@@ -43,9 +43,6 @@
 		moveFileInKnowledge,
 		syncKnowledgeDiff,
 		syncKnowledgeCleanup,
-		getKnowledgeEmbeddingProgress,
-		retryKnowledgeEmbedding,
-		recoverStuckKnowledgeFiles,
 		testExternalKnowledgeRetrieval
 	} from '$lib/apis/knowledge';
 	import { processUrl } from '$lib/apis/retrieval';
@@ -149,118 +146,6 @@
 
 	$: isExternalKnowledge = knowledge?.meta?.source === 'external';
 
-	// Embedding progress (per-KB), driven by the durable backend worker.
-	let embeddingProgress: {
-		pending: number;
-		processing: number;
-		completed: number;
-		failed: number;
-		total: number;
-	} | null = null;
-	let embeddingPollTimer: ReturnType<typeof setInterval> | null = null;
-	let retryingEmbeddings = false;
-
-	// Upload every file first with bounded concurrency, then let the backend
-	// worker embed them. Returns once uploads are accepted — embedding then
-	// proceeds in the background, so the user can close the session.
-	const uploadFilesConcurrently = async (
-		files: File[],
-		onProgress?: (done: number, total: number) => void,
-		concurrency = 6
-	) => {
-		let done = 0;
-		let index = 0;
-		const total = files.length;
-
-		const worker = async () => {
-			while (index < files.length) {
-				const current = files[index++];
-				// silent: avoid a per-file toast + list refetch on every upload
-				// (which would also re-introduce the fileItems null race).
-				await uploadFileHandler(current, { silent: true });
-				done++;
-				onProgress?.(done, total);
-			}
-		};
-
-		await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
-
-		// Single refresh once all uploads are accepted; embedding then proceeds
-		// in the backend worker and the progress poller tracks it.
-		if (total > 0) {
-			toast.success($i18n.t('{{count}} file(s) uploaded.', { count: total }));
-			await init();
-		}
-	};
-
-	const refreshEmbeddingProgress = async () => {
-		if (!knowledgeId) return;
-		const progress = await getKnowledgeEmbeddingProgress(localStorage.token, knowledgeId).catch(
-			() => null
-		);
-		embeddingProgress = progress;
-
-		const active = progress && (progress.pending > 0 || progress.processing > 0);
-		if (active && !embeddingPollTimer) {
-			embeddingPollTimer = setInterval(refreshEmbeddingProgress, 5000);
-		} else if (!active && embeddingPollTimer) {
-			clearInterval(embeddingPollTimer);
-			embeddingPollTimer = null;
-			// Refresh the file list once embedding settles so statuses update.
-			init();
-		}
-	};
-
-	let recoveringStuck = false;
-
-	// Files merged from the "pending" set that have been sitting unprocessed for
-	// a while are extraction orphans (stuck), not live uploads. Surface a
-	// recover action for them.
-	const STUCK_AGE_SECONDS = 300;
-	$: stuckCount = (fileItems ?? []).filter(
-		(f) =>
-			f?.status === 'uploading' &&
-			f?.updated_at &&
-			Date.now() / 1000 - f.updated_at > STUCK_AGE_SECONDS
-	).length;
-
-	const recoverStuckHandler = async () => {
-		if (!knowledgeId || recoveringStuck) return;
-		recoveringStuck = true;
-		try {
-			const res = await recoverStuckKnowledgeFiles(localStorage.token, knowledgeId).catch((e) => {
-				toast.error(`${e}`);
-				return null;
-			});
-			if (res) {
-				toast.success(
-					$i18n.t('Recovering {{count}} stuck file(s)…', { count: res.recovering })
-				);
-				// Give the worker a moment, then refresh.
-				setTimeout(() => init(), 3000);
-			}
-		} finally {
-			recoveringStuck = false;
-		}
-	};
-
-	const retryFailedEmbeddingsHandler = async () => {
-		if (!knowledgeId || retryingEmbeddings) return;
-		retryingEmbeddings = true;
-		try {
-			const res = await retryKnowledgeEmbedding(localStorage.token, knowledgeId).catch((e) => {
-				toast.error(`${e}`);
-				return null;
-			});
-			if (res) {
-				toast.success($i18n.t('Re-queued {{count}} file(s) for embedding.', { count: res.requeued }));
-				await refreshEmbeddingProgress();
-			}
-		} finally {
-			retryingEmbeddings = false;
-		}
-	};
-
 	const reset = () => {
 		currentPage = 1;
 	};
@@ -319,16 +204,7 @@
 		});
 
 		if (res) {
-			// Snapshot this fetch's result locally. The pending-files merge
-			// below awaits a network call, during which a concurrent
-			// getItemsPage() run can reset the shared `fileItems` back to
-			// null (see the `fileItems = null` at the top of this function).
-			// Reading that shared value after the await is what caused the
-			// "can't access property map ... is null" crash, which surfaced
-			// right after uploading a still-processing file (the only time
-			// the pending branch runs). Use the snapshot instead.
-			const baseItems = res.items ?? [];
-			fileItems = baseItems;
+			fileItems = res.items;
 			fileItemsTotal = res.total;
 			directoryItems = res.directories ?? [];
 			breadcrumbs = res.breadcrumbs ?? [];
@@ -337,7 +213,7 @@
 			try {
 				const pendingFiles = await getPendingKnowledgeFiles(localStorage.token, knowledgeId);
 				if (pendingFiles && pendingFiles.length > 0) {
-					const existingIds = new Set(baseItems.map((f) => f.id));
+					const existingIds = new Set(fileItems.map((f) => f.id));
 					const newPending = pendingFiles
 						.filter((f) => !existingIds.has(f.id))
 						.map((f) => ({
@@ -346,7 +222,7 @@
 							status: 'uploading'
 						}));
 					if (newPending.length > 0) {
-						fileItems = [...newPending, ...baseItems];
+						fileItems = [...newPending, ...fileItems];
 
 						// Start polling for completion (if not already polling)
 						if (!pendingPollTimer) {
@@ -367,10 +243,6 @@
 				console.warn('Failed to fetch pending files:', e);
 			}
 		}
-
-		// Refresh embedding progress (fire-and-forget); this also (re)starts the
-		// progress poller while files are still pending/processing.
-		refreshEmbeddingProgress();
 
 		return res;
 	};
@@ -531,9 +403,7 @@
 		}
 	};
 
-	const uploadFileHandler = async (file, { silent = false }: { silent?: boolean } = {}) => {
-		// `silent` is used by bulk/parallel uploads to suppress the per-file
-		// toast and list refresh; the caller refreshes once at the end instead.
+	const uploadFileHandler = async (file) => {
 		console.log(file);
 
 		const fileItem = {
@@ -602,15 +472,11 @@
 					toast.warning(uploadedFile.error);
 					fileItems = fileItems.filter((file) => file.id !== uploadedFile.id);
 				} else {
-					if (!silent) {
-						toast.success($i18n.t('File added successfully.'));
-						init();
-					}
+					toast.success($i18n.t('File added successfully.'));
+					init();
 				}
 			} else {
-				if (!silent) {
-					toast.error($i18n.t('Failed to upload file.'));
-				}
+				toast.error($i18n.t('Failed to upload file.'));
 			}
 		} catch (e) {
 			toast.error(`${e}`);
@@ -753,6 +619,51 @@
 		return currentPath && path ? `${currentPath}/${path}` : currentPath || path;
 	};
 
+	const uploadManifestEntries = async (
+		entries: DirectoryManifestEntry[],
+		resolveDirectoryId: (entry: DirectoryManifestEntry) => string | null | undefined
+	) => {
+		let failedCount = 0;
+
+		for (const [index, entry] of entries.entries()) {
+			const displayPath = entry.path ? `${entry.path}/${entry.filename}` : entry.filename;
+			syncing = $i18n.t('Uploading {{current}}/{{total}}: {{file}}', {
+				current: index + 1,
+				total: entries.length,
+				file: displayPath
+			});
+
+			const fileObject = new File([entry.file], entry.filename, { type: entry.file.type });
+			const uploadedFile = await uploadFile(localStorage.token, fileObject, {
+				knowledge_id: knowledge.id,
+				file_hash: entry.checksum,
+				directory_id: resolveDirectoryId(entry)
+			}).catch((error) => ({ error }));
+
+			if (!uploadedFile || uploadedFile.error) {
+				const error = uploadedFile?.error;
+				const reason =
+					typeof error === 'string'
+						? error
+						: (error?.detail ?? error?.message ?? $i18n.t('Failed to upload file.'));
+
+				failedCount++;
+				console.error('Upload failed:', displayPath, reason);
+			}
+		}
+
+		if (failedCount > 0) {
+			toast.error(
+				$i18n.t('Upload failed for {{failed}} of {{total}} files.', {
+					failed: failedCount,
+					total: entries.length
+				})
+			);
+		}
+
+		return failedCount;
+	};
+
 	const uploadDirectoryEntries = async (entries: DirectoryFileEntry[]) => {
 		if (!knowledge) return;
 
@@ -779,30 +690,14 @@
 
 			const directoryIdByPath = await createMissingDirectories(diff);
 
-			let uploadedCount = 0;
-			for (const entry of manifest) {
-				uploadedCount++;
-				const displayPath = entry.path ? `${entry.path}/${entry.filename}` : entry.filename;
-				syncing = $i18n.t('Uploading {{current}}/{{total}}: {{file}}', {
-					current: uploadedCount,
-					total: manifest.length,
-					file: displayPath
-				});
+			const failedCount = await uploadManifestEntries(manifest, (entry) =>
+				entry.path ? directoryIdByPath[getDirectoryUploadPath(entry.path)] : currentDirectoryId
+			);
 
-				const fileObject = new File([entry.file], entry.filename, { type: entry.file.type });
-				await uploadFile(localStorage.token, fileObject, {
-					knowledge_id: knowledge.id,
-					file_hash: entry.checksum,
-					directory_id: entry.path
-						? directoryIdByPath[getDirectoryUploadPath(entry.path)]
-						: currentDirectoryId
-				}).catch((e) => {
-					toast.error(`${e}`);
-					return null;
-				});
+			if (failedCount === 0) {
+				toast.success($i18n.t('File uploaded successfully'));
 			}
 
-			toast.success($i18n.t('File uploaded successfully'));
 			init();
 		} catch (e) {
 			toast.error(`${e}`);
@@ -836,14 +731,6 @@
 				return;
 			}
 
-			// Normalize optional collections: a partial diff response (missing
-			// or null arrays) must not crash the .map/.some/.length calls below.
-			diff.deleted = diff.deleted ?? [];
-			diff.modified = diff.modified ?? [];
-			diff.added = diff.added ?? [];
-			diff.rmdir = diff.rmdir ?? [];
-			diff.mkdir = diff.mkdir ?? [];
-
 			// ── 4. Cleanup — remove deleted + stale modified files first ──
 			const staleFileIds = [
 				...diff.deleted.map((d: any) => d.file_id),
@@ -865,43 +752,24 @@
 					diff.modified.some((m: any) => m.filename === entry.filename && m.path === entry.path)
 			);
 
-			// Upload changed files with bounded concurrency; embedding is then
-			// handled by the backend worker, so the session need not stay open.
-			let uploadedCount = 0;
-			let nextIndex = 0;
-			const concurrency = Math.min(6, filesToUpload.length);
-
-			const syncUploadWorker = async () => {
-				while (nextIndex < filesToUpload.length) {
-					const entry = filesToUpload[nextIndex++];
-					const fileObject = new File([entry.file], entry.filename, { type: entry.file.type });
-					await uploadFile(localStorage.token, fileObject, {
-						knowledge_id: knowledge.id,
-						file_hash: entry.checksum,
-						directory_id: entry.path ? directoryIdByPath[entry.path] : null
-					}).catch(() => null);
-					uploadedCount++;
-					syncing = $i18n.t('Uploading {{current}}/{{total}}', {
-						current: uploadedCount,
-						total: filesToUpload.length
-					});
-				}
-			};
-
-			await Promise.all(Array.from({ length: concurrency }, () => syncUploadWorker()));
+			const failedCount = await uploadManifestEntries(filesToUpload, (entry) =>
+				entry.path ? directoryIdByPath[entry.path] : null
+			);
 
 			// ── 7. Report ──
-			toast.success(
-				$i18n.t(
-					'Sync complete: {{added}} added, {{modified}} modified, {{deleted}} deleted, {{unmodified}} unmodified',
-					{
-						added: diff.added.length,
-						modified: diff.modified.length,
-						deleted: diff.deleted.length,
-						unmodified: diff.unmodified_count
-					}
-				)
-			);
+			if (failedCount === 0) {
+				toast.success(
+					$i18n.t(
+						'Sync complete: {{added}} added, {{modified}} modified, {{deleted}} deleted, {{unmodified}} unmodified',
+						{
+							added: diff.added.length,
+							modified: diff.modified.length,
+							deleted: diff.deleted.length,
+							unmodified: diff.unmodified_count
+						}
+					)
+				);
+			}
 			init();
 		} catch (e) {
 			toast.error(`${e}`);
@@ -1115,7 +983,6 @@
 				...knowledge,
 				name: knowledge.name,
 				description: knowledge.description,
-				meta: knowledge.meta ?? {},
 				access_grants: knowledge.access_grants ?? []
 			}).catch((e) => {
 				toast.error(`${e}`);
@@ -1211,7 +1078,12 @@
 						const entry = item.webkitGetAsEntry?.();
 
 						if (entry?.isDirectory) {
-							directoryEntries.push(...(await collectDroppedEntryFiles(entry)));
+							try {
+								directoryEntries.push(...(await collectDroppedEntryFiles(entry)));
+							} catch (error) {
+								handleUploadError(error);
+								return;
+							}
 						} else {
 							const file = item.getAsFile();
 							if (file) {
@@ -1263,11 +1135,6 @@
 			clearInterval(pendingPollTimer);
 			pendingPollTimer = null;
 		}
-		if (embeddingPollTimer) {
-			clearInterval(embeddingPollTimer);
-			embeddingPollTimer = null;
-		}
-		mediaQuery?.removeEventListener('change', handleMediaQuery);
 		const dropZone = document.querySelector('body');
 		dropZone?.removeEventListener('dragover', onDragOver);
 		dropZone?.removeEventListener('drop', onDrop);
@@ -1444,32 +1311,6 @@
 								</button>
 							</Tooltip>
 						</div>
-					</div>
-
-					<div class="flex items-center gap-2 mt-1">
-						<label class="text-xs text-gray-500" for="kb-top-k">
-							{$i18n.t('Document Snippets Returned')}
-						</label>
-						<input
-							id="kb-top-k"
-							type="number"
-							class="w-16 text-xs text-right bg-transparent outline-hidden border border-gray-200 dark:border-gray-700 rounded px-1 py-0.5"
-							placeholder={$i18n.t('Global')}
-							value={knowledge?.meta?.rag_config?.top_k ?? ''}
-							disabled={!knowledge?.write_access}
-							min="1"
-							on:input={(e) => {
-								if (!knowledge.meta) knowledge.meta = {};
-								if (!knowledge.meta.rag_config) knowledge.meta.rag_config = {};
-								const val = e.target.value;
-								if (val === '' || val === null) {
-									delete knowledge.meta.rag_config.top_k;
-								} else {
-									knowledge.meta.rag_config.top_k = parseInt(val);
-								}
-								changeDebounceHandler();
-							}}
-						/>
 					</div>
 				</div>
 			</div>
@@ -1702,9 +1543,9 @@
 				{/if}
 
 				{#if syncing}
-					<div class="mx-2.5 mt-2.5 -mb-0.5">
+					<div class="mx-2 mt-2 -mb-0.5">
 						<div
-							class="flex items-center gap-2.5 rounded-xl py-2 px-3 bg-gray-50 dark:bg-gray-850"
+							class="flex items-center gap-2 rounded-xl py-1.5 px-2.5 bg-gray-50 dark:bg-gray-850"
 						>
 							<Spinner className="size-3.5 shrink-0" />
 							<div class="text-xs text-gray-500 dark:text-gray-400 truncate">
@@ -1714,59 +1555,8 @@
 					</div>
 				{/if}
 
-				{#if stuckCount > 0}
-					<div class="mx-2.5 mt-2.5 -mb-0.5">
-						<div
-							class="flex items-center gap-2.5 rounded-xl py-2 px-3 bg-gray-50 dark:bg-gray-850"
-						>
-							<div class="flex-1 text-xs text-gray-500 dark:text-gray-400 truncate">
-								{$i18n.t(
-									'{{count}} file(s) appear stuck processing — their upload was interrupted.',
-									{ count: stuckCount }
-								)}
-							</div>
-							<button
-								class="text-xs font-medium px-2 py-0.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
-								type="button"
-								disabled={recoveringStuck}
-								on:click={recoverStuckHandler}
-							>
-								{$i18n.t('Recover')}
-							</button>
-						</div>
-					</div>
-				{/if}
-
-				{#if embeddingProgress && embeddingProgress.total > 0 && (embeddingProgress.pending > 0 || embeddingProgress.processing > 0 || embeddingProgress.failed > 0)}
-					<div class="mx-2.5 mt-2.5 -mb-0.5">
-						<div
-							class="flex items-center gap-2.5 rounded-xl py-2 px-3 bg-gray-50 dark:bg-gray-850"
-						>
-							{#if embeddingProgress.pending > 0 || embeddingProgress.processing > 0}
-								<Spinner className="size-3.5 shrink-0" />
-							{/if}
-							<div class="flex-1 text-xs text-gray-500 dark:text-gray-400 truncate">
-								{$i18n.t('Embedding')}: {embeddingProgress.completed}/{embeddingProgress.total}
-								{#if embeddingProgress.failed > 0}
-									· <span class="text-red-500">{embeddingProgress.failed} {$i18n.t('failed')}</span>
-								{/if}
-							</div>
-							{#if embeddingProgress.failed > 0}
-								<button
-									class="text-xs font-medium px-2 py-0.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
-									type="button"
-									disabled={retryingEmbeddings}
-									on:click={retryFailedEmbeddingsHandler}
-								>
-									{$i18n.t('Retry failed')}
-								</button>
-							{/if}
-						</div>
-					</div>
-				{/if}
-
 				{#if fileItems !== null && fileItemsTotal !== null}
-					<div class="flex flex-row flex-1 gap-3 px-2.5 mt-2">
+					<div class="flex flex-row flex-1 gap-2 px-2">
 						<div class="flex-1 flex">
 							<div class=" flex flex-col w-full space-x-2 rounded-lg h-full">
 								<div class="w-full h-full flex flex-col min-h-full">

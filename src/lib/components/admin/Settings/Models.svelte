@@ -40,7 +40,6 @@
 	import ModelEditor from '$lib/components/workspace/Models/ModelEditor.svelte';
 	import { toast } from 'svelte-sonner';
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
-	import BaseModelFailoverModal from './Models/BaseModelFailoverModal.svelte';
 	import ManageModelsModal from './Models/ManageModelsModal.svelte';
 	import ModelDefaultsPanel from './Models/ModelDefaultsPanel.svelte';
 	import ModelMenu from '$lib/components/admin/Settings/Models/ModelMenu.svelte';
@@ -102,10 +101,6 @@
 	let modelOrderDirty = false;
 	let modelDefaultsPanel = null;
 	let modelDefaultsDirty = false;
-
-	// Per-base-model failover editor modal
-	let showFailoverModal = false;
-	let failoverModalModel: { id: string; name?: string } | null = null;
 
 	let viewOption = ''; // '' = All, 'enabled', 'disabled', 'visible', 'hidden'
 	let tags: string[] = [];
@@ -274,6 +269,14 @@
 
 		baseModels = await getBaseModels(localStorage.token, selectedTag);
 		allModels = await getModels(localStorage.token);
+
+		const providerModels = await getModels(localStorage.token, null, true);
+		const allModelIds = new Set<string>(allModels.map((model: ModelListItem) => model.id));
+		allModels = [
+			...allModels,
+			...providerModels.filter((model: ModelListItem) => !allModelIds.has(model.id))
+		];
+
 		const baseModelIds = new Set<string>(baseModels.map((model: ModelListItem) => model.id));
 
 		models = allModels
@@ -692,7 +695,6 @@
 />
 
 <ManageModelsModal bind:show={showManageModal} />
-<BaseModelFailoverModal bind:show={showFailoverModal} model={failoverModalModel} />
 
 {#if models !== null}
 	{#if selectedModelId === null}
@@ -1171,10 +1173,6 @@
 										}}
 										cloneHandler={() => {
 											cloneHandler(model);
-										}}
-										failoverHandler={() => {
-											failoverModalModel = { id: model.id, name: model.name };
-											showFailoverModal = true;
 										}}
 										onClose={() => {}}
 									>
