@@ -711,7 +711,16 @@ async def refresh_terminal_server_terminals(
                 ssl=AIOHTTP_CLIENT_SESSION_SSL,
             ) as resp:
                 if resp.ok:
-                    return await resp.json()
+                    result = await resp.json()
+                    # Re-populate the local cache so subsequent requests see
+                    # the refreshed specs / system prompts. Without this the
+                    # repo's terminal_servers cache would stay stale until
+                    # the next save.
+                    try:
+                        await set_terminal_servers(request)
+                    except Exception as _cache_exc:
+                        log.debug('Refresh: local cache repopulate skipped: %s', _cache_exc)
+                    return result
                 detail = await resp.text()
                 raise HTTPException(status_code=resp.status, detail=detail)
     except HTTPException:

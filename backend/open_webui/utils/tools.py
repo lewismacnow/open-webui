@@ -1334,7 +1334,19 @@ async def set_terminal_servers(request: Request):
             }
         )
 
-    request.app.state.TERMINAL_SERVERS = await get_tool_servers_data(server_configs)
+    # Merge with the prior cache so a transient openapi-fetch failure on
+    # one terminal doesn't evict a still-working entry for another. The
+    # previous in-process list is the fallback; the new fetch is the
+    # source of truth for whatever it managed to populate. New wins;
+    # missing keys are preserved with their previous spec, system_prompt,
+    # etc. (Cache-eviction fix: see the user's "disable + re-enable"
+    # workaround.)
+    fresh = await get_tool_servers_data(server_configs)
+    previous = list(request.app.state.TERMINAL_SERVERS or [])
+    previous_by_id = {(s.get('info', {}) or {}).get('id') or s.get('id'): s for s in previous}
+    new_by_id = {(s.get('info', {}) or {}).get('id') or s.get('id'): s for s in fresh}
+    previous_by_id.update(new_by_id)
+    request.app.state.TERMINAL_SERVERS = list(previous_by_id.values())
 
     # Fetch system prompts concurrently (runs at cache time, not per-request)
     connections_by_id = {c.get('id'): c for c in connections if c.get('id')}
