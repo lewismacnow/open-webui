@@ -42,6 +42,7 @@
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import ManageModelsModal from './Models/ManageModelsModal.svelte';
 	import ModelDefaultsPanel from './Models/ModelDefaultsPanel.svelte';
+	import BaseModelFailoverModal from './Models/BaseModelFailoverModal.svelte';
 	import ModelMenu from '$lib/components/admin/Settings/Models/ModelMenu.svelte';
 	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
 	import EyeSlash from '$lib/components/icons/EyeSlash.svelte';
@@ -96,6 +97,10 @@
 
 	let showManageModal = false;
 	let showResetModal = false;
+
+	// Per-base-model failover editor modal
+	let showFailoverModal = false;
+	let failoverModalModel: { id: string; name?: string } | null = null;
 	let savingModelOrder = false;
 	let savingModelsSettings = false;
 	let modelOrderDirty = false;
@@ -695,6 +700,7 @@
 />
 
 <ManageModelsModal bind:show={showManageModal} />
+<BaseModelFailoverModal bind:show={showFailoverModal} model={failoverModalModel} />
 
 {#if models !== null}
 	{#if selectedModelId === null}
@@ -1173,6 +1179,10 @@
 										}}
 										cloneHandler={() => {
 											cloneHandler(model);
+										}}
+										failoverHandler={() => {
+											failoverModalModel = { id: model.id, name: model.name };
+											showFailoverModal = true;
 										}}
 										onClose={() => {}}
 									>
