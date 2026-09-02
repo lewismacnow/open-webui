@@ -67,11 +67,6 @@
 		groups = groups.map((group) => (group.id === updatedGroup.id ? updatedGroup : group));
 	};
 
-	/** @param {any} updatedGroup */
-	const updateGroup = (updatedGroup) => {
-		groups = groups.map((group) => (group.id === updatedGroup.id ? updatedGroup : group));
-	};
-
 	/** @param {any} group */
 	const addGroupHandler = async (group) => {
 		const res = await createNewGroup(localStorage.token, group).catch((error) => {
