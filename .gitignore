@@ -187,6 +187,10 @@ lerna-debug.log*
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
+# Linux core dumps (from Node OOM / native crashes — e.g. core.3254163)
+core
+core.[0-9]*
+
 # Runtime data
 pids
 *.pid
