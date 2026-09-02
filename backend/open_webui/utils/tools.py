@@ -148,15 +148,15 @@ async def build_tool_server_headers(
     cookies = {}
 
     if auth_type == 'bearer':
-        headers['Authorization'] = f'Bearer {connection.get("key", "")}'
+        headers.update(bearer_auth_header(connection.get('key', '')))
     elif auth_type == 'session':
         cookies = request.cookies if hasattr(request, 'cookies') else {}
-        headers['Authorization'] = f'Bearer {request.state.token.credentials}'
+        headers.update(bearer_auth_header(request.state.token.credentials))
     elif auth_type == 'system_oauth':
         cookies = request.cookies if hasattr(request, 'cookies') else {}
         oauth_token = extra_params.get('__oauth_token__', None)
         if oauth_token:
-            headers['Authorization'] = f'Bearer {oauth_token.get("access_token", "")}'
+            headers.update(bearer_auth_header(oauth_token.get('access_token', '')))
     elif auth_type in ('oauth_2.1', 'oauth_2.1_static'):
         try:
             splits = server_id.split(':')
@@ -166,7 +166,7 @@ async def build_tool_server_headers(
                 user.id, f'{connection_type}:{oauth_server_id}'
             )
             if oauth_token:
-                headers['Authorization'] = f'Bearer {oauth_token.get("access_token", "")}'
+                headers.update(bearer_auth_header(oauth_token.get('access_token', '')))
         except Exception as e:
             log.error(f'Error getting OAuth token: {e}')
 
@@ -1334,7 +1334,19 @@ async def set_terminal_servers(request: Request):
             }
         )
 
-    request.app.state.TERMINAL_SERVERS = await get_tool_servers_data(server_configs)
+    # Merge with the prior cache so a transient openapi-fetch failure on
+    # one terminal doesn't evict a still-working entry for another. The
+    # previous in-process list is the fallback; the new fetch is the
+    # source of truth for whatever it managed to populate. New wins;
+    # missing keys are preserved with their previous spec, system_prompt,
+    # etc. (Cache-eviction fix: see the user's "disable + re-enable"
+    # workaround.)
+    fresh = await get_tool_servers_data(server_configs)
+    previous = list(request.app.state.TERMINAL_SERVERS or [])
+    previous_by_id = {(s.get('info', {}) or {}).get('id') or s.get('id'): s for s in previous}
+    new_by_id = {(s.get('info', {}) or {}).get('id') or s.get('id'): s for s in fresh}
+    previous_by_id.update(new_by_id)
+    request.app.state.TERMINAL_SERVERS = list(previous_by_id.values())
 
     # Fetch system prompts concurrently (runs at cache time, not per-request)
     connections_by_id = {c.get('id'): c for c in connections if c.get('id')}
@@ -1373,7 +1385,13 @@ async def get_terminal_servers(request: Request):
             data = await request.app.state.redis.get(f'{REDIS_KEY_PREFIX}:terminal_servers')
             if data is not None:
                 terminal_servers = JSONCodec.loads(data)
-                request.app.state.TERMINAL_SERVERS = terminal_servers
+                connections = await Config.get('terminal_server.connections', []) or []
+                if terminal_servers or not any(
+                    connection.get('url') and connection.get('enabled', True) for connection in connections
+                ):
+                    request.app.state.TERMINAL_SERVERS = terminal_servers
+                else:
+                    terminal_servers = None
         except Exception as e:
             log.error(f'Error fetching terminal_servers from Redis: {e}')
 
@@ -1397,7 +1415,10 @@ async def get_terminal_tools(
     - Builds callables that route through the terminal proxy
     """
     connections = await Config.get('terminal_server.connections', []) or []
-    connection = next((c for c in connections if c.get('id') == terminal_id), None)
+    connection = next(
+        (terminal_connection for terminal_connection in connections if terminal_connection.get('id') == terminal_id),
+        None,
+    )
     if connection is None:
         raise RuntimeError(f"Terminal server '{terminal_id}' not found")
     if not connection.get('enabled', True):
@@ -1409,7 +1430,7 @@ async def get_terminal_tools(
 
     # Find the cached spec data for this terminal
     terminal_servers = await get_terminal_servers(request)
-    server_data = next((s for s in terminal_servers if s.get('id') == terminal_id), None)
+    server_data = next((server for server in terminal_servers if server.get('id') == terminal_id), None)
     if server_data is None:
         raise RuntimeError(f"Terminal server '{terminal_id}' is unavailable")
 

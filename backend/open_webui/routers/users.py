@@ -161,6 +161,38 @@ def strip_default_interface_settings(defaults: dict, settings: dict) -> dict:
     return stripped
 
 
+def merge_user_ui_settings(defaults: dict, settings: dict) -> dict:
+    merged = dict(defaults)
+    for key, value in settings.items():
+        if value is None:
+            continue
+
+        default_value = merged.get(key)
+        merged[key] = (
+            merge_user_ui_settings(default_value, value)
+            if isinstance(default_value, dict) and isinstance(value, dict)
+            else value
+        )
+    return merged
+
+
+def strip_default_interface_settings(defaults: dict, settings: dict) -> dict:
+    stripped = {}
+    for key, value in settings.items():
+        if value is None:
+            continue
+
+        default_value = defaults.get(key)
+        if isinstance(default_value, dict) and isinstance(value, dict):
+            nested = strip_default_interface_settings(default_value, value)
+            if nested:
+                stripped[key] = nested
+        elif value != default_value:
+            stripped[key] = value
+
+    return stripped
+
+
 ############################
 # GetUsers
 # A house is only as strong as its care for the least of

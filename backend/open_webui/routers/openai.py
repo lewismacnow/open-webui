@@ -31,6 +31,7 @@ from open_webui.env import (
     ENABLE_OPENAI_API_PASSTHROUGH,
     FORWARD_SESSION_INFO_HEADER_CHAT_ID,
     MODELS_CACHE_TTL,
+    REDIS_KEY_PREFIX,
 )
 from open_webui.events import EVENTS, publish_event, publish_model_provider_request_failed
 from open_webui.internal.db import get_async_session
@@ -87,6 +88,7 @@ log = logging.getLogger(__name__)
 _STRIP_PROXY_HEADERS = frozenset({'Content-Encoding', 'Content-Length', 'Transfer-Encoding'})
 _MODEL_LIST_TIMEOUT = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST)
 _UNSUPPORTED_OPENAI_MODEL_KEYWORDS = ('babbage', 'dall-e', 'davinci', 'embedding', 'tts', 'whisper')
+BASE_MODELS_CACHE_KEY = f'{REDIS_KEY_PREFIX}:models:base'
 
 
 def _clean_proxy_headers(raw_headers) -> dict:
@@ -356,6 +358,9 @@ async def get_openai_connection(idx: int) -> tuple[str, str, dict]:
 
 async def clear_openai_model_cache(request: Request):
     await get_all_models.cache.clear()
+    redis = getattr(request.app.state, 'redis', None)
+    if redis is not None:
+        await redis.delete(BASE_MODELS_CACHE_KEY)
     request.app.state.BASE_MODELS = []
     request.app.state.OPENAI_MODELS = {}
     models = getattr(request.app.state, 'MODELS', None)
@@ -582,14 +587,7 @@ async def update_config(request: Request, form_data: OpenAIConfigForm, user=Depe
         }
     )
 
-    await get_all_models.cache.clear()
-    request.app.state.BASE_MODELS = []
-    request.app.state.OPENAI_MODELS = {}
-    models = getattr(request.app.state, 'MODELS', None)
-    if hasattr(models, 'clear'):
-        models.clear()
-    else:
-        request.app.state.MODELS = {}
+    await clear_openai_model_cache(request)
 
     await publish_event(
         request,
@@ -2208,10 +2206,12 @@ async def _enforce_token_caps(
 def _record_provider_failure(request: Request, error: RetryableProviderError) -> None:
     """Mark a provider as unhealthy in the app-state cache.
 
-    Honors ``Retry-After`` from the error if present; otherwise defaults to
-    a 15-second cool-off so follow-up requests skip this provider briefly
-    (avoiding retry storms on a downed upstream) and re-test it quickly
-    once the ban lifts.
+    The ban is bounded to a static 15-second cool-off: a single
+    failure takes the provider out for 15s, the next chat after that
+    retries it; if it fails again the cooldown simply resets to 15s
+    again. We deliberately cap any upstream ``Retry-After`` to 15s so
+    the value cannot accumulate (a long ``Retry-After`` would otherwise
+    hold the primary out of the rotation for minutes).
     """
     if not error.provider_url:
         return
@@ -2219,13 +2219,30 @@ def _record_provider_failure(request: Request, error: RetryableProviderError) ->
     if health is None:
         request.app.state.PROVIDER_HEALTH = {}
         health = request.app.state.PROVIDER_HEALTH
-    unhealthy_for = error.retry_after if error.retry_after is not None else 15
+    unhealthy_for = min(15.0, float(error.retry_after)) if error.retry_after is not None else 15
     entry = health.setdefault(error.provider_url, {})
     entry['status'] = 'unhealthy'
     entry['last_error'] = error.detail
     entry['last_error_at'] = time.time()
     entry['last_error_status'] = error.status_code
     entry['unhealthy_until'] = time.time() + unhealthy_for
+
+    # Force a fresh health probe in the background so the next request
+    # sees a current status instead of waiting up to 30s for the
+    # periodic loop to re-check. The probe itself respects the
+    # ``unhealthy_until`` stamp we just wrote (a healthy response won't
+    # unban a provider mid-cooldown) so this is purely a faster re-check
+    # when the cooldown has already expired.
+    try:
+        import asyncio as _asyncio
+
+        from open_webui.utils.provider_health import _run_health_checks
+
+        _asyncio.create_task(_run_health_checks(request.app))
+    except Exception:
+        # Probe scheduling is best-effort; the periodic loop is the
+        # fallback. Never let a transient scheduling failure escape.
+        pass
 
 
 async def embeddings(request: Request, form_data: dict, user):

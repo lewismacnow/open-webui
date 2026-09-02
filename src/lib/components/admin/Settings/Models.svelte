@@ -40,9 +40,9 @@
 	import ModelEditor from '$lib/components/workspace/Models/ModelEditor.svelte';
 	import { toast } from 'svelte-sonner';
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
-	import BaseModelFailoverModal from './Models/BaseModelFailoverModal.svelte';
 	import ManageModelsModal from './Models/ManageModelsModal.svelte';
 	import ModelDefaultsPanel from './Models/ModelDefaultsPanel.svelte';
+	import BaseModelFailoverModal from './Models/BaseModelFailoverModal.svelte';
 	import ModelMenu from '$lib/components/admin/Settings/Models/ModelMenu.svelte';
 	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
 	import EyeSlash from '$lib/components/icons/EyeSlash.svelte';
@@ -97,15 +97,15 @@
 
 	let showManageModal = false;
 	let showResetModal = false;
+
+	// Per-base-model failover editor modal
+	let showFailoverModal = false;
+	let failoverModalModel: { id: string; name?: string } | null = null;
 	let savingModelOrder = false;
 	let savingModelsSettings = false;
 	let modelOrderDirty = false;
 	let modelDefaultsPanel = null;
 	let modelDefaultsDirty = false;
-
-	// Per-base-model failover editor modal
-	let showFailoverModal = false;
-	let failoverModalModel: { id: string; name?: string } | null = null;
 
 	let viewOption = ''; // '' = All, 'enabled', 'disabled', 'visible', 'hidden'
 	let tags: string[] = [];
@@ -274,6 +274,14 @@
 
 		baseModels = await getBaseModels(localStorage.token, selectedTag);
 		allModels = await getModels(localStorage.token);
+
+		const providerModels = await getModels(localStorage.token, null, true);
+		const allModelIds = new Set<string>(allModels.map((model: ModelListItem) => model.id));
+		allModels = [
+			...allModels,
+			...providerModels.filter((model: ModelListItem) => !allModelIds.has(model.id))
+		];
+
 		const baseModelIds = new Set<string>(baseModels.map((model: ModelListItem) => model.id));
 
 		models = allModels

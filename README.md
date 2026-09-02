@@ -2,7 +2,7 @@
 
 > **Forked from [https://github.com/open-webui/open-webui](https://github.com/open-webui/open-webui), with the following tweaks and enhancements:**
 >
-> **Latest sync:** upstream **v0.11.1** (released 2026-08-25). Fork tag: `v0.11.1-fork.1` (commit `df3cdf1d6`).
+> **Latest sync:** upstream **v0.11.3** (released 2026-08-31). Fork tag: `v0.11.3-fork.1` (commit `a7ea89879`; the docs README bump that follows lives at the current HEAD).
 >
 > This is a customised fork. Upstream is treated as a source of enhancements that we periodically merge in; our own changes are maintained on top. The high-level deviations from upstream are:
 >
@@ -60,9 +60,7 @@
 [![Discord](https://img.shields.io/badge/Discord-Open_WebUI-blue?logo=discord&logoColor=white)](https://discord.gg/5rJgQTnV4s)
 [![](https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/open-webui)
 
-![Open WebUI Banner](./banner.png)
-
-**Open WebUI is an [extensible](https://docs.openwebui.com/features/extensibility/plugin), feature-rich, and user-friendly self-hosted AI platform designed to operate entirely offline.** It supports various LLM runners like **Ollama** and **OpenAI-compatible APIs**, with **built-in inference engine** for RAG, making it a **powerful AI deployment solution**.
+Open WebUI is **a home for AI**, a self-hosted AI platform that's **[extensible](https://docs.openwebui.com/features/extensibility/plugin/)**, **[feature-rich](https://docs.openwebui.com/features/)**, user-friendly, and built to run **[entirely offline](https://openwebui.com/sovereign-ai)**. With support for **Ollama** and **OpenAI-compatible APIs**, it gives you a powerful, provider-agnostic interface for both local and cloud-based models.
 
 Passionate about open-source AI? [Join our team →](https://careers.openwebui.com/)
 
@@ -70,8 +68,6 @@ Passionate about open-source AI? [Join our team →](https://careers.openwebui.c
 
 > [!TIP]  
 > **Looking for an [Enterprise Plan](https://docs.openwebui.com/enterprise)?** – **[Speak with Our Sales Team Today!](https://docs.openwebui.com/enterprise)**
->
-> Get **enhanced capabilities**, including **custom theming and branding**, **Service Level Agreement (SLA) support**, **Long-Term Support (LTS) versions**, and **more!**
 
 For more information, be sure to check out our [Open WebUI Documentation](https://docs.openwebui.com/).
 
