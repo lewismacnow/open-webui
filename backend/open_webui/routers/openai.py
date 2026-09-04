@@ -63,6 +63,7 @@ from open_webui.utils.session_pool import (
 from open_webui.utils.failover import (
     ProviderCandidate,
     RetryableProviderError,
+    acquire_capacity_or_queue,
     is_retryable_error,
     parse_retry_after,
     resolve_failover_candidates,
@@ -1584,6 +1585,33 @@ async def generate_chat_completion(
         raise HTTPException(
             status_code=404,
             detail=ERROR_MESSAGES.MODEL_NOT_FOUND(),
+        )
+
+    # Fork: failover capacity queue. When every candidate is limited
+    # (max_concurrent set) and already at that limit, park the request in a
+    # short in-process FIFO and wait for a slot instead of firing into a
+    # saturated provider. Background tasks are exempt: title/tags/emoji/
+    # follow-up/query/autocomplete/MoA/tool function-calling all funnel
+    # through here with metadata.task set, and a single tool-using chat can
+    # serially occupy several of those task slots — queueing them would let
+    # a request deadlock against the very capacity it is holding.
+    if not (metadata and metadata.get('task')):
+        _failover_queue_cfg = await Config.get_many(
+            'chat.failover_queue.max_queue_length',
+            'chat.failover_queue.poll_interval_seconds',
+            'chat.failover_queue.full_message',
+        )
+        candidates = await acquire_capacity_or_queue(
+            request,
+            candidates,
+            model_info=model_info,
+            payload=payload,
+            skip_urls=skip_urls,
+            health_cache=health_cache,
+            max_queue_length=_failover_queue_cfg.get('chat.failover_queue.max_queue_length', 10),
+            poll_interval_seconds=_failover_queue_cfg.get('chat.failover_queue.poll_interval_seconds', 2.0),
+            full_message=_failover_queue_cfg.get('chat.failover_queue.full_message')
+            or 'LLM Load is at maximum capacity right now, retry in 30 seconds',
         )
 
     last_error: Optional[RetryableProviderError] = None

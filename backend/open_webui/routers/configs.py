@@ -13,6 +13,7 @@ from open_webui.events import EVENTS, publish_event
 from open_webui.models.config import Config
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.failover import DEFAULT_QUEUE_FULL_MESSAGE, MIN_POLL_INTERVAL_SECONDS
 from open_webui.utils.headers import bearer_auth_header, get_custom_headers
 from open_webui.utils.mcp.client import MCPClient
 from open_webui.utils.oauth import (
@@ -1050,6 +1051,86 @@ async def set_wrapper_provider_chains(
     cleaned = [entry.model_dump() for entry in form_data.WRAPPER_PROVIDER_CHAINS if entry.model_id]
     await Config.upsert({'models.wrapper_provider_chains': cleaned})
     return {'WRAPPER_PROVIDER_CHAINS': cleaned}
+
+
+############################
+# Failover capacity queue
+############################
+
+FAILOVER_QUEUE_CONFIG_KEYS = {
+    'max_queue_length': 'chat.failover_queue.max_queue_length',
+    'poll_interval_seconds': 'chat.failover_queue.poll_interval_seconds',
+    'full_message': 'chat.failover_queue.full_message',
+}
+
+
+class FailoverQueueConfigForm(BaseModel):
+    # Max simultaneous waiting requests per worker when every failover
+    # provider is at its max_concurrent limit. 0 = queue disabled —
+    # all-at-capacity requests get an immediate 429 with full_message.
+    max_queue_length: int = 10
+    # Seconds between in-flight re-checks while queued (clamped to 0.5 on
+    # save to prevent a hot-spin).
+    poll_interval_seconds: float = 2.0
+    # Detail text returned with the 429 when the queue is full / the wait
+    # deadline elapses / the client disconnects while queued.
+    full_message: str = DEFAULT_QUEUE_FULL_MESSAGE
+
+
+@router.get('/failover-queue', response_model=FailoverQueueConfigForm)
+async def get_failover_queue_config(user=Depends(get_admin_user)):
+    """Return the failover capacity queue config (admin-only — same posture
+    as the other failover routing settings). Falls back to the DEFAULT_CONFIG
+    values when nothing has been persisted yet."""
+    values = await get_config_values(FAILOVER_QUEUE_CONFIG_KEYS)
+    return FailoverQueueConfigForm(
+        max_queue_length=values.get('max_queue_length', 10),
+        poll_interval_seconds=values.get('poll_interval_seconds', 2.0),
+        full_message=values.get('full_message') or DEFAULT_QUEUE_FULL_MESSAGE,
+    )
+
+
+@router.post('/failover-queue', response_model=FailoverQueueConfigForm)
+async def set_failover_queue_config(
+    request: Request,
+    form_data: FailoverQueueConfigForm,
+    user=Depends(get_admin_user),
+):
+    """Replace the failover capacity queue config.
+
+    Validation:
+    - ``max_queue_length`` must be >= 0. 0 is allowed and means "reject
+      all": the queue is effectively disabled and all-at-capacity requests
+      return 429 immediately.
+    - ``poll_interval_seconds`` is clamped UP to 0.5s to prevent a
+      hot-spin against the in-flight counters.
+    - ``full_message`` must be a non-empty string (it is the only user-
+      facing text in the 429).
+    """
+    if form_data.max_queue_length < 0:
+        raise HTTPException(
+            status_code=400,
+            detail='max_queue_length must be >= 0 (0 disables the queue: all-at-capacity requests are rejected immediately)',
+        )
+    if not (form_data.full_message or '').strip():
+        raise HTTPException(status_code=400, detail='full_message must be a non-empty string')
+
+    # Keep the clamp in lockstep with the runtime guard in
+    # utils/failover.py (MIN_POLL_INTERVAL_SECONDS).
+    clamped_interval = max(form_data.poll_interval_seconds, MIN_POLL_INTERVAL_SECONDS)
+
+    await Config.upsert(
+        {
+            'chat.failover_queue.max_queue_length': form_data.max_queue_length,
+            'chat.failover_queue.poll_interval_seconds': clamped_interval,
+            'chat.failover_queue.full_message': form_data.full_message,
+        }
+    )
+    return FailoverQueueConfigForm(
+        max_queue_length=form_data.max_queue_length,
+        poll_interval_seconds=clamped_interval,
+        full_message=form_data.full_message,
+    )
 
 
 class RagVisionConfigForm(BaseModel):

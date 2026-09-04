@@ -8,6 +8,8 @@ cache are deprioritised, but never removed outright — if every provider
 looks unhealthy we still try them rather than hard-failing.
 """
 
+import asyncio
+from collections import deque
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 import logging
@@ -15,7 +17,7 @@ import time
 from types import SimpleNamespace
 from typing import Optional
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from open_webui.models.config import Config
 from open_webui.utils import provider_inflight
@@ -319,3 +321,151 @@ def parse_retry_after(header_value: Optional[str]) -> Optional[int]:
         return max(0, int(delta))
     except (TypeError, ValueError):
         return None
+
+
+# ── Failover capacity queue ──────────────────────────────────────────────
+#
+# When EVERY provider in a resolved candidate list is limited
+# (``max_concurrent`` set) and every one is already at that limit, the
+# resolver still hands back candidates (capacity is a transient tier — a
+# busy-but-healthy provider outranks a broken one). Without a queue the
+# retry loop fires straight into a saturated provider and the user eats an
+# upstream 429. Instead we park the request in a short in-process FIFO and
+# poll the in-flight counters until a slot frees or the deadline passes.
+#
+# The queue is a module-level deque — one FIFO per worker process, matching
+# the consistency bar of the in-memory ``provider_inflight`` counters (a
+# Redis-backed inflight store makes the *predicate* multi-node correct; the
+# queue's own length accounting stays per-process, which is acceptable for
+# v1). Deque append/remove are atomic under the GIL and we never await
+# between the length check and the append, so no asyncio.Lock is needed.
+
+DEFAULT_QUEUE_FULL_MESSAGE = 'LLM Load is at maximum capacity right now, retry in 30 seconds'
+
+# Minimum seconds between in-flight re-checks while queued — prevents a
+# hot-spin when an admin saves a sub-half-second poll interval.
+MIN_POLL_INTERVAL_SECONDS = 0.5
+
+# Floor for the total time a queued request may wait, regardless of
+# ``max_queue_length × poll_interval_seconds``.
+MIN_QUEUE_DEADLINE_SECONDS = 30.0
+
+
+@dataclass
+class _QueueEntry:
+    """One waiting request in the failover capacity FIFO."""
+
+    enqueued_at: float  # time.monotonic() when the request entered the queue
+
+
+# Module-level FIFO of waiting requests (see the process-local note above).
+_failover_queue: deque = deque()
+
+
+def capacity_queue_targets(candidates: list[ProviderCandidate]) -> Optional[list[ProviderCandidate]]:
+    """Structural half of the capacity-queue predicate (no I/O).
+
+    Returns the limited candidates when queueing is structurally possible —
+    at least one limited candidate exists AND no unlimited candidate is in
+    the list (an unlimited candidate always has room; the resolver already
+    ranks it above the at-capacity tier, so there is always somewhere to
+    go). Returns None when the request should be admitted immediately
+    regardless of in-flight counts.
+    """
+    limited = [c for c in candidates if c.max_concurrent is not None]
+    if not limited:
+        return None
+    if len(limited) < len(candidates):
+        # At least one unlimited candidate is present.
+        return None
+    return limited
+
+
+async def _has_free_capacity(app_state, limited: list[ProviderCandidate]) -> bool:
+    """True when any limited candidate sits below its max_concurrent."""
+    inflight = await provider_inflight.counts(app_state, [c.url for c in limited])
+    # The None re-check is for the type checker — `limited` is pre-filtered
+    # to candidates with a concrete max_concurrent.
+    return any(c.max_concurrent is not None and inflight.get(c.url, 0) < c.max_concurrent for c in limited)
+
+
+async def acquire_capacity_or_queue(
+    request: Request,
+    candidates: list[ProviderCandidate],
+    *,
+    model_info=None,
+    payload: Optional[dict] = None,
+    skip_urls: Optional[list[str]] = None,
+    health_cache: Optional[dict] = None,
+    max_queue_length: int = 10,
+    poll_interval_seconds: float = 2.0,
+    full_message: str = DEFAULT_QUEUE_FULL_MESSAGE,
+) -> list[ProviderCandidate]:
+    """Gate a chat completion on provider capacity, queueing when saturated.
+
+    Thin wrapper around ``resolve_failover_candidates`` output: if every
+    candidate is limited and at its ``max_concurrent``, the request waits in
+    the in-process FIFO (polling ``provider_inflight.counts`` every
+    ``poll_interval_seconds``) until a slot frees, the client disconnects,
+    or the deadline (``max_queue_length × poll_interval_seconds``, floored
+    at 30s) elapses.
+
+    - Returns the candidates unchanged when capacity is (or becomes)
+      available; on the queue-success path the list is re-resolved ONCE for
+      a fresh ordering (health/capacity tiers may have shifted during the
+      wait) instead of trusting the stale pre-queue ordering.
+    - Raises ``HTTPException(429, full_message)`` when the queue is full
+      (``max_queue_length`` waiters already present — with 0 slots this
+      rejects immediately), the deadline passes, or the client disconnects.
+    - ``asyncio.CancelledError`` propagates untouched — cancellation means
+      the server is shutting down or the task was revoked, not "busy".
+
+    The resolver keyword arguments (``model_info`` / ``payload`` /
+    ``skip_urls`` / ``health_cache``) are only used for the single
+    re-resolve on queue success, and mirror the original call site's args.
+    """
+    limited = capacity_queue_targets(candidates)
+    if limited is None:
+        # No limited candidates, or an unlimited candidate is present.
+        return candidates
+
+    if await _has_free_capacity(request.app.state, limited):
+        return candidates
+
+    # Queue path: every limited candidate is at or over its limit.
+    if len(_failover_queue) >= max_queue_length:
+        # Queue full. max_queue_length == 0 lands here too, making the
+        # queue "disabled": all-at-capacity requests are rejected at once.
+        raise HTTPException(status_code=429, detail=full_message)
+
+    poll_interval_seconds = max(float(poll_interval_seconds), MIN_POLL_INTERVAL_SECONDS)
+
+    entry = _QueueEntry(enqueued_at=time.monotonic())
+    _failover_queue.append(entry)
+    try:
+        deadline = time.monotonic() + max(MIN_QUEUE_DEADLINE_SECONDS, max_queue_length * poll_interval_seconds)
+        while True:
+            await asyncio.sleep(poll_interval_seconds)
+            if await request.is_disconnected():
+                raise HTTPException(status_code=429, detail=full_message)
+            if await _has_free_capacity(request.app.state, limited):
+                # A slot freed — re-resolve once for the fresh ordering
+                # (not on every poll; saves DB churn while waiting).
+                fresh = await resolve_failover_candidates(
+                    request=request,
+                    model_info=model_info,
+                    payload=payload if payload is not None else {},
+                    skip_urls=skip_urls,
+                    health_cache=health_cache,
+                )
+                return fresh or candidates
+            if time.monotonic() >= deadline:
+                raise HTTPException(status_code=429, detail=full_message)
+    finally:
+        # try/finally (not except) so the entry is removed on EVERY exit
+        # path — success, 429, disconnect, CancelledError (which must
+        # propagate rather than be swallowed into a 429), any exception.
+        try:
+            _failover_queue.remove(entry)
+        except ValueError:
+            pass  # already removed; defensive only
