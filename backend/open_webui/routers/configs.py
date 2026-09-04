@@ -1065,9 +1065,11 @@ FAILOVER_QUEUE_CONFIG_KEYS = {
 
 
 class FailoverQueueConfigForm(BaseModel):
-    # Max simultaneous waiting requests per worker when every failover
-    # provider is at its max_concurrent limit. 0 = queue disabled —
-    # all-at-capacity requests get an immediate 429 with full_message.
+    # Max simultaneous waiting requests — GLOBAL across all uvicorn workers
+    # (coordinated in Redis when REDIS_URL is set; per-worker only when
+    # Redis is unavailable) — when every failover provider is at its
+    # max_concurrent limit. 0 = queue disabled — all-at-capacity requests
+    # get an immediate 429 with full_message.
     max_queue_length: int = 10
     # Seconds between in-flight re-checks while queued (clamped to 0.5 on
     # save to prevent a hot-spin).

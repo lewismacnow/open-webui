@@ -509,9 +509,10 @@ API_TOOLS_ALLOWED_CATEGORIES = [
 API_TOOLS_ALLOW_TOOL_SERVERS = os.getenv('API_TOOLS_ALLOW_TOOL_SERVERS', 'False').lower() == 'true'
 
 # Fork: Failover capacity queue — when every provider in a failover chain is
-# at its max_concurrent limit, hold the request in a short in-process FIFO
-# and poll for a free slot instead of firing into a saturated provider.
-# Max simultaneous waiting requests per worker. 0 = queue disabled; an
+# at its max_concurrent limit, the request joins a short waiter queue and
+# polls for a free slot instead of firing into a saturated provider.
+# Max simultaneous waiting requests — shared across all uvicorn workers via
+# Redis (per-worker only when Redis is unavailable). 0 = queue disabled; an
 # all-at-capacity request gets an immediate 429 with the message below.
 FAILOVER_QUEUE_MAX_LENGTH = int(os.getenv('FAILOVER_QUEUE_MAX_LENGTH', '10'))
 # How often a queued request re-checks provider in-flight counts (seconds).

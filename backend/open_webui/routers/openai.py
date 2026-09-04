@@ -1588,13 +1588,17 @@ async def generate_chat_completion(
         )
 
     # Fork: failover capacity queue. When every candidate is limited
-    # (max_concurrent set) and already at that limit, park the request in a
-    # short in-process FIFO and wait for a slot instead of firing into a
-    # saturated provider. Background tasks are exempt: title/tags/emoji/
-    # follow-up/query/autocomplete/MoA/tool function-calling all funnel
-    # through here with metadata.task set, and a single tool-using chat can
-    # serially occupy several of those task slots — queueing them would let
-    # a request deadlock against the very capacity it is holding.
+    # (max_concurrent set) and already at that limit, the request joins a
+    # short waiter queue — depth shared across all uvicorn workers via
+    # Redis (in-process fallback when Redis is unavailable) — and claims a
+    # slot via the provider_inflight semaphore instead of firing into a
+    # saturated provider. On queue success the claimed candidate comes
+    # back pre_claimed so _try_provider_candidate doesn't double-increment.
+    # Background tasks are exempt: title/tags/emoji/follow-up/query/
+    # autocomplete/MoA/tool function-calling all funnel through here with
+    # metadata.task set, and a single tool-using chat can serially occupy
+    # several of those task slots — queueing them would let a request
+    # deadlock against the very capacity it is holding.
     if not (metadata and metadata.get('task')):
         _failover_queue_cfg = await Config.get_many(
             'chat.failover_queue.max_queue_length',
@@ -1723,7 +1727,14 @@ async def _try_provider_candidate(
     # non-streaming paths, or when the streaming body completes via the
     # tracked wrapper (a bare finally would fire the moment the
     # StreamingResponse object is *returned*, not when the stream drains).
-    await provider_inflight.increment(request.app.state, url)
+    #
+    # Pre-claimed candidates are the exception: the failover capacity queue
+    # already reserved this provider's slot (its wait loop pre-incremented
+    # provider_inflight to claim it), so incrementing here would
+    # double-count one request. Skip the increment but KEEP the release —
+    # the queue's claim pairs with this request's completion.
+    if not getattr(candidate, 'pre_claimed', False):
+        await provider_inflight.increment(request.app.state, url)
     inflight_released = False
 
     async def _release_inflight_once() -> None:

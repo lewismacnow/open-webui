@@ -42,20 +42,27 @@ def _redis(app_state) -> Any | None:
     return getattr(app_state, 'redis', None)
 
 
-async def increment(app_state, url: str) -> None:
-    """Record a request starting against this provider URL."""
+async def increment(app_state, url: str) -> int:
+    """Record a request starting against this provider URL.
+
+    Returns the NEW counter value — atomically produced on the Redis path
+    (INCR), which is what lets the failover capacity queue use it as a
+    claim semaphore: the claimant compares the returned value against
+    ``max_concurrent`` and rolls back with ``decrement`` on over-admission.
+    """
     redis_client = _redis(app_state)
     if redis_client is not None:
         try:
             k = _key(url)
-            await redis_client.incr(k)
+            new_count = int(await redis_client.incr(k))
             # Refresh the safety window on every increment: an actively used
             # provider never expires, an abandoned counter clears after TTL.
             await redis_client.expire(k, INFLIGHT_TTL_SECONDS)
-            return
+            return new_count
         except Exception:
             log.debug('provider_inflight.increment: Redis failed, using memory fallback', exc_info=True)
     _memory_counts[url] = _memory_counts.get(url, 0) + 1
+    return _memory_counts[url]
 
 
 async def decrement(app_state, url: str) -> None:

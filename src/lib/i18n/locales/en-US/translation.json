@@ -1234,7 +1234,7 @@
 	"failover_queue.full_message": "429 message",
 	"failover_queue.full_message_description": "Message returned to the caller when the queue is full. Default: \"LLM Load is at maximum capacity right now, retry in 30 seconds\".",
 	"failover_queue.max_queue_length": "Max queue length",
-	"failover_queue.max_queue_length_description": "Maximum number of requests that can wait in the failover queue. New requests beyond this limit get the 429 message immediately. Default 10.",
+	"failover_queue.max_queue_length_description": "Maximum number of requests that can wait in the failover queue, shared across all uvicorn workers. New requests beyond this limit get the 429 message immediately. Default 10.",
 	"failover_queue.poll_interval_seconds": "Capacity check-in seconds",
 	"failover_queue.poll_interval_seconds_description": "How often queued requests re-check provider capacity. Lower = faster recovery, higher = less load. Default 2.0.",
 	"failover_queue.section_queue": "Queue",
