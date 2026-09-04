@@ -25,6 +25,7 @@
 	import Integrations from './Settings/Integrations.svelte';
 	import Subagents from './Settings/Subagents.svelte';
 	import ApiTools from './Settings/ApiTools.svelte';
+	import FailoverQueue from './Settings/FailoverQueue.svelte';
 
 	import Search from '../icons/Search.svelte';
 	import AdminTabIcon from './Settings/AdminTabIcon.svelte';
@@ -54,6 +55,7 @@
 			'audio',
 			'images',
 			'pipelines',
+			'failover-queue',
 			'db'
 		].includes(tabFromPath)
 			? tabFromPath
@@ -154,6 +156,24 @@
 			title: 'Sub-agents',
 			route: '/admin/settings/subagents',
 			keywords: ['sub-agents', 'subagents', 'delegation', 'background', 'agents']
+		},
+		{
+			id: 'failover-queue',
+			title: 'Failover Capacity Queue',
+			route: '/admin/settings/failover-queue',
+			keywords: [
+				'failover',
+				'queue',
+				'capacity',
+				'wrapper',
+				'provider',
+				'chain',
+				'load',
+				'429',
+				'throttle',
+				'max concurrent',
+				'backpressure'
+			]
 		},
 		{
 			id: 'evaluations',
@@ -523,6 +543,8 @@
 							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
+				{:else if selectedTab === 'failover-queue'}
+					<FailoverQueue />
 				{/if}
 			</div>
 		</div>

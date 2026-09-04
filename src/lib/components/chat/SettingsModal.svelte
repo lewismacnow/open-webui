@@ -51,6 +51,7 @@
 	import WrapperModelProviders from '$lib/components/admin/Settings/WrapperModelProviders.svelte';
 	import ToolsConfig from '$lib/components/admin/Settings/ToolsConfig.svelte';
 	import TokenCaps from '$lib/components/admin/Settings/TokenCaps.svelte';
+	import FailoverQueue from '$lib/components/admin/Settings/FailoverQueue.svelte';
 	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
 	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
 	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
@@ -159,6 +160,7 @@
 		'admin:connections': 'AI',
 		'admin:models': 'AI',
 		'admin:wrapper-model-providers': 'AI',
+		'admin:failover-queue': 'AI',
 		'admin:subagents': 'AI',
 		'admin:evaluations': 'Quality',
 		'admin:analytics': 'Quality',
@@ -737,6 +739,23 @@
 			id: 'admin:wrapper-model-providers',
 			title: 'Wrapper Model Providers',
 			keywords: ['failover', 'provider', 'chain', 'global', 'concurrency']
+		},
+		{
+			id: 'admin:failover-queue',
+			title: 'Failover Capacity Queue',
+			keywords: [
+				'failover',
+				'queue',
+				'capacity',
+				'wrapper',
+				'provider',
+				'chain',
+				'load',
+				'429',
+				'throttle',
+				'max concurrent',
+				'backpressure'
+			]
 		},
 		{
 			id: 'admin:subagents',
@@ -1339,6 +1358,8 @@
 				<AdminApiTools />
 			{:else if selectedTab === 'admin:wrapper-model-providers'}
 				<WrapperModelProviders />
+			{:else if selectedTab === 'admin:failover-queue'}
+				<FailoverQueue />
 			{:else if selectedTab === 'admin:tools-config'}
 				<ToolsConfig />
 			{:else if selectedTab === 'admin:token-caps'}
