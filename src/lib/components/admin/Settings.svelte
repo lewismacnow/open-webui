@@ -26,6 +26,7 @@
 	import Subagents from './Settings/Subagents.svelte';
 	import ApiTools from './Settings/ApiTools.svelte';
 	import FailoverQueue from './Settings/FailoverQueue.svelte';
+	import ServiceKeys from './Settings/ServiceKeys.svelte';
 
 	import Search from '../icons/Search.svelte';
 	import AdminTabIcon from './Settings/AdminTabIcon.svelte';
@@ -49,6 +50,7 @@
 			'integrations',
 			'documents',
 			'api-tools',
+			'service-keys',
 			'web',
 			'code-execution',
 			'interface',
@@ -259,6 +261,24 @@
 			]
 		},
 		{
+			id: 'service-keys',
+			title: 'Service API Keys',
+			route: '/admin/settings/service-keys',
+			keywords: [
+				'service',
+				'api',
+				'keys',
+				'service key',
+				'service-key',
+				'mint',
+				'long-lived',
+				'group',
+				'ip whitelist',
+				'cidr',
+				'revoke'
+			]
+		},
+		{
 			id: 'web',
 			title: 'Web Search',
 			route: '/admin/settings/web',
@@ -440,6 +460,7 @@
 			<!-- {$i18n.t('Images')} -->
 			<!-- {$i18n.t('Pipelines')} -->
 			<!-- {$i18n.t('Database')} -->
+			<!-- {$i18n.t('Service API Keys')} -->
 			{#each filteredSettings as tab (tab.id)}
 				<a
 					id={tab.id}
@@ -495,6 +516,8 @@
 					/>
 				{:else if selectedTab === 'api-tools'}
 					<ApiTools />
+				{:else if selectedTab === 'service-keys'}
+					<ServiceKeys />
 				{:else if selectedTab === 'web'}
 					<WebSearch
 						saveHandler={async () => {

@@ -52,6 +52,7 @@
 	import ToolsConfig from '$lib/components/admin/Settings/ToolsConfig.svelte';
 	import TokenCaps from '$lib/components/admin/Settings/TokenCaps.svelte';
 	import FailoverQueue from '$lib/components/admin/Settings/FailoverQueue.svelte';
+	import ServiceKeys from '$lib/components/admin/Settings/ServiceKeys.svelte';
 	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
 	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
 	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
@@ -167,6 +168,7 @@
 		'admin:integrations': 'Tools',
 		'admin:documents': 'Tools',
 		'admin:api-tools': 'Tools',
+		'admin:service-keys': 'Tools',
 		'admin:tools-config': 'Tools',
 		'admin:token-caps': 'Tools',
 		'admin:web': 'Tools',
@@ -813,6 +815,23 @@
 			]
 		},
 		{
+			id: 'admin:service-keys',
+			title: 'Service API Keys',
+			keywords: [
+				'service',
+				'api',
+				'keys',
+				'service key',
+				'service-key',
+				'mint',
+				'long-lived',
+				'group',
+				'ip whitelist',
+				'cidr',
+				'revoke'
+			]
+		},
+		{
 			id: 'admin:tools-config',
 			title: 'Tools Config',
 			keywords: ['tools', 'grep', 'regex', 'budget', 'timeout', 'ranking', 'knowledge files']
@@ -1356,6 +1375,8 @@
 				<AdminDocuments on:save={adminConfigSaveHandler} />
 			{:else if selectedTab === 'admin:api-tools'}
 				<AdminApiTools />
+			{:else if selectedTab === 'admin:service-keys'}
+				<ServiceKeys />
 			{:else if selectedTab === 'admin:wrapper-model-providers'}
 				<WrapperModelProviders />
 			{:else if selectedTab === 'admin:failover-queue'}
