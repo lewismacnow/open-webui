@@ -115,11 +115,6 @@
 		return { label: i18n.t('Active'), tone: 'ok' };
 	}
 
-	function last4(prefix: string): string {
-		if (!prefix) return '----';
-		return prefix.slice(-4);
-	}
-
 	function parseIpWhitelist(text: string): string[] {
 		return text
 			.split('\n')
@@ -135,18 +130,39 @@
 
 	async function refreshKeys() {
 		keysLoading = true;
+		// 30s hard timeout — prevents the list from being stuck "loading"
+		// forever when the backend hangs (connection accepted, no body
+		// ever returned). The AbortError fires the catch block; the spinner
+		// hides via the `finally`.
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => controller.abort(), 30_000);
 		try {
-			const res = await getServiceKeys(localStorage.token, undefined, undefined, true);
+			const res = await getServiceKeys(
+				localStorage.token,
+				undefined,
+				undefined,
+				true,
+				controller.signal
+			);
+			// Defensive: handle missing or non-array items rather than crash.
+			const items = Array.isArray((res as any)?.items) ? (res as any).items : [];
 			// Newest first; ties broken by name.
-			keys = [...(res.items ?? [])].sort((a, b) => {
-				if (b.created_at !== a.created_at) return b.created_at - a.created_at;
-				return a.name.localeCompare(b.name);
+			keys = [...items].sort((a, b) => {
+				const ac = a?.created_at ?? 0;
+				const bc = b?.created_at ?? 0;
+				if (bc !== ac) return bc - ac;
+				return (a?.name ?? '').localeCompare(b?.name ?? '');
 			});
-		} catch (e) {
+		} catch (e: any) {
 			console.error('Failed to load service keys:', e);
-			toast.error($i18n.t('Failed to load service keys'));
+			const detail =
+				e?.detail ??
+				e?.message ??
+				(e?.name === 'AbortError' ? 'Request timed out after 30s' : null);
+			toast.error(detail ?? $i18n.t('Failed to load service keys'));
 			keys = [];
 		} finally {
+			clearTimeout(timeoutId);
 			keysLoading = false;
 		}
 	}
@@ -310,9 +326,22 @@
 	}
 
 	onMount(async () => {
-		await refreshKeys();
-		await hydrateGroupLabels();
-		loaded = true;
+		// Each step is independently try/finally so a hung fetch on one
+		// can't leave `loaded = false` (which keeps the spinner up). The
+		// refreshKeys function itself now has a 30s AbortController
+		// timeout, so this is belt-and-braces.
+		try {
+			await refreshKeys();
+		} catch (e) {
+			console.error('ServiceKeys onMount: refreshKeys threw:', e);
+		} finally {
+			loaded = true;
+		}
+		try {
+			await hydrateGroupLabels();
+		} catch (e) {
+			console.error('ServiceKeys onMount: hydrateGroupLabels threw:', e);
+		}
 	});
 </script>
 
@@ -546,6 +575,9 @@
 									{$i18n.t('service_keys.col_last_used')}
 								</th>
 								<th class="px-3 py-2 text-left font-medium">
+									{$i18n.t('service_keys.col_ip_whitelist')}
+								</th>
+								<th class="px-3 py-2 text-left font-medium">
 									{$i18n.t('service_keys.col_status')}
 								</th>
 								<th class="px-3 py-2 text-right font-medium">
@@ -559,7 +591,7 @@
 								{@const isEditing = inlineEditingId === k.id}
 								<tr class={isEditing ? 'bg-blue-50/30 dark:bg-blue-950/10' : ''}>
 									{#if isEditing}
-										<td colspan="8" class="px-3 py-3">
+										<td colspan="9" class="px-3 py-3">
 											<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
 												<div>
 													<label class="text-[0.6875rem] text-gray-500">
@@ -628,8 +660,10 @@
 											{groupLabelCache[k.group_id] ?? k.group_id}
 										</td>
 										<td class="px-3 py-2 font-medium">{k.name}</td>
-										<td class="px-3 py-2 font-mono text-[0.6875rem]">
-											<span class="text-gray-400">…</span>{last4(k.prefix)}
+										<td
+											class="px-3 py-2 font-mono text-[0.6875rem] text-gray-700 dark:text-gray-300"
+										>
+											{k.prefix || '----'}
 										</td>
 										<td class="px-3 py-2 text-gray-500 dark:text-gray-400">
 											{formatDate(k.created_at)}
@@ -639,6 +673,21 @@
 										</td>
 										<td class="px-3 py-2 text-gray-500 dark:text-gray-400">
 											{k.last_used_at ? formatDate(k.last_used_at) : '—'}
+										</td>
+										<td class="px-3 py-2">
+											{#if k.ip_whitelist && k.ip_whitelist.length > 0}
+												<Tooltip content={k.ip_whitelist.join('\n')}>
+													<span
+														class="inline-flex items-center px-1.5 py-0.5 rounded text-[0.6875rem] bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 cursor-help"
+													>
+														{$i18n.t('service_keys.ip_count', { n: k.ip_whitelist.length })}
+													</span>
+												</Tooltip>
+											{:else}
+												<span class="text-[0.6875rem] text-gray-300 dark:text-gray-600">
+													{$i18n.t('any')}
+												</span>
+											{/if}
 										</td>
 										<td class="px-3 py-2">
 											<span
