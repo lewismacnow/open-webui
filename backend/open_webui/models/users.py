@@ -601,6 +601,19 @@ class UsersTable:
                 'total': total,
             }
 
+    async def search_users(self, query: str = '', limit: int = 20, db: AsyncSession | None = None) -> list[UserModel]:
+        """Lightweight ilike %query% search over name/email for admin
+        comboboxes — mirrors Groups.search_groups. Caller-bounded by
+        ``limit`` (the endpoint caps it)."""
+        async with get_async_db_context(db) as session:
+            stmt = select(User)
+            if query:
+                like = f'%{query}%'
+                stmt = stmt.filter(or_(User.name.ilike(like), User.email.ilike(like)))
+            stmt = stmt.order_by(User.name.asc()).limit(max(1, limit))
+            rows = (await session.execute(stmt)).scalars().all()
+            return [UserModel.model_validate(user) for user in rows]
+
     async def get_users_by_group_id(self, group_id: str, db: AsyncSession | None = None) -> list[UserModel]:
         async with get_async_db_context(db) as session:
             from open_webui.models.groups import GroupMember

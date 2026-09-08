@@ -46,6 +46,10 @@ class ApiTokenUsage(Base):
     id = Column(Text, primary_key=True, unique=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(Text, nullable=False, index=True)
     api_key_id = Column(Text, nullable=True, index=True)
+    # Service-key attribution: set when the call was authenticated by a
+    # group-bound service key (the synthetic identity id is
+    # "service_key:<row id>"; the recorder stores the raw row id here).
+    service_key_id = Column(Text, nullable=True, index=True)
     model_id = Column(Text, nullable=False, index=True)
     endpoint = Column(Text, nullable=False)  # 'chat' | 'embedding' | 'response'
 
@@ -61,6 +65,7 @@ class ApiTokenUsage(Base):
     __table_args__ = (
         Index('ix_api_token_usage_user_created', 'user_id', 'created_at'),
         Index('ix_api_token_usage_apikey_created', 'api_key_id', 'created_at'),
+        Index('ix_api_token_usage_servicekey_created', 'service_key_id', 'created_at'),
         Index('ix_api_token_usage_model_created', 'model_id', 'created_at'),
     )
 
@@ -78,9 +83,14 @@ class ApiTokenUsageTable:
         duration_ms: int,
         status_code: int,
         trace_id: Optional[str] = None,
+        service_key_id: Optional[str] = None,
         db: Optional[Any] = None,
     ) -> str:
-        """Persist one usage row. Returns the new row id."""
+        """Persist one usage row. Returns the new row id.
+
+        ``service_key_id`` is set when the call was authenticated by a
+        group-bound service key (attribution mirrors api_key_id).
+        """
         row_id = str(uuid.uuid4())
         total = max(0, int(prompt_tokens or 0)) + max(0, int(completion_tokens or 0))
         async with get_async_db_context(db) as session:
@@ -89,6 +99,7 @@ class ApiTokenUsageTable:
                     id=row_id,
                     user_id=user_id,
                     api_key_id=api_key_id,
+                    service_key_id=service_key_id,
                     model_id=model_id,
                     endpoint=endpoint,
                     prompt_tokens=max(0, int(prompt_tokens or 0)),

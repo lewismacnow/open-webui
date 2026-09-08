@@ -177,3 +177,21 @@ def extract_response_tokens(usage_obj: Any) -> tuple[int, int]:
         return (max(0, int(prompt)), max(0, int(completion)))
     except (TypeError, ValueError):
         return (0, 0)
+
+
+SERVICE_KEY_IDENTITY_PREFIX = 'service_key:'
+
+
+def resolve_service_key_id(user: Any) -> Optional[str]:
+    """Return the service_api_key row id when ``user`` is a synthetic
+    service-key identity, else None.
+
+    Service identities carry ``id = "service_key:<service_api_key.id>"``
+    (see ``models/service_api_key.build_service_key_identity``), so the
+    attribution needs no extra request state — recorders can derive the
+    key id straight from the authenticated identity.
+    """
+    user_id = getattr(user, 'id', None) or ''
+    if isinstance(user_id, str) and user_id.startswith(SERVICE_KEY_IDENTITY_PREFIX):
+        return user_id[len(SERVICE_KEY_IDENTITY_PREFIX) :] or None
+    return None

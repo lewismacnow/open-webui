@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from open_webui.config import CACHE_DIR
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.events import EVENTS, publish_event
@@ -50,6 +50,26 @@ async def get_groups(
     groups = await Groups.get_groups(filter=filter, db=db)
 
     return groups
+
+
+############################
+# SearchGroups (admin combobox)
+############################
+
+
+@router.get('/search')
+async def search_groups(
+    query: Optional[str] = None,
+    limit: int = Query(20, ge=1, le=50, description='Bound the result set'),
+    user=Depends(get_verified_user),
+):
+    """Thin ilike %query% search over group names for admin comboboxes
+    (e.g. the service-keys UI). Returns ``[{id, label, name}]`` —
+    ``label`` is the group name; ``name`` is duplicated for frontend
+    consumers that read it directly. Bounded by ``limit``."""
+    result = await Groups.search_groups(filter={'query': query or ''}, limit=limit)
+    items = result['items'] if isinstance(result, dict) else []
+    return [{'id': group.id, 'label': group.name, 'name': group.name} for group in items]
 
 
 ############################
@@ -306,6 +326,19 @@ async def delete_group_by_id(
     request: Request, id: str, user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)
 ):
     try:
+        # App-level backstop for the schema's ON DELETE RESTRICT on
+        # service_api_key.group_id (SQLite does not enforce FKs without a
+        # pragma; Postgres enforces it natively). A group with service
+        # keys — even revoked ones — must not be deleted: the keys carry
+        # the audit trail and their token usage is group-bound.
+        from open_webui.models.service_api_key import ServiceApiKeys
+
+        if await ServiceApiKeys.count_by_group_id(id, db=db):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='Group still has service API keys; revoke and delete them first',
+            )
+
         result = await Groups.delete_group_by_id(id, db=db)
         if result:
             await publish_event(

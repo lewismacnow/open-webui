@@ -2036,7 +2036,7 @@ def _record_api_token_usage(
     """
     try:
         from open_webui.models.api_token_usage import ApiTokenUsages
-        from open_webui.utils.token_recorder import extract_response_tokens
+        from open_webui.utils.token_recorder import extract_response_tokens, resolve_service_key_id
 
         # `result_or_data` is the dict response (or a dict-like wrapper
         # from the Responses API). We pull usage defensively. The
@@ -2063,6 +2063,9 @@ def _record_api_token_usage(
             prompt = prompt_estimate
 
         api_key_row = getattr(request.state, 'api_key', None)
+        # Group-bound service keys: attribute the row to the key (the
+        # synthetic identity id carries "service_key:<row id>").
+        service_key_id = resolve_service_key_id(user) or getattr(request.state, 'service_api_key_id', None)
         model_id = (
             (isinstance(result_or_data, dict) and result_or_data.get('model'))
             or (hasattr(result_or_data, 'model') and getattr(result_or_data, 'model', None))
@@ -2074,6 +2077,7 @@ def _record_api_token_usage(
             ApiTokenUsages.record(
                 user_id=user.id,
                 api_key_id=api_key_row.id if api_key_row else None,
+                service_key_id=service_key_id,
                 model_id=model_id,
                 endpoint=endpoint,
                 prompt_tokens=prompt,
@@ -2202,28 +2206,42 @@ async def _enforce_token_caps(
     except Exception:
         pass
 
-    # `user.groups` on the ORM model always validates to [] — query the
-    # membership table instead (same as builtin.py's grep_knowledge_files).
-    group_ids: list[str] = []
-    try:
-        from open_webui.models.groups import Groups
-
-        user_groups = await Groups.get_groups_by_member_id(user.id)
-        group_ids = [g.id for g in user_groups or []]
-    except Exception:
-        group_ids = []
-
-    api_key_row = getattr(request.state, 'api_key', None)
-    targets.extend(
-        _Tracker.collect_applicable_targets(
-            user_id=user.id,
-            group_ids=group_ids,
-            model_id=model_id,
-            api_key_user_id=(api_key_row.user_id if api_key_row else None),
+    # Service-key-authenticated requests: caps are GROUP-bound by design —
+    # collect_applicable_targets returns ONLY the bound group's target (no
+    # user target: there is no owning user; no model / api_key target).
+    service_key_row = getattr(request.state, 'service_api_key', None)
+    if service_key_row is not None:
+        targets.extend(
+            _Tracker.collect_applicable_targets(
+                user_id=None,
+                group_ids=[],
+                model_id=None,
+                service_key_group_ids=[service_key_row.group_id],
+            )
         )
-    )
-    if api_key_row is not None:
-        targets.append(('api_key', api_key_row.id))
+    else:
+        # `user.groups` on the ORM model always validates to [] — query the
+        # membership table instead (same as builtin.py's grep_knowledge_files).
+        group_ids: list[str] = []
+        try:
+            from open_webui.models.groups import Groups
+
+            user_groups = await Groups.get_groups_by_member_id(user.id)
+            group_ids = [g.id for g in user_groups or []]
+        except Exception:
+            group_ids = []
+
+        api_key_row = getattr(request.state, 'api_key', None)
+        targets.extend(
+            _Tracker.collect_applicable_targets(
+                user_id=user.id,
+                group_ids=group_ids,
+                model_id=model_id,
+                api_key_user_id=(api_key_row.user_id if api_key_row else None),
+            )
+        )
+        if api_key_row is not None:
+            targets.append(('api_key', api_key_row.id))
 
     if caps_map and targets:
         hit = await _Tracker.check(request.app.state, caps_map, targets, projected_tokens)
