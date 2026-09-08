@@ -155,11 +155,23 @@ class _TokenCaps:
         group_ids: Iterable[str],
         model_id: Optional[str],
         api_key_user_id: Optional[str] = None,
+        service_key_group_ids: Optional[list[str]] = None,
     ) -> list[tuple[str, str]]:
         """Build the list of (type, id) targets the cap tracker should
         check. The api_key's owner is the same user as the caller when
         the call was authenticated by an API key (so the api_key and
-        user are the SAME pool — the spec says summed)."""
+        user are the SAME pool — the spec says summed).
+
+        BEHAVIOUR (service keys): when ``service_key_group_ids`` is not
+        None, the request was authenticated by a group-bound service API
+        key and the returned targets are ``[('group', gid), ...]`` ONLY —
+        no user target (a service key has no owning user by design), no
+        model target, no api_key target. Service-key traffic counts
+        against the bound group's existing ``target_type='group'`` cap;
+        there is deliberately no per-key cap.
+        """
+        if service_key_group_ids is not None:
+            return [('group', gid) for gid in service_key_group_ids if gid]
         out: list[tuple[str, str]] = []
         if user_id:
             out.append(('user', user_id))

@@ -508,6 +508,21 @@ API_TOOLS_ALLOWED_CATEGORIES = [
 # Whether External Tool Servers (MCP) are available via API.
 API_TOOLS_ALLOW_TOOL_SERVERS = os.getenv('API_TOOLS_ALLOW_TOOL_SERVERS', 'False').lower() == 'true'
 
+# Fork: Failover capacity queue — when every provider in a failover chain is
+# at its max_concurrent limit, the request joins a short waiter queue and
+# polls for a free slot instead of firing into a saturated provider.
+# Max simultaneous waiting requests — shared across all uvicorn workers via
+# Redis (per-worker only when Redis is unavailable). 0 = queue disabled; an
+# all-at-capacity request gets an immediate 429 with the message below.
+FAILOVER_QUEUE_MAX_LENGTH = int(os.getenv('FAILOVER_QUEUE_MAX_LENGTH', '10'))
+# How often a queued request re-checks provider in-flight counts (seconds).
+FAILOVER_QUEUE_POLL_INTERVAL_SECONDS = float(os.getenv('FAILOVER_QUEUE_POLL_INTERVAL_SECONDS', '2.0'))
+# Detail text returned with the 429 when the queue is full / deadline passes.
+FAILOVER_QUEUE_FULL_MESSAGE = os.getenv(
+    'FAILOVER_QUEUE_FULL_MESSAGE',
+    'LLM Load is at maximum capacity right now, retry in 30 seconds',
+)
+
 ENABLE_MEMORIES = os.getenv('ENABLE_MEMORIES', 'True').lower() == 'true'
 ENABLE_MEMORY_SYSTEM_CONTEXT = os.getenv('ENABLE_MEMORY_SYSTEM_CONTEXT', 'True').lower() == 'true'
 ENABLE_MEMORY_BACKGROUND_REVIEW = os.getenv('ENABLE_MEMORY_BACKGROUND_REVIEW', 'False').lower() == 'true'
@@ -3255,6 +3270,9 @@ DEFAULT_CONFIG = {
     'chat.api_tools.enabled': CHAT_API_TOOLS_ENABLED,
     'chat.api_tools.allowed_categories': API_TOOLS_ALLOWED_CATEGORIES,
     'chat.api_tools.allow_tool_servers': API_TOOLS_ALLOW_TOOL_SERVERS,
+    'chat.failover_queue.max_queue_length': FAILOVER_QUEUE_MAX_LENGTH,
+    'chat.failover_queue.poll_interval_seconds': FAILOVER_QUEUE_POLL_INTERVAL_SECONDS,
+    'chat.failover_queue.full_message': FAILOVER_QUEUE_FULL_MESSAGE,
     'chat.tool_permissions.enable': ENABLE_TOOL_PERMISSIONS,
     'task.title.prompt_template': TITLE_GENERATION_PROMPT_TEMPLATE,
     'task.tags.prompt_template': TAGS_GENERATION_PROMPT_TEMPLATE,

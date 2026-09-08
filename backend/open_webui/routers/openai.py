@@ -63,6 +63,7 @@ from open_webui.utils.session_pool import (
 from open_webui.utils.failover import (
     ProviderCandidate,
     RetryableProviderError,
+    acquire_capacity_or_queue,
     is_retryable_error,
     parse_retry_after,
     resolve_failover_candidates,
@@ -1586,6 +1587,37 @@ async def generate_chat_completion(
             detail=ERROR_MESSAGES.MODEL_NOT_FOUND(),
         )
 
+    # Fork: failover capacity queue. When every candidate is limited
+    # (max_concurrent set) and already at that limit, the request joins a
+    # short waiter queue — depth shared across all uvicorn workers via
+    # Redis (in-process fallback when Redis is unavailable) — and claims a
+    # slot via the provider_inflight semaphore instead of firing into a
+    # saturated provider. On queue success the claimed candidate comes
+    # back pre_claimed so _try_provider_candidate doesn't double-increment.
+    # Background tasks are exempt: title/tags/emoji/follow-up/query/
+    # autocomplete/MoA/tool function-calling all funnel through here with
+    # metadata.task set, and a single tool-using chat can serially occupy
+    # several of those task slots — queueing them would let a request
+    # deadlock against the very capacity it is holding.
+    if not (metadata and metadata.get('task')):
+        _failover_queue_cfg = await Config.get_many(
+            'chat.failover_queue.max_queue_length',
+            'chat.failover_queue.poll_interval_seconds',
+            'chat.failover_queue.full_message',
+        )
+        candidates = await acquire_capacity_or_queue(
+            request,
+            candidates,
+            model_info=model_info,
+            payload=payload,
+            skip_urls=skip_urls,
+            health_cache=health_cache,
+            max_queue_length=_failover_queue_cfg.get('chat.failover_queue.max_queue_length', 10),
+            poll_interval_seconds=_failover_queue_cfg.get('chat.failover_queue.poll_interval_seconds', 2.0),
+            full_message=_failover_queue_cfg.get('chat.failover_queue.full_message')
+            or 'LLM Load is at maximum capacity right now, retry in 30 seconds',
+        )
+
     last_error: Optional[RetryableProviderError] = None
     for i, candidate in enumerate(candidates):
         is_last = i == len(candidates) - 1
@@ -1695,7 +1727,14 @@ async def _try_provider_candidate(
     # non-streaming paths, or when the streaming body completes via the
     # tracked wrapper (a bare finally would fire the moment the
     # StreamingResponse object is *returned*, not when the stream drains).
-    await provider_inflight.increment(request.app.state, url)
+    #
+    # Pre-claimed candidates are the exception: the failover capacity queue
+    # already reserved this provider's slot (its wait loop pre-incremented
+    # provider_inflight to claim it), so incrementing here would
+    # double-count one request. Skip the increment but KEEP the release —
+    # the queue's claim pairs with this request's completion.
+    if not getattr(candidate, 'pre_claimed', False):
+        await provider_inflight.increment(request.app.state, url)
     inflight_released = False
 
     async def _release_inflight_once() -> None:
@@ -1997,7 +2036,7 @@ def _record_api_token_usage(
     """
     try:
         from open_webui.models.api_token_usage import ApiTokenUsages
-        from open_webui.utils.token_recorder import extract_response_tokens
+        from open_webui.utils.token_recorder import extract_response_tokens, resolve_service_key_id
 
         # `result_or_data` is the dict response (or a dict-like wrapper
         # from the Responses API). We pull usage defensively. The
@@ -2024,6 +2063,9 @@ def _record_api_token_usage(
             prompt = prompt_estimate
 
         api_key_row = getattr(request.state, 'api_key', None)
+        # Group-bound service keys: attribute the row to the key (the
+        # synthetic identity id carries "service_key:<row id>").
+        service_key_id = resolve_service_key_id(user) or getattr(request.state, 'service_api_key_id', None)
         model_id = (
             (isinstance(result_or_data, dict) and result_or_data.get('model'))
             or (hasattr(result_or_data, 'model') and getattr(result_or_data, 'model', None))
@@ -2035,6 +2077,7 @@ def _record_api_token_usage(
             ApiTokenUsages.record(
                 user_id=user.id,
                 api_key_id=api_key_row.id if api_key_row else None,
+                service_key_id=service_key_id,
                 model_id=model_id,
                 endpoint=endpoint,
                 prompt_tokens=prompt,
@@ -2163,28 +2206,42 @@ async def _enforce_token_caps(
     except Exception:
         pass
 
-    # `user.groups` on the ORM model always validates to [] — query the
-    # membership table instead (same as builtin.py's grep_knowledge_files).
-    group_ids: list[str] = []
-    try:
-        from open_webui.models.groups import Groups
-
-        user_groups = await Groups.get_groups_by_member_id(user.id)
-        group_ids = [g.id for g in user_groups or []]
-    except Exception:
-        group_ids = []
-
-    api_key_row = getattr(request.state, 'api_key', None)
-    targets.extend(
-        _Tracker.collect_applicable_targets(
-            user_id=user.id,
-            group_ids=group_ids,
-            model_id=model_id,
-            api_key_user_id=(api_key_row.user_id if api_key_row else None),
+    # Service-key-authenticated requests: caps are GROUP-bound by design —
+    # collect_applicable_targets returns ONLY the bound group's target (no
+    # user target: there is no owning user; no model / api_key target).
+    service_key_row = getattr(request.state, 'service_api_key', None)
+    if service_key_row is not None:
+        targets.extend(
+            _Tracker.collect_applicable_targets(
+                user_id=None,
+                group_ids=[],
+                model_id=None,
+                service_key_group_ids=[service_key_row.group_id],
+            )
         )
-    )
-    if api_key_row is not None:
-        targets.append(('api_key', api_key_row.id))
+    else:
+        # `user.groups` on the ORM model always validates to [] — query the
+        # membership table instead (same as builtin.py's grep_knowledge_files).
+        group_ids: list[str] = []
+        try:
+            from open_webui.models.groups import Groups
+
+            user_groups = await Groups.get_groups_by_member_id(user.id)
+            group_ids = [g.id for g in user_groups or []]
+        except Exception:
+            group_ids = []
+
+        api_key_row = getattr(request.state, 'api_key', None)
+        targets.extend(
+            _Tracker.collect_applicable_targets(
+                user_id=user.id,
+                group_ids=group_ids,
+                model_id=model_id,
+                api_key_user_id=(api_key_row.user_id if api_key_row else None),
+            )
+        )
+        if api_key_row is not None:
+            targets.append(('api_key', api_key_row.id))
 
     if caps_map and targets:
         hit = await _Tracker.check(request.app.state, caps_map, targets, projected_tokens)

@@ -258,19 +258,45 @@ async def get_all_users(
     return await Users.get_users(db=db)
 
 
-@router.get('/search', response_model=UserInfoListResponse)
+@router.get('/search', response_model=None)
 async def search_users(
     query: str | None = None,
     order_by: str | None = None,
     direction: str | None = None,
-    page: int | None = 1,
+    # NOTE: no default — an ABSENT page (combobox callers send only
+    # query+limit) selects the light [{id,label}] shape, while every
+    # legacy caller (searchUsers in the frontend API) always sends page.
+    page: int | None = None,
+    limit: int | None = Query(None, ge=1, le=50),
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    limit = PAGE_ITEM_COUNT
+    """Two consumer shapes on one path (kept separate from a new URL to
+    avoid breaking the existing admin users search):
 
-    page = max(1, page)
-    skip = (page - 1) * limit
+    - Legacy (``page`` supplied): full paginated
+      ``{users: [...], total}`` used by MemberSelector / Events settings.
+    - Combobox (``page`` omitted, ``limit`` supplied): light
+      ``[{id, label, name}]`` for admin pickers (e.g. service keys UI).
+      ``label`` is the display name; ``name`` is duplicated for frontend
+      consumers that read it directly. ilike %query% over name/email,
+      bounded by ``limit``.
+    """
+    if page is None:
+        found = await Users.search_users(query or '', limit=limit or 20)
+        return [
+            {
+                'id': u.id,
+                'label': u.name or u.email or u.id,
+                'name': u.name or u.email or u.id,
+            }
+            for u in found
+        ]
+
+    page_size = PAGE_ITEM_COUNT
+
+    page = max(1, page or 1)
+    skip = (page - 1) * page_size
 
     filter = {}
     if query:
@@ -280,7 +306,7 @@ async def search_users(
         filter=filter,
         sort={'order_by': order_by, 'direction': direction},
         skip=skip,
-        limit=limit,
+        limit=page_size,
         db=db,
     )
 

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import uuid
@@ -37,6 +38,12 @@ from open_webui.env import (
 )
 from open_webui.models.auths import Auths
 from open_webui.models.config import Config
+from open_webui.models.groups import Groups
+from open_webui.models.service_api_key import (
+    SERVICE_KEY_PREFIX,
+    ServiceApiKeys,
+    build_service_key_identity,
+)
 from open_webui.models.users import Users
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.json_codec import JSONCodec
@@ -369,6 +376,25 @@ async def get_current_user(
     if token is None:
         raise HTTPException(status_code=401, detail='Not authenticated')
 
+    # auth by service api key (group-bound machine credentials) — checked
+    # BEFORE the user-key path: the sk_live_ namespace is disjoint from
+    # sk- keys and JWTs, so a wrong-prefix key falls through untouched.
+    if token.startswith(SERVICE_KEY_PREFIX):
+        user = await get_current_user_by_service_key(request, token)
+
+        if ENABLE_OTEL:
+            from opentelemetry import trace
+
+            current_span = trace.get_current_span()
+            if current_span:
+                current_span.set_attribute('client.user.id', user.id)
+                current_span.set_attribute('client.user.role', user.role)
+                current_span.set_attribute('client.auth.type', 'service_api_key')
+
+        # Scope-backed, so outer middleware (audit) can reuse the resolved user
+        request.state.user = user
+        return user
+
     # auth by api key
     if token.startswith('sk-'):
         user = await get_current_user_by_api_key(request, token)
@@ -458,6 +484,145 @@ async def get_current_user(
         raise e
 
 
+def _service_key_client_ip(request: Request) -> Optional[str]:
+    """Best-effort client IP for the service-key whitelist.
+
+    X-Forwarded-For is parsed FIRST (first IP when comma-separated — the
+    leftmost hop is the originating client per the de-facto standard),
+    then X-Real-IP, then the ASGI client address. NOTE: like every
+    XFF-based scheme this is only trustworthy behind a proxy that
+    overwrites the header; the whitelist is an authorization aid, not an
+    authentication boundary.
+    """
+    forwarded = request.headers.get('x-forwarded-for')
+    if forwarded:
+        return forwarded.split(',')[0].strip() or None
+    real_ip = request.headers.get('x-real-ip')
+    if real_ip:
+        return real_ip.split(',')[0].strip() or None
+    client = getattr(request, 'client', None)
+    return client.host if client else None
+
+
+def _service_key_ip_allowed(ip: Optional[str], whitelist: Optional[list[str]]) -> bool:
+    """Match ``ip`` against the key's whitelist with stdlib ipaddress.
+
+    Supports exact IPs, IPv4 CIDR, and IPv6 CIDR (an exact IP is simply a
+    /32 or /128 network). NULL/empty whitelist = any origin. Unparseable
+    entries are skipped (logged) rather than failing the request.
+    """
+    if not whitelist:
+        return True
+    if not ip:
+        return False
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for raw in whitelist:
+        entry = (raw or '').strip()
+        if not entry:
+            continue
+        try:
+            if address in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            # Not a network — try a bare address for a clear error message.
+            try:
+                if address == ipaddress.ip_address(entry):
+                    return True
+            except ValueError:
+                log.warning('service key ip_whitelist: skipping unparseable entry %r', entry)
+    return False
+
+
+async def get_current_user_by_service_key(request: Request, service_key: str):
+    """Authenticate a group-bound service key and build the caller identity.
+
+    Flow (per spec): prefix lookup (revoked_at IS NULL) → full-key verify
+    against the salted hash → lazy expiry check (stamps revoked_at on the
+    first 401 past expires_at and fires ``service_key.expired``) → IP
+    whitelist → resolve the bound group → synthetic identity with the
+    group's permissions merged over the defaults.
+
+    The resolved key row is exposed on ``request.state.service_api_key``
+    so downstream hooks (token recorder, token-cap tracker) can attribute
+    the request to the key and its group without re-querying.
+    """
+    row = await ServiceApiKeys.get_active_by_key_prefix(service_key[:12])
+    if row is None or not await verify_password(service_key, row.key_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.INVALID_TOKEN,
+        )
+
+    now = int(datetime.now(UTC).timestamp())
+
+    # Lazy expiry: revoked_at is the single source of truth, so stamp it on
+    # first detection — subsequent attempts short-circuit at the prefix
+    # lookup above and can never resurrect the key.
+    if row.expires_at is not None and row.expires_at <= now:
+        revoked = await ServiceApiKeys.revoke_key_by_id(row.id)
+        try:
+            from open_webui.events import EVENTS, publish_event
+
+            await publish_event(
+                request,
+                EVENTS.SERVICE_KEY_EXPIRED,
+                subject_id=row.id,
+                subject_type='service_key',
+                data={
+                    'key_id': row.id,
+                    'group_id': row.group_id,
+                    'name': row.name,
+                    'prefix': row.key_prefix,
+                    'revoked_at': (revoked or row).revoked_at or now,
+                    'reason': 'expired',
+                    'revoked_by': None,
+                },
+            )
+        except Exception:
+            log.warning('service_key.expired event emission failed', exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='service_key_expired',
+        )
+
+    if not _service_key_ip_allowed(_service_key_client_ip(request), row.ip_whitelist):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='service_key_ip_not_allowed',
+        )
+
+    group = await Groups.get_group_by_id(row.group_id)
+    if group is None:
+        # The FK is ON DELETE RESTRICT, so this only happens if the group
+        # vanished through a non-API path — treat the key as unusable.
+        log.error('service key %s references missing group %s', row.id, row.group_id)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.INVALID_TOKEN,
+        )
+
+    # Expose the resolved key so the cap tracker / token recorder can
+    # attribute usage to the key's GROUP (caps are group-bound; there is
+    # no owning user by design).
+    request.state.service_api_key = row
+    request.state.service_api_key_id = row.id
+
+    # Fire-and-forget last_used_at refresh — must never block or fail the
+    # request; failures are logged inside the task.
+    async def _touch_last_used() -> None:
+        try:
+            await ServiceApiKeys.touch_last_used(row.id)
+        except Exception:
+            log.warning('service key last_used update failed for %s', row.id, exc_info=True)
+
+    asyncio.create_task(_touch_last_used())
+
+    return build_service_key_identity(row, group)
+
+
 async def get_current_user_by_api_key(request, api_key: str):
     # Each function call manages its own short-lived session internally
     api_key_row = await Users.get_api_key_by_key(api_key)
@@ -522,7 +687,14 @@ async def get_current_user_by_api_key(request, api_key: str):
     return user
 
 
-VERIFIED_USER_ROLES = {'user', 'admin'}
+# 'service' is the synthetic role carried by group-bound service API keys
+# (see get_current_user_by_service_key). Without it here, every
+# Depends(get_verified_user) endpoint — including the OpenAI-compatible
+# chat completions the keys exist to serve — would 401 the identity. It
+# grants nothing beyond traversal: get_admin_user still requires 'admin',
+# and the identity's actual authority comes from the bound group's
+# permissions.
+VERIFIED_USER_ROLES = {'user', 'admin', 'service'}
 
 
 def get_verified_user(user=Depends(get_current_user)):

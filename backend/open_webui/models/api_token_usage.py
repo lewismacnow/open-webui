@@ -46,6 +46,10 @@ class ApiTokenUsage(Base):
     id = Column(Text, primary_key=True, unique=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(Text, nullable=False, index=True)
     api_key_id = Column(Text, nullable=True, index=True)
+    # Service-key attribution: set when the call was authenticated by a
+    # group-bound service key (the synthetic identity id is
+    # "service_key:<row id>"; the recorder stores the raw row id here).
+    service_key_id = Column(Text, nullable=True, index=True)
     model_id = Column(Text, nullable=False, index=True)
     endpoint = Column(Text, nullable=False)  # 'chat' | 'embedding' | 'response'
 
@@ -61,6 +65,7 @@ class ApiTokenUsage(Base):
     __table_args__ = (
         Index('ix_api_token_usage_user_created', 'user_id', 'created_at'),
         Index('ix_api_token_usage_apikey_created', 'api_key_id', 'created_at'),
+        Index('ix_api_token_usage_servicekey_created', 'service_key_id', 'created_at'),
         Index('ix_api_token_usage_model_created', 'model_id', 'created_at'),
     )
 
@@ -78,9 +83,14 @@ class ApiTokenUsageTable:
         duration_ms: int,
         status_code: int,
         trace_id: Optional[str] = None,
+        service_key_id: Optional[str] = None,
         db: Optional[Any] = None,
     ) -> str:
-        """Persist one usage row. Returns the new row id."""
+        """Persist one usage row. Returns the new row id.
+
+        ``service_key_id`` is set when the call was authenticated by a
+        group-bound service key (attribution mirrors api_key_id).
+        """
         row_id = str(uuid.uuid4())
         total = max(0, int(prompt_tokens or 0)) + max(0, int(completion_tokens or 0))
         async with get_async_db_context(db) as session:
@@ -89,6 +99,7 @@ class ApiTokenUsageTable:
                     id=row_id,
                     user_id=user_id,
                     api_key_id=api_key_id,
+                    service_key_id=service_key_id,
                     model_id=model_id,
                     endpoint=endpoint,
                     prompt_tokens=max(0, int(prompt_tokens or 0)),
@@ -239,6 +250,82 @@ class ApiTokenUsageTable:
             return [
                 {
                     'api_key_id': row.api_key_id,
+                    'prompt_tokens': int(row.prompt),
+                    'completion_tokens': int(row.completion),
+                    'total_tokens': int(row.total),
+                    'request_count': int(row.request_count),
+                }
+                for row in result.all()
+            ]
+
+    async def get_by_service_key(
+        self,
+        service_key_id: str,
+        start_date: Optional[int] = None,
+        end_date: Optional[int] = None,
+        db: Optional[Any] = None,
+    ) -> dict[str, dict]:
+        """Aggregate token usage for one group-bound service API key,
+        grouped by model. Mirrors ``get_by_api_key`` but scopes to the
+        service-key attribution column.
+
+        Returns ``{model_id: {prompt_tokens, completion_tokens, total_tokens, request_count}}``.
+        """
+        async with get_async_db_context(db) as session:
+            stmt = select(
+                ApiTokenUsage.model_id,
+                func.coalesce(func.sum(ApiTokenUsage.prompt_tokens), 0).label('prompt'),
+                func.coalesce(func.sum(ApiTokenUsage.completion_tokens), 0).label('completion'),
+                func.coalesce(func.sum(ApiTokenUsage.total_tokens), 0).label('total'),
+                func.count(ApiTokenUsage.id).label('request_count'),
+            ).filter(ApiTokenUsage.service_key_id == service_key_id)
+            if start_date:
+                stmt = stmt.filter(ApiTokenUsage.created_at >= start_date)
+            if end_date:
+                stmt = stmt.filter(ApiTokenUsage.created_at <= end_date)
+            stmt = stmt.group_by(ApiTokenUsage.model_id)
+            result = await session.execute(stmt)
+            return {
+                row.model_id: {
+                    'prompt_tokens': int(row.prompt),
+                    'completion_tokens': int(row.completion),
+                    'total_tokens': int(row.total),
+                    'request_count': int(row.request_count),
+                }
+                for row in result.all()
+            }
+
+    async def get_top_service_keys(
+        self,
+        limit: int = 50,
+        start_date: Optional[int] = None,
+        end_date: Optional[int] = None,
+        db: Optional[Any] = None,
+    ) -> list[dict]:
+        """Top service API keys by total token usage — mirrors
+        ``get_top_api_keys`` but on the service-key attribution column.
+        """
+        async with get_async_db_context(db) as session:
+            stmt = select(
+                ApiTokenUsage.service_key_id,
+                func.coalesce(func.sum(ApiTokenUsage.prompt_tokens), 0).label('prompt'),
+                func.coalesce(func.sum(ApiTokenUsage.completion_tokens), 0).label('completion'),
+                func.coalesce(func.sum(ApiTokenUsage.total_tokens), 0).label('total'),
+                func.count(ApiTokenUsage.id).label('request_count'),
+            ).filter(ApiTokenUsage.service_key_id.isnot(None))
+            if start_date:
+                stmt = stmt.filter(ApiTokenUsage.created_at >= start_date)
+            if end_date:
+                stmt = stmt.filter(ApiTokenUsage.created_at <= end_date)
+            stmt = (
+                stmt.group_by(ApiTokenUsage.service_key_id)
+                .order_by(func.sum(ApiTokenUsage.total_tokens).desc())
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            return [
+                {
+                    'service_key_id': row.service_key_id,
                     'prompt_tokens': int(row.prompt),
                     'completion_tokens': int(row.completion),
                     'total_tokens': int(row.total),

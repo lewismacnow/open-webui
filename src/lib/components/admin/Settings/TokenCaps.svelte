@@ -1,4 +1,24 @@
 <script lang="ts">
+	/**
+	 * TokenCaps
+	 * ---------
+	 * Per-target token usage caps. Targets can be a user, group, model,
+	 * or an API key; window sizes are in millions of tokens (1 = 1M).
+	 *
+	 * Behavior contract after this refactor:
+	 *   • Edits live in the local `caps` array until the admin hits Save
+	 *     (no autosave / debounce — that path was removed because typed
+	 *     numbers fired many change events and the saved-vs-input drift
+	 *     was confusing).
+	 *   • The Save button is disabled until `dirty` becomes true.
+	 *   • The target_id field uses `SearchCombobox` so admins can search
+	 *     by name rather than pasting opaque ids; api_key stays a plain
+	 *     input because there's no admin-list endpoint for those.
+	 *   • Removing a populated row asks for confirmation (data loss);
+	 *     removing an empty row is silent.
+	 *   • Rows with empty `target_id` get a dashed border + lower
+	 *     opacity so it's obvious they aren't valid yet.
+	 */
 	import { onMount, getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { models } from '$lib/stores';
@@ -11,58 +31,95 @@
 		type ApiKeyTokenUsageResponse,
 		type EndpointTokenUsageResponse
 	} from '$lib/apis/configs';
-	import { getUsers } from '$lib/apis/users';
-	import { getGroups } from '$lib/apis/groups';
+	import { searchUsers } from '$lib/apis/users';
+	import { searchGroups } from '$lib/apis/groups';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
+	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import SearchCombobox from '$lib/components/common/SearchCombobox.svelte';
 	import AdminSettingSection from './AdminSettingSection.svelte';
 
 	const i18n: any = getContext('i18n');
 
 	const TARGET_TYPES: TokenCap['target_type'][] = ['user', 'group', 'model', 'api_key'];
 
-	// The persisted cap list. Values are in millions of tokens
-	// (1 = 1M tokens); 0 means unlimited.
+	// Working copy. Persisted as `saved` snapshot for dirty detection.
 	let caps: TokenCap[] = [];
+	let saved: TokenCap[] = [];
 	let loaded = false;
 	let saving = false;
-
-	// Debounced autosave (same pattern as the chain editor).
-	let saveTimer: ReturnType<typeof setTimeout> | null = null;
-
-	// Autocomplete options for target_id, keyed by target type.
-	// api_key is paste-id for now (no admin list endpoint wired client-side).
-	let userOptions: { id: string; label: string }[] = [];
-	let groupOptions: { id: string; label: string }[] = [];
+	let savingNoChange: boolean = false;
 
 	// Analytics (API-path token usage, not part of the chat dashboard).
 	let apiKeyUsage: ApiKeyTokenUsageResponse | null = null;
 	let endpointUsage: EndpointTokenUsageResponse | null = null;
 
-	$: modelOptions = ($models ?? []).map((m: any) => ({ id: m.id, label: m.name ?? m.id }));
+	// Confirm-on-delete state. The pending row index is captured at click
+	// time so the modal can title/reference it correctly.
+	let pendingRemoveIdx: number | null = null;
+	let showRemoveConfirm: boolean = false;
 
-	// Backend sorts by total tokens, but sort client-side too so the
-	// ordering survives any future response-shape drift.
-	$: sortedApiKeyUsage = apiKeyUsage
-		? [...apiKeyUsage.keys].sort((a, b) => (b.total_tokens ?? 0) - (a.total_tokens ?? 0))
-		: [];
-	$: sortedEndpointUsage = endpointUsage
-		? [...endpointUsage.endpoints].sort((a, b) => (b.total_tokens ?? 0) - (a.total_tokens ?? 0))
-		: [];
+	// --- SearchCombobox endpoints ---
 
-	function scheduleSave() {
-		if (!loaded) return;
-		if (saveTimer) clearTimeout(saveTimer);
-		saveTimer = setTimeout(() => {
-			saveTimer = null;
-			save();
-		}, 800);
+	// Users + groups use real search endpoints; models come from the
+	// already-loaded $models store (no network). All three return
+	// SearchCombobox's `{id, label}[]` shape.
+	async function userSearch(q: string): Promise<{ id: string; label: string }[]> {
+		try {
+			const res: any = await searchUsers(localStorage.token, q);
+			const arr: any[] = res?.users ?? [];
+			return arr.map((u: any) => ({
+				id: u.id,
+				label: u.name ? `${u.name}${u.email ? ` (${u.email})` : ''}` : (u.email ?? u.id)
+			}));
+		} catch (e) {
+			return [];
+		}
 	}
 
-	// Drop half-configured rows before persisting: entries without a
-	// target_id are kept client-side only (mirrors the chain editor's
-	// convention). All-zero windows are valid (explicit unlimited).
+	async function groupSearch(q: string): Promise<{ id: string; label: string }[]> {
+		try {
+			const res: any = await searchGroups(localStorage.token, q);
+			const arr: any[] = Array.isArray(res) ? res : (res?.items ?? res?.groups ?? []);
+			return arr.map((g: any) => ({ id: g.id, label: g.name ?? g.id }));
+		} catch (e) {
+			return [];
+		}
+	}
+
+	// $models is a store; reactive access happens at template-time. We
+	// build the function lazily from the current snapshot so typing into
+	// the combobox re-reads the current store value without us needing to
+	// tear down the closure.
+	function modelSearchEndpoint(): (q: string) => Promise<{ id: string; label: string }[]> {
+		return async (q: string) => {
+			const all = ($models ?? []).map((m: any) => ({
+				id: m.id,
+				label: m.name ?? m.id
+			}));
+			const needle = q.toLowerCase().trim();
+			if (!needle) return all.slice(0, 50);
+			return all
+				.filter(
+					(m) => m.id.toLowerCase().includes(needle) || m.label.toLowerCase().includes(needle)
+				)
+				.slice(0, 50);
+		};
+	}
+
+	// --- Dirty detection ---
+
+	// JSON round-trip avoids the trap of "two arrays with same values but
+	// different reference equality === dirty" semantics. Deep-equal is
+	// what the admin expects.
+	$: dirty =
+		loaded && (JSON.stringify(caps) !== JSON.stringify(saved) || caps.length !== saved.length);
+
+	// --- Sanitization + save ---
+
 	function sanitizedCaps(): TokenCap[] {
+		// Drop half-configured rows (empty target_id). Same contract as
+		// the autosave version — backend only sees committed rows.
 		return caps
 			.filter((c) => c.target_id)
 			.map((c) => ({
@@ -76,21 +133,22 @@
 	}
 
 	async function save() {
-		if (saveTimer) {
-			clearTimeout(saveTimer);
-			saveTimer = null;
-		}
+		if (!dirty || saving) return;
 		saving = true;
 		try {
 			const res = await setTokenCaps(localStorage.token, { caps: sanitizedCaps() });
 			caps = res.caps;
+			saved = JSON.parse(JSON.stringify(res.caps));
 			toast.success($i18n.t('Token caps saved'));
 		} catch (e) {
+			console.error('Failed to save token caps:', e);
 			toast.error($i18n.t('Failed to save token caps'));
 		} finally {
 			saving = false;
 		}
 	}
+
+	// --- Row operations ---
 
 	function addCap() {
 		caps = [
@@ -106,24 +164,46 @@
 		];
 	}
 
-	function removeCap(idx: number) {
-		caps = caps.filter((_, i) => i !== idx);
-		scheduleSave();
+	// Populated rows go through a confirm modal; empty rows die silently
+	// (they're never persisted in the first place — the sanitizer drops
+	// them).
+	function requestRemove(idx: number) {
+		const cap = caps[idx];
+		if (!cap) return;
+		if (!cap.target_id) {
+			caps = caps.filter((_, i) => i !== idx);
+			return;
+		}
+		pendingRemoveIdx = idx;
 	}
 
-	// Switching target type changes the id namespace — clear the id so a
-	// stale user id can't silently masquerade as a group/model/api key id.
+	function confirmRemove() {
+		if (pendingRemoveIdx === null) return;
+		caps = caps.filter((_, i) => i !== pendingRemoveIdx);
+		pendingRemoveIdx = null;
+	}
+
+	function cancelRemove() {
+		pendingRemoveIdx = null;
+	}
+
+	// Switching target type changes the id namespace — clear the id so
+	// a stale user id can't masquerade as a group/model/api_key id.
 	function setTargetType(idx: number, targetType: TokenCap['target_type']) {
 		caps = caps.map((c, i) => (i === idx ? { ...c, target_type: targetType, target_id: '' } : c));
-		scheduleSave();
+	}
+
+	function setTargetId(idx: number, newId: string) {
+		caps = caps.map((c, i) => (i === idx ? { ...c, target_id: newId } : c));
 	}
 
 	function setWindow(idx: number, field: keyof TokenCap, raw: number | null) {
 		if (!caps[idx]) return;
 		const parsed = raw === null || Number.isNaN(raw) ? 0 : Math.max(0, raw);
 		caps = caps.map((c, i) => (i === idx ? { ...c, [field]: parsed } : c));
-		scheduleSave();
 	}
+
+	// --- Analytics ---
 
 	async function loadAnalytics() {
 		try {
@@ -140,52 +220,30 @@
 
 	const fmt = (n: number | null | undefined) => (n ?? 0).toLocaleString();
 
+	// Backend sorts by total tokens, but sort client-side too so the
+	// ordering survives any future response-shape drift.
+	$: sortedApiKeyUsage = apiKeyUsage
+		? [...apiKeyUsage.keys].sort((a, b) => (b.total_tokens ?? 0) - (a.total_tokens ?? 0))
+		: [];
+	$: sortedEndpointUsage = endpointUsage
+		? [...endpointUsage.endpoints].sort((a, b) => (b.total_tokens ?? 0) - (a.total_tokens ?? 0))
+		: [];
+
 	onMount(async () => {
 		try {
 			const res = await getTokenCaps(localStorage.token);
 			caps = res.caps;
+			saved = JSON.parse(JSON.stringify(res.caps));
 		} catch (e) {
 			console.error('Failed to load token caps:', e);
 			toast.error($i18n.t('Failed to load token caps'));
 		}
-
-		// Autocomplete sources. Best-effort — failures just leave the
-		// datalist empty (ids can still be pasted).
-		try {
-			const res = await getUsers(localStorage.token);
-			const users = res?.data ?? res ?? [];
-			userOptions = users.map((u: any) => ({
-				id: u.id,
-				label: u.name ? `${u.name} (${u.email ?? u.id})` : (u.email ?? u.id)
-			}));
-		} catch (e) {
-			console.error('Failed to load users for autocomplete:', e);
-		}
-
-		try {
-			const groups = await getGroups(localStorage.token);
-			groupOptions = (groups ?? []).map((g: any) => ({ id: g.id, label: g.name ?? g.id }));
-		} catch (e) {
-			console.error('Failed to load groups for autocomplete:', e);
-		}
-
 		await loadAnalytics();
 		loaded = true;
 	});
 </script>
 
-<!-- Shared autocomplete lists (native datalist keeps this Svelte-4 light) -->
-<datalist id="token-caps-user-options">
-	{#each userOptions as o (o.id)}<option value={o.id}>{o.label}</option>{/each}
-</datalist>
-<datalist id="token-caps-group-options">
-	{#each groupOptions as o (o.id)}<option value={o.id}>{o.label}</option>{/each}
-</datalist>
-<datalist id="token-caps-model-options">
-	{#each modelOptions as o (o.id)}<option value={o.id}>{o.label}</option>{/each}
-</datalist>
-
-<form class="flex h-full flex-col justify-between text-sm" on:submit|preventDefault={() => {}}>
+<form class="flex h-full flex-col justify-between text-sm" on:submit|preventDefault={save}>
 	<h2 class="text-sm font-medium text-gray-900 dark:text-white mb-4">
 		{$i18n.t('Token Caps')}
 	</h2>
@@ -212,8 +270,11 @@
 				{:else}
 					<div class="flex flex-col gap-1.5 my-2">
 						{#each caps as cap, idx (idx)}
+							{@const isEmpty = !cap.target_id}
 							<div
-								class="rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-850/50 px-3 py-2"
+								class="rounded-lg border px-3 py-2 transition-colors {isEmpty
+									? 'border-dashed border-gray-300 dark:border-gray-700 bg-gray-50/30 dark:bg-gray-900/30 opacity-60'
+									: 'border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-850/50'}"
 							>
 								<div class="flex items-center gap-2 flex-wrap">
 									<!-- Target type -->
@@ -232,17 +293,40 @@
 										{/each}
 									</select>
 
-									<!-- Target id (autocomplete via datalist; api_key = paste id) -->
-									<input
-										class="flex-1 min-w-40 text-xs bg-transparent outline-none border-b border-gray-200 dark:border-gray-700 focus:border-gray-400 dark:focus:border-gray-500 py-0.5"
-										list={'token-caps-' + cap.target_type + '-options'}
-										placeholder={cap.target_type === 'api_key'
-											? 'Paste API key id'
-											: 'Select or paste a ' + cap.target_type + ' id'}
-										bind:value={cap.target_id}
-										on:change={scheduleSave}
-										aria-label={$i18n.t('Target id')}
-									/>
+									<!-- Target id: SearchCombobox for user/group/model; plain input for api_key. -->
+									<div class="flex-1 min-w-40">
+										{#if cap.target_type === 'api_key'}
+											<input
+												class="w-full text-xs bg-transparent outline-none border-b border-gray-200 dark:border-gray-700 focus:border-gray-400 dark:focus:border-gray-500 py-0.5"
+												placeholder={$i18n.t('Paste API key id')}
+												value={cap.target_id}
+												on:change={(e) =>
+													setTargetId(idx, (e.currentTarget as HTMLInputElement).value)}
+												aria-label={$i18n.t('Target id')}
+											/>
+										{:else if cap.target_type === 'model'}
+											<SearchCombobox
+												value={cap.target_id}
+												placeholder={$i18n.t('Search models')}
+												endpoint={modelSearchEndpoint()}
+												onChange={(id) => setTargetId(idx, id)}
+											/>
+										{:else if cap.target_type === 'user'}
+											<SearchCombobox
+												value={cap.target_id}
+												placeholder={$i18n.t('Search users')}
+												endpoint={userSearch}
+												onChange={(id) => setTargetId(idx, id)}
+											/>
+										{:else}
+											<SearchCombobox
+												value={cap.target_id}
+												placeholder={$i18n.t('Search groups')}
+												endpoint={groupSearch}
+												onChange={(id) => setTargetId(idx, id)}
+											/>
+										{/if}
+									</div>
 
 									<!-- Window caps in millions of tokens -->
 									<div class="flex items-center gap-1 shrink-0">
@@ -316,9 +400,9 @@
 									<button
 										type="button"
 										class="p-1 shrink-0 text-gray-400 hover:text-red-500"
-										on:click={() => removeCap(idx)}
-										aria-label={$i18n.t('Remove cap')}
-										title={$i18n.t('Remove cap')}
+										on:click={() => requestRemove(idx)}
+										aria-label={isEmpty ? $i18n.t('Remove empty row') : $i18n.t('Remove cap')}
+										title={isEmpty ? $i18n.t('Remove empty row') : $i18n.t('Remove cap')}
 									>
 										<svg viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
 											<path
@@ -328,9 +412,15 @@
 									</button>
 								</div>
 								<div class="mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600 pl-26">
-									{$i18n.t(
-										'Hourly (M) / Daily (M) / Weekly (M) / Monthly (M) — 1 = 1M tokens, 0 = unlimited'
-									)}
+									{#if isEmpty}
+										<span class="text-amber-600 dark:text-amber-400">
+											{$i18n.t('Pick a target to enable this row.')}
+										</span>
+									{:else}
+										{$i18n.t(
+											'Hourly (M) / Daily (M) / Weekly (M) / Monthly (M) — 1 = 1M tokens, 0 = unlimited'
+										)}
+									{/if}
 								</div>
 							</div>
 						{/each}
@@ -346,6 +436,7 @@
 				</button>
 			</AdminSettingSection>
 
+			<!-- ===== Usage analytics (unchanged from autosave version) ===== -->
 			<AdminSettingSection title={$i18n.t('Usage')}>
 				<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
 					{$i18n.t(
@@ -488,9 +579,26 @@
 			type="button"
 			class="px-3.5 py-1.5 text-sm font-medium bg-black dark:bg-white text-white dark:text-black rounded-lg transition disabled:opacity-50"
 			on:click={save}
-			disabled={!loaded || saving}
+			disabled={!loaded || saving || !dirty}
 		>
-			{$i18n.t('Save')}
+			{saving ? $i18n.t('Saving...') : $i18n.t('Save')}
 		</button>
 	</div>
 </form>
+
+<ConfirmDialog
+	bind:show={showRemoveConfirm}
+	title={$i18n.t('Remove this cap?')}
+	message={pendingRemoveIdx !== null && caps[pendingRemoveIdx]
+		? $i18n.t(
+				'This will remove the cap for "{type}/{id}". The change takes effect immediately on save.',
+				{
+					type: caps[pendingRemoveIdx].target_type,
+					id: caps[pendingRemoveIdx].target_id
+				}
+			)
+		: ''}
+	confirmLabel={$i18n.t('Remove')}
+	onConfirm={confirmRemove}
+	on:cancel={cancelRemove}
+/>

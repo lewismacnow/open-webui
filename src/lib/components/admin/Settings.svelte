@@ -25,6 +25,8 @@
 	import Integrations from './Settings/Integrations.svelte';
 	import Subagents from './Settings/Subagents.svelte';
 	import ApiTools from './Settings/ApiTools.svelte';
+	import FailoverQueue from './Settings/FailoverQueue.svelte';
+	import ServiceKeys from './Settings/ServiceKeys.svelte';
 
 	import Search from '../icons/Search.svelte';
 	import AdminTabIcon from './Settings/AdminTabIcon.svelte';
@@ -48,12 +50,14 @@
 			'integrations',
 			'documents',
 			'api-tools',
+			'service-keys',
 			'web',
 			'code-execution',
 			'interface',
 			'audio',
 			'images',
 			'pipelines',
+			'failover-queue',
 			'db'
 		].includes(tabFromPath)
 			? tabFromPath
@@ -156,6 +160,24 @@
 			keywords: ['sub-agents', 'subagents', 'delegation', 'background', 'agents']
 		},
 		{
+			id: 'failover-queue',
+			title: 'Failover Capacity Queue',
+			route: '/admin/settings/failover-queue',
+			keywords: [
+				'failover',
+				'queue',
+				'capacity',
+				'wrapper',
+				'provider',
+				'chain',
+				'load',
+				'429',
+				'throttle',
+				'max concurrent',
+				'backpressure'
+			]
+		},
+		{
 			id: 'evaluations',
 			title: 'Evaluations',
 			route: '/admin/settings/evaluations',
@@ -236,6 +258,24 @@
 				'calendar',
 				'subagents',
 				'skills'
+			]
+		},
+		{
+			id: 'service-keys',
+			title: 'Service API Keys',
+			route: '/admin/settings/service-keys',
+			keywords: [
+				'service',
+				'api',
+				'keys',
+				'service key',
+				'service-key',
+				'mint',
+				'long-lived',
+				'group',
+				'ip whitelist',
+				'cidr',
+				'revoke'
 			]
 		},
 		{
@@ -420,6 +460,7 @@
 			<!-- {$i18n.t('Images')} -->
 			<!-- {$i18n.t('Pipelines')} -->
 			<!-- {$i18n.t('Database')} -->
+			<!-- {$i18n.t('Service API Keys')} -->
 			{#each filteredSettings as tab (tab.id)}
 				<a
 					id={tab.id}
@@ -475,6 +516,8 @@
 					/>
 				{:else if selectedTab === 'api-tools'}
 					<ApiTools />
+				{:else if selectedTab === 'service-keys'}
+					<ServiceKeys />
 				{:else if selectedTab === 'web'}
 					<WebSearch
 						saveHandler={async () => {
@@ -523,6 +566,8 @@
 							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
+				{:else if selectedTab === 'failover-queue'}
+					<FailoverQueue />
 				{/if}
 			</div>
 		</div>

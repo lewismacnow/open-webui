@@ -51,6 +51,8 @@
 	import WrapperModelProviders from '$lib/components/admin/Settings/WrapperModelProviders.svelte';
 	import ToolsConfig from '$lib/components/admin/Settings/ToolsConfig.svelte';
 	import TokenCaps from '$lib/components/admin/Settings/TokenCaps.svelte';
+	import FailoverQueue from '$lib/components/admin/Settings/FailoverQueue.svelte';
+	import ServiceKeys from '$lib/components/admin/Settings/ServiceKeys.svelte';
 	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
 	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
 	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
@@ -159,12 +161,14 @@
 		'admin:connections': 'AI',
 		'admin:models': 'AI',
 		'admin:wrapper-model-providers': 'AI',
+		'admin:failover-queue': 'AI',
 		'admin:subagents': 'AI',
 		'admin:evaluations': 'Quality',
 		'admin:analytics': 'Quality',
 		'admin:integrations': 'Tools',
 		'admin:documents': 'Tools',
 		'admin:api-tools': 'Tools',
+		'admin:service-keys': 'Tools',
 		'admin:tools-config': 'Tools',
 		'admin:token-caps': 'Tools',
 		'admin:web': 'Tools',
@@ -739,6 +743,23 @@
 			keywords: ['failover', 'provider', 'chain', 'global', 'concurrency']
 		},
 		{
+			id: 'admin:failover-queue',
+			title: 'Failover Capacity Queue',
+			keywords: [
+				'failover',
+				'queue',
+				'capacity',
+				'wrapper',
+				'provider',
+				'chain',
+				'load',
+				'429',
+				'throttle',
+				'max concurrent',
+				'backpressure'
+			]
+		},
+		{
 			id: 'admin:subagents',
 			title: 'Sub-agents',
 			keywords: ['sub-agents', 'subagents', 'delegation', 'background', 'agents']
@@ -791,6 +812,23 @@
 				'function calling',
 				'allowlist',
 				'policy'
+			]
+		},
+		{
+			id: 'admin:service-keys',
+			title: 'Service API Keys',
+			keywords: [
+				'service',
+				'api',
+				'keys',
+				'service key',
+				'service-key',
+				'mint',
+				'long-lived',
+				'group',
+				'ip whitelist',
+				'cidr',
+				'revoke'
 			]
 		},
 		{
@@ -1337,8 +1375,12 @@
 				<AdminDocuments on:save={adminConfigSaveHandler} />
 			{:else if selectedTab === 'admin:api-tools'}
 				<AdminApiTools />
+			{:else if selectedTab === 'admin:service-keys'}
+				<ServiceKeys />
 			{:else if selectedTab === 'admin:wrapper-model-providers'}
 				<WrapperModelProviders />
+			{:else if selectedTab === 'admin:failover-queue'}
+				<FailoverQueue />
 			{:else if selectedTab === 'admin:tools-config'}
 				<ToolsConfig />
 			{:else if selectedTab === 'admin:token-caps'}

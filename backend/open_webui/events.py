@@ -659,6 +659,21 @@ class EventDefinitions(BaseModel):
     NOTIFICATION_MANUAL: EventDefinition = EventDefinition(
         name='notification.manual', description='A manual notification was sent.', message='Notification sent'
     )
+    SERVICE_KEY_MINTED: EventDefinition = EventDefinition(
+        name='service_key.minted',
+        description='A group-bound service API key was minted.',
+        message='Service key minted',
+    )
+    SERVICE_KEY_REVOKED: EventDefinition = EventDefinition(
+        name='service_key.revoked',
+        description='A group-bound service API key was revoked.',
+        message='Service key revoked',
+    )
+    SERVICE_KEY_EXPIRED: EventDefinition = EventDefinition(
+        name='service_key.expired',
+        description='A group-bound service API key expired and was auto-revoked at auth time.',
+        message='Service key expired',
+    )
 
 
 EVENTS = EventDefinitions()

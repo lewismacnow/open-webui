@@ -965,6 +965,89 @@ export const setToolsConfig = async (token: string, config: ToolsConfig): Promis
 	};
 };
 
+// --- Failover Capacity Queue ---
+
+export type FailoverQueueConfig = {
+	max_queue_length: number;
+	poll_interval_seconds: number;
+	full_message: string;
+};
+
+/**
+ * Fetch the global failover capacity queue config.
+ *
+ * Admin-only on the backend; returns the documented defaults when no
+ * persisted config exists yet.
+ */
+export const getFailoverQueueConfig = async (token: string): Promise<FailoverQueueConfig> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/failover-queue`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return {
+		max_queue_length: res?.max_queue_length ?? 10,
+		poll_interval_seconds: res?.poll_interval_seconds ?? 2.0,
+		full_message:
+			res?.full_message ?? 'LLM Load is at maximum capacity right now, retry in 30 seconds'
+	};
+};
+
+export const setFailoverQueueConfig = async (
+	token: string,
+	config: FailoverQueueConfig
+): Promise<FailoverQueueConfig> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/failover-queue`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			max_queue_length: Number(config.max_queue_length) || 0,
+			poll_interval_seconds: Number(config.poll_interval_seconds) || 0,
+			full_message: config.full_message ?? ''
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return {
+		max_queue_length: res?.max_queue_length ?? config.max_queue_length,
+		poll_interval_seconds: res?.poll_interval_seconds ?? config.poll_interval_seconds,
+		full_message: res?.full_message ?? config.full_message
+	};
+};
+
 // --- Token Caps ---
 
 export type TokenCap = {
