@@ -53,8 +53,6 @@ export const getServiceKeys = async (
 	include_revoked?: boolean,
 	signal?: AbortSignal
 ): Promise<{ items: ServiceKey[] }> => {
-	let error = null;
-
 	const searchParams = new URLSearchParams();
 	if (query) searchParams.set('query', query);
 	if (group_id) searchParams.set('group_id', group_id);
@@ -62,27 +60,14 @@ export const getServiceKeys = async (
 		searchParams.set('include_revoked', String(include_revoked));
 	}
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/service-keys/?${searchParams.toString()}`, {
+	return await fetch(`${WEBUI_API_BASE_URL}/service-keys/?${searchParams.toString()}`, {
 		method: 'GET',
 		signal,
 		headers: authHeaders(token)
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			if (signal?.aborted) return null;
-			console.error('getServiceKeys:', err);
-			error = err.detail ?? err;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return { items: res?.items ?? [] };
+	}).then(async (res) => {
+		if (!res.ok) throw await res.json();
+		return (await res.json()) as { items: ServiceKey[] };
+	});
 };
 
 export const getServiceKey = async (token: string, id: string): Promise<ServiceKey | null> => {

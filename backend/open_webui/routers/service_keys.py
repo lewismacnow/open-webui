@@ -14,6 +14,7 @@ which is how an admin un-expires a key.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -59,6 +60,14 @@ class ServiceKeyUpdateForm(BaseModel):
     ip_whitelist: Optional[list[str]] = None
 
 
+class ServiceKeyListResponse(BaseModel):
+    """Stable wrapped response shape for the list endpoint. Room for
+    ``total``/``next_cursor`` later without breaking the frontend
+    (which already wraps the array as ``{items: [...]}``)."""
+
+    items: list[ServiceApiKeyResponse]
+
+
 def _payload_for_event(model: ServiceApiKeyModel) -> dict:
     """Webhook payload — key_id/group_id/name/prefix plus lifecycle fields.
     NEVER includes key material."""
@@ -72,18 +81,16 @@ def _payload_for_event(model: ServiceApiKeyModel) -> dict:
     }
 
 
-@router.get('', response_model=list[ServiceApiKeyResponse])
-@router.get('/', response_model=list[ServiceApiKeyResponse], include_in_schema=False)
+@router.get('', response_model=ServiceKeyListResponse)
+@router.get('/', response_model=ServiceKeyListResponse, include_in_schema=False)
 async def list_service_keys(
     query: Optional[str] = Query(None, description='Filter by name / key prefix substring'),
     group_id: Optional[str] = Query(None, description='Restrict to one group'),
     include_revoked: bool = Query(False, description='Include revoked/expired keys'),
     user=Depends(get_admin_user),
 ):
-    return [
-        _to_response(model)
-        for model in await ServiceApiKeys.get_keys(query=query, group_id=group_id, include_revoked=include_revoked)
-    ]
+    rows = await ServiceApiKeys.get_keys(query=query, group_id=group_id, include_revoked=include_revoked)
+    return ServiceKeyListResponse(items=[_to_response(model) for model in rows])
 
 
 @router.post('', response_model=ServiceApiKeyMintResponse)
@@ -189,7 +196,8 @@ async def update_service_key_by_id(
     # The documented un-expire: a (re)supplied future expiry reactivates
     # a lazily-expired key. A manual revoke stays final until undone this way.
     if 'expires_at' in fields:
-        future = fields['expires_at'] is None or fields['expires_at'] > existing.created_at
+        now = int(time.time())
+        future = fields['expires_at'] is None or fields['expires_at'] > now
         if future and existing.revoked_at is not None:
             # Only auto-clear when the key expired (revoked_at was set by
             # the lazy expiry path); manually revoked keys stay revoked
@@ -241,11 +249,12 @@ async def revoke_service_key_by_id(request: Request, id: str, user=Depends(get_a
     return await _revoke_service_key(request, id, user)
 
 
-@router.post('/{id}/revoke')
+@router.post('/{id}/revoke', response_model=dict)
 async def revoke_service_key_via_post(request: Request, id: str, user=Depends(get_admin_user)):
     """Soft-revoke via POST — the frontend lane's client contract
     (``$lib/apis/serviceKeys`` calls ``POST /service-keys/{id}/revoke``
-    and expects at least ``{success: boolean}``); returns the updated
-    row as a superset."""
-    updated = await _revoke_service_key(request, id, user)
-    return {'success': True, **updated.model_dump()}
+    and expects ``{success: boolean}``). The 200 response is just the
+    success marker; clients refetch via GET to pick up the updated row.
+    """
+    await _revoke_service_key(request, id, user)
+    return {'success': True}

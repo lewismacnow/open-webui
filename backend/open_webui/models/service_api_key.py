@@ -13,8 +13,8 @@ stored ``key_hash`` is produced by the same hasher as passwords
 (argon2id when configured, else bcrypt — see ``utils/auth.py``), which
 is SALTED. A salted hash cannot be looked up by equality, so the lookup
 path is: fetch the row by UNIQUE ``key_prefix``, then verify the full
-key against ``key_hash`` with ``verify_password``. The ``key_hash``
-index mandated by the schema remains as a uniqueness/debug aid.
+key against ``key_hash`` with ``verify_password``. No index on
+``key_hash`` — equality lookups are impossible on a salted hash.
 
 State model (per user spec): binary Active/Revoked computed from
 ``revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())``.
@@ -27,6 +27,7 @@ the PATCH handler when a new future expiry is set).
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import time
 import uuid
@@ -76,7 +77,7 @@ class ServiceApiKey(Base):
     name = Column(Text, nullable=False)
     key_prefix = Column(Text, unique=True, nullable=False)
     key_hash = Column(Text, nullable=False)
-    created_by = Column(Text, ForeignKey('user.id'), nullable=False)
+    created_by = Column(Text, ForeignKey('user.id', ondelete='RESTRICT'), nullable=False)
     expires_at = Column(BigInteger, nullable=True)  # epoch; NULL = infinite
     ip_whitelist = Column(JSON, nullable=True)  # ["1.2.3.0/24", ...]; NULL = any
     last_used_at = Column(BigInteger, nullable=True)
@@ -86,7 +87,6 @@ class ServiceApiKey(Base):
 
     __table_args__ = (
         Index('ix_service_api_key_group_id', 'group_id'),
-        Index('ix_service_api_key_key_hash', 'key_hash'),
         Index('ix_service_api_key_key_prefix', 'key_prefix'),
         Index('ix_service_api_key_revoked_at', 'revoked_at'),
     )
@@ -282,8 +282,17 @@ class ServiceApiKeyTable:
             if not include_revoked:
                 stmt = stmt.filter(ServiceApiKey.revoked_at.is_(None))
             if query:
-                like = f'%{query}%'
-                stmt = stmt.filter(or_(ServiceApiKey.name.ilike(like), ServiceApiKey.key_prefix.ilike(like)))
+                # Escape SQL wildcard metacharacters (`%`, `_`, `\`) before
+                # interpolation so a user search for "_" doesn't match
+                # everything, or "foo\bar" doesn't interpret the backslash.
+                escaped = re.sub(r'[\\%_]', lambda m: '\\' + m.group(0), query)
+                like = f'%{escaped}%'
+                stmt = stmt.filter(
+                    or_(
+                        ServiceApiKey.name.ilike(like, escape='\\'),
+                        ServiceApiKey.key_prefix.ilike(like, escape='\\'),
+                    )
+                )
             if group_id:
                 stmt = stmt.filter(ServiceApiKey.group_id == group_id)
             stmt = stmt.order_by(ServiceApiKey.created_at.desc())

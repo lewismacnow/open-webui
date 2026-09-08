@@ -22,7 +22,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 _SERVICE_KEY_INDEXES = (
     'ix_service_api_key_group_id',
-    'ix_service_api_key_key_hash',
     'ix_service_api_key_key_prefix',
     'ix_service_api_key_revoked_at',
 )
@@ -49,7 +48,7 @@ def upgrade() -> None:
             sa.Column('created_at', sa.BigInteger(), nullable=False),
             sa.Column('updated_at', sa.BigInteger(), nullable=False),
             sa.ForeignKeyConstraint(['group_id'], ['group.id'], ondelete='RESTRICT'),
-            sa.ForeignKeyConstraint(['created_by'], ['user.id']),
+            sa.ForeignKeyConstraint(['created_by'], ['user.id'], ondelete='RESTRICT'),
         )
 
     if 'service_api_key' in tables:
