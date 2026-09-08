@@ -117,6 +117,30 @@ class AppHTTPMiddleware:
                 return
             else:
                 await self.app(scope, receive, send_with_headers)
+        except RuntimeError as exc:
+            # Benign cleanup race during streaming-response teardown. Starlette's
+            # `create_collapsing_task_group` (used internally by StreamingResponse)
+            # runs in a sibling task to background tasks spawned by libraries like
+            # the MCP SDK. When the response is already on the wire and the SDK
+            # is still finishing its async generator, anyio's cancel-scope guard
+            # fires with one of two phrasings:
+            #   - "Attempted to exit a cancel scope that isn't the current
+            #      tasks's current cancel scope"
+            #   - "aclose(): asynchronous generator is already running"
+            # Both are benign — the request succeeded; this is post-response
+            # cleanup chatter. Mirror of the suppression already in
+            # `mcp/client.py:179-187` but applied at the ASGI layer so it
+            # catches races from any library, not just the MCP SDK.
+            msg = str(exc).lower()
+            if 'cancel scope' in msg or 'asynchronous generator' in msg:
+                log.debug('AppHTTPMiddleware: suppressed benign cleanup race: %s', exc)
+                # Commit any pending sync work — the request succeeded and
+                # the response was already shipped to the client.
+                self._commit_session()
+                return
+            # Unknown RuntimeError — treat as a real error.
+            self._rollback_session('AppHTTPMiddleware: rollback after unexpected RuntimeError')
+            raise
         except BaseException:
             self._rollback_session('AppHTTPMiddleware: rollback failed after downstream error')
             raise
