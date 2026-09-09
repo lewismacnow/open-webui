@@ -47,6 +47,9 @@
 	let keys: ServiceKeyType[] = [];
 	let keysLoading: boolean = false;
 	let loaded: boolean = false;
+	// Epoch ms of the last successful (or attempted) list fetch. Used
+	// for the "Updated X seconds ago" indicator + manual refresh.
+	let lastFetched: number | null = null;
 
 	// Saved snapshot for dirty detection. Keys are immutable from the
 	// admin's perspective here — but inline edits update, then we save
@@ -85,6 +88,20 @@
 			`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
 			`T${pad(d.getHours())}:${pad(d.getMinutes())}`
 		);
+	}
+
+	// Human-friendly "X ago" for the Last updated indicator. Caps at a
+	// long-form date for sessions older than an hour so the label never
+	// blows up the section header width.
+	function formatLastFetched(epochMs: number): string {
+		const delta = Math.max(0, Math.floor((Date.now() - epochMs) / 1000));
+		if (delta < 5) return 'just now';
+		if (delta < 60) return `${delta}s ago`;
+		const m = Math.floor(delta / 60);
+		if (m < 60) return `${m}m ago`;
+		const h = Math.floor(m / 60);
+		if (h < 24) return `${h}h ago`;
+		return new Date(epochMs).toLocaleString();
 	}
 
 	function localInputToUnix(s: string): number | null {
@@ -130,12 +147,12 @@
 
 	async function refreshKeys() {
 		keysLoading = true;
-		// 30s hard timeout — prevents the list from being stuck "loading"
-		// forever when the backend hangs (connection accepted, no body
-		// ever returned). The AbortError fires the catch block; the spinner
-		// hides via the `finally`.
+		// 10s hard timeout — short enough that a stuck request can't
+		// stall the UI; long enough to tolerate a slow first-byte
+		// response. The AbortError fires the catch block; the spinner
+		// hides via `finally`.
 		const controller = new AbortController();
-		const timeoutId = setTimeout(() => controller.abort(), 30_000);
+		const timeoutId = setTimeout(() => controller.abort(), 10_000);
 		try {
 			const res = await getServiceKeys(
 				localStorage.token,
@@ -153,12 +170,13 @@
 				if (bc !== ac) return bc - ac;
 				return (a?.name ?? '').localeCompare(b?.name ?? '');
 			});
+			lastFetched = Date.now();
 		} catch (e: any) {
 			console.error('Failed to load service keys:', e);
 			const detail =
 				e?.detail ??
 				e?.message ??
-				(e?.name === 'AbortError' ? 'Request timed out after 30s' : null);
+				(e?.name === 'AbortError' ? 'Request timed out after 10s' : null);
 			toast.error(detail ?? $i18n.t('Failed to load service keys'));
 			keys = [];
 		} finally {
@@ -535,11 +553,32 @@
 
 		<!-- ============ LIST SECTION ============ -->
 		<AdminSettingSection title={$i18n.t('service_keys.section_list')}>
-			<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-				{$i18n.t(
-					'Existing service keys. Revoked and expired keys are retained for audit visibility.'
-				)}
-			</p>
+			<div class="flex items-start justify-between gap-4 mb-4">
+				<p class="text-sm text-gray-500 dark:text-gray-400 flex-1">
+					{$i18n.t(
+						'Existing service keys. Revoked and expired keys are retained for audit visibility.'
+					)}
+				</p>
+				<div class="flex items-center gap-2 shrink-0">
+					{#if lastFetched}
+						<span class="text-[0.6875rem] text-gray-400 dark:text-gray-500">
+							{$i18n.t('service_keys.updated_at', {
+								at: formatLastFetched(lastFetched)
+							})}
+						</span>
+					{/if}
+					<button
+						type="button"
+						class="px-2.5 py-1 text-xs rounded bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+						on:click={refreshKeys}
+						disabled={keysLoading}
+						aria-label={$i18n.t('Refresh')}
+					>
+						<span class:animate-spin={keysLoading} aria-hidden="true">↻</span>
+						<span>{keysLoading ? $i18n.t('Refreshing...') : $i18n.t('Refresh')}</span>
+					</button>
+				</div>
+			</div>
 
 			{#if !loaded || keysLoading}
 				<div class="flex justify-center py-6"><Spinner /></div>
