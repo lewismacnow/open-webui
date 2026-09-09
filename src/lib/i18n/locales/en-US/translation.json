@@ -2503,6 +2503,7 @@
 	"service_keys.revoke_title": "Revoke \"{name}\"?",
 	"service_keys.section_list": "Existing keys",
 	"service_keys.section_mint": "Mint a new key",
+	"service_keys.updated_at": "Updated {at}",
 	"service_keys.title": "Service API Keys",
 	"Session": "",
 	"Session expired. Please sign in again.": "",
