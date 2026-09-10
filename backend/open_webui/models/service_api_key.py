@@ -7,14 +7,16 @@ existing token cap (``target_type='group'``) — there is deliberately no
 per-key cap and no owning user.
 
 Key material handling mirrors the fork's password auth: the full key
-(``sk_live_<22-char-base62>``, 32 chars) is returned ONCE at mint time;
-only ``key_prefix`` (first 12 chars) is recoverable afterwards. The
-stored ``key_hash`` is produced by the same hasher as passwords
-(argon2id when configured, else bcrypt — see ``utils/auth.py``), which
-is SALTED. A salted hash cannot be looked up by equality, so the lookup
-path is: fetch the row by UNIQUE ``key_prefix``, then verify the full
-key against ``key_hash`` with ``verify_password``. No index on
-``key_hash`` — equality lookups are impossible on a salted hash.
+(``sk_live_<22-char-base62>``, 32 chars) is returned at mint time and
+is ALSO recoverable later via the ``POST /service-keys/{id}/reveal``
+endpoint (Fernet-encrypted at rest, keyed off ``WEBUI_SECRET_KEY``,
+same derivation as ``utils/valves.py``). The stored ``key_hash`` is
+produced by the same hasher as passwords (argon2id when configured,
+else bcrypt — see ``utils/auth.py``), which is SALTED. A salted hash
+cannot be looked up by equality, so the lookup path is: fetch the row
+by UNIQUE ``key_prefix``, then verify the full key against ``key_hash``
+with ``verify_password``. No index on ``key_hash`` — equality lookups
+are impossible on a salted hash.
 
 State model (per user spec): binary Active/Revoked computed from
 ``revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())``.
@@ -26,13 +28,18 @@ the PATCH handler when a new future expiry is set).
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import re
 import secrets
 import time
 import uuid
+from functools import lru_cache
 from typing import Any, Optional
 
+from cryptography.fernet import Fernet, InvalidToken
+from open_webui.env import WEBUI_SECRET_KEY
 from open_webui.internal.db import Base, get_async_db_context
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import BigInteger, JSON, Column, ForeignKey, Index, Text, and_, or_, select, update
@@ -49,6 +56,38 @@ SERVICE_KEY_BODY_LENGTH = 22
 SERVICE_KEY_PREFIX_LENGTH = 12  # sk_live_ + first 4 body chars, for UI lookup
 
 _BASE62_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+
+
+# ── At-rest encryption (for the ``reveal`` path) ──────────────────────────
+# Same Fernet derivation as ``utils/valves.py``: use ``WEBUI_SECRET_KEY``
+# directly when it's already 44 bytes (Fernet's encoded key length),
+# otherwise SHA256-hash it to 32 bytes first. The Fernet instance is
+# ``lru_cache``-d so a single process picks one key per lifetime.
+#
+# Implication for ops: rotating ``WEBUI_SECRET_KEY`` invalidates every
+# ``encrypted_key`` already written. The reveal endpoint surfaces this
+# as HTTP 500 with a clear message so admins can re-mint affected keys.
+@lru_cache(maxsize=1)
+def _service_key_fernet() -> Fernet:
+    key = WEBUI_SECRET_KEY.encode()
+    if len(WEBUI_SECRET_KEY) != 44:
+        key = base64.urlsafe_b64encode(hashlib.sha256(key).digest())
+    return Fernet(key)
+
+
+def encrypt_service_key(plaintext: str) -> str:
+    """Fernet-encrypt the plaintext for at-rest storage. Decryptable
+    only via ``decrypt_service_key`` + the same ``WEBUI_SECRET_KEY``.
+    """
+    return _service_key_fernet().encrypt(plaintext.encode()).decode()
+
+
+def decrypt_service_key(ciphertext: str) -> str:
+    """Reverse of ``encrypt_service_key``. Raises ``InvalidToken`` if
+    the Fernet key has changed since encryption (typically a secret
+    rotation). Callers should map that to a 500 with a helpful message.
+    """
+    return _service_key_fernet().decrypt(ciphertext.encode()).decode()
 
 
 def generate_service_key() -> tuple[str, str]:
@@ -68,6 +107,11 @@ class ServiceApiKey(Base):
     revoked) service keys cannot be deleted until the keys are removed,
     preserving the audit trail. ``revoked_at`` is the single source of
     truth for activity; ``expires_at`` is advisory until lazily enforced.
+
+    ``encrypted_key`` (nullable) holds the Fernet ciphertext of the
+    plaintext so admins can reveal it later via the dedicated endpoint.
+    Pre-existing rows minted before this column was added will have
+    ``NULL`` and the reveal endpoint returns 404 for them.
     """
 
     __tablename__ = 'service_api_key'
@@ -77,6 +121,10 @@ class ServiceApiKey(Base):
     name = Column(Text, nullable=False)
     key_prefix = Column(Text, unique=True, nullable=False)
     key_hash = Column(Text, nullable=False)
+    # Fernet ciphertext of the plaintext, decryptable only via the
+    # reveal endpoint. NULL for legacy rows minted before this column
+    # existed.
+    encrypted_key = Column(Text, nullable=True)
     created_by = Column(Text, ForeignKey('user.id', ondelete='RESTRICT'), nullable=False)
     expires_at = Column(BigInteger, nullable=True)  # epoch; NULL = infinite
     ip_whitelist = Column(JSON, nullable=True)  # ["1.2.3.0/24", ...]; NULL = any
@@ -100,6 +148,10 @@ class ServiceApiKeyModel(BaseModel):
     name: str
     key_prefix: str
     key_hash: str
+    # Fernet ciphertext — populated only on the row-side view; NEVER
+    # exposed via the API (the response model drops it). Reveal flow
+    # is the only way to recover the plaintext.
+    encrypted_key: Optional[str] = None
     created_by: str
     expires_at: Optional[int] = None
     ip_whitelist: Optional[list[str]] = None
@@ -110,7 +162,8 @@ class ServiceApiKeyModel(BaseModel):
 
 
 class ServiceApiKeyResponse(BaseModel):
-    """API-facing shape — NEVER includes key material (hash or full key).
+    """API-facing shape — NEVER includes key material (hash, ciphertext,
+    or full key).
 
     ``key_prefix`` is the schema name; ``prefix`` is the frontend lane's
     client shape (``$lib/apis/serviceKeys``) — both are populated with
@@ -135,7 +188,8 @@ class ServiceApiKeyResponse(BaseModel):
 
 
 class ServiceApiKeyMintResponse(ServiceApiKeyResponse):
-    """Mint response — the ONLY time the plaintext key is returned.
+    """Mint response — returns the plaintext key at mint time AND
+    stores its Fernet-encrypted form for later reveal.
 
     ``key`` is the spec's field name; ``plaintext`` is the frontend
     client's — both carry the same one-time value.
@@ -148,7 +202,10 @@ class ServiceApiKeyMintResponse(ServiceApiKeyResponse):
 def _to_response(model: ServiceApiKeyModel) -> ServiceApiKeyResponse:
     now = int(time.time())
     return ServiceApiKeyResponse(
-        **model.model_dump(exclude={'key_hash', 'ip_whitelist'}),
+        # Exclude BOTH the salted hash (never useful to clients) AND
+        # the encrypted ciphertext (admin reveal goes through the
+        # dedicated endpoint, not the list shape).
+        **model.model_dump(exclude={'key_hash', 'encrypted_key', 'ip_whitelist'}),
         prefix=model.key_prefix,
         ip_whitelist=list(model.ip_whitelist or []),
         is_active=model.revoked_at is None and (model.expires_at is None or model.expires_at > now),
@@ -237,6 +294,7 @@ class ServiceApiKeyTable:
         name: str,
         key_prefix: str,
         key_hash: str,
+        encrypted_key: str,
         created_by: str,
         expires_at: Optional[int] = None,
         ip_whitelist: Optional[list[str]] = None,
@@ -250,6 +308,7 @@ class ServiceApiKeyTable:
                 name=name,
                 key_prefix=key_prefix,
                 key_hash=key_hash,
+                encrypted_key=encrypted_key,
                 created_by=created_by,
                 expires_at=expires_at,
                 ip_whitelist=ip_whitelist,

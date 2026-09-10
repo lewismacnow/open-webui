@@ -674,6 +674,11 @@ class EventDefinitions(BaseModel):
         description='A group-bound service API key expired and was auto-revoked at auth time.',
         message='Service key expired',
     )
+    SERVICE_KEY_REVEALED: EventDefinition = EventDefinition(
+        name='service_key.revealed',
+        description='An admin revealed the plaintext of a service API key via the reveal endpoint. Payload does NOT include the plaintext.',
+        message='Service key revealed',
+    )
 
 
 EVENTS = EventDefinitions()

@@ -1,7 +1,9 @@
 """Admin API for group-bound service keys.
 
-All endpoints are admin-gated. The full key is returned exactly ONCE, in
-the mint (POST) response; every other surface exposes only ``key_prefix``
+All endpoints are admin-gated. The full key is returned exactly ONCE on
+mint (POST) AND is recoverable later via ``POST /service-keys/{id}/reveal``
+(Fernet-encrypted at rest, keyed off ``WEBUI_SECRET_KEY`` — same derivation
+as ``utils/valves.py``). Every other surface exposes only ``key_prefix``
 (see ``models/service_api_key`` for the format and hashing details).
 
 State model: binary Active/Revoked computed from
@@ -17,15 +19,18 @@ import logging
 import time
 from typing import Optional
 
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from open_webui.events import EVENTS, publish_event
 from open_webui.models.groups import Groups
 from open_webui.models.service_api_key import (
-    ServiceApiKeyModel,
     ServiceApiKeyMintResponse,
+    ServiceApiKeyModel,
     ServiceApiKeyResponse,
     ServiceApiKeys,
     _to_response,
+    decrypt_service_key,
+    encrypt_service_key,
     generate_service_key,
 )
 from open_webui.utils.auth import get_admin_user, get_password_hash
@@ -115,11 +120,17 @@ async def create_service_key(request: Request, form_data: ServiceKeyCreateForm, 
     for _ in range(MAX_MINT_ATTEMPTS):
         plaintext_key, key_prefix = generate_service_key()
         key_hash = await get_password_hash(plaintext_key)  # argon2id / bcrypt, as configured
+        # Fernet-encrypt for at-rest storage so the admin can re-reveal
+        # the plaintext later via the /reveal endpoint. Cached Fernet
+        # instance; see utils/valves.py for the WEBUI_SECRET_KEY
+        # derivation.
+        encrypted_key = encrypt_service_key(plaintext_key)
         minted = await ServiceApiKeys.insert_service_api_key(
             group_id=form_data.group_id,
             name=form_data.name.strip(),
             key_prefix=key_prefix,
             key_hash=key_hash,
+            encrypted_key=encrypted_key,
             created_by=user.id,
             expires_at=form_data.expires_at,
             ip_whitelist=form_data.ip_whitelist,
@@ -149,6 +160,66 @@ async def create_service_key(request: Request, form_data: ServiceKeyCreateForm, 
         },
     )
     return response
+
+
+@router.post('/{id}/reveal', response_model=dict)
+async def reveal_service_key_plaintext(request: Request, id: str, user=Depends(get_admin_user)):
+    """Return the full plaintext of an existing service key.
+
+    The plaintext is Fernet-encrypted at rest; the reveal endpoint
+    decrypts on-demand. Use sparingly — anyone with the response body
+    has the bearer credential. Prefer re-minting over repeated reveal.
+
+    Errors:
+      - 404 if the key doesn't exist OR if it was minted before the
+        ``encrypted_key`` column existed (legacy record; not recoverable).
+      - 500 with a clear message if Fernet decryption fails — that means
+        ``WEBUI_SECRET_KEY`` has rotated since the key was minted; the
+        only recovery is to mint a new key.
+    """
+    model = await ServiceApiKeys.get_key_by_id(id)
+    if model is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Service key not found')
+    if model.encrypted_key is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Plaintext not recoverable for this key (legacy record minted before encrypted_key column). Re-mint to continue.',
+        )
+    try:
+        plaintext = decrypt_service_key(model.encrypted_key)
+    except InvalidToken:
+        # WEBUI_SECRET_KEY rotated since this key was minted — the
+        # Fernet key derivation differs and decryption fails. Loud log
+        # so ops can correlate, then a 500 with an actionable message.
+        log.error(
+            'Failed to decrypt service key %s — likely WEBUI_SECRET_KEY rotated since mint',
+            id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Plaintext not recoverable — encryption key has rotated. Re-mint to continue.',
+        )
+
+    # Fire a webhook so admin reveal events are auditable alongside
+    # mint/revoke/expire. No plaintext in the payload — just the
+    # key_id, who revealed it, and when.
+    await publish_event(
+        request,
+        EVENTS.SERVICE_KEY_REVEALED,
+        actor=user,
+        subject_id=model.id,
+        subject_type='service_key',
+        data={
+            'key_id': model.id,
+            'group_id': model.group_id,
+            'name': model.name,
+            'prefix': model.key_prefix,
+            'revealed_at': int(time.time()),
+            'revealed_by': user.id,
+        },
+    )
+
+    return {'plaintext': plaintext, 'prefix': model.key_prefix}
 
 
 @router.get('/{id}', response_model=ServiceApiKeyResponse)

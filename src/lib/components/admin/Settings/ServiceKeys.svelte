@@ -14,6 +14,7 @@
 		createServiceKey,
 		updateServiceKey,
 		revokeServiceKey,
+		revealServiceKey,
 		type ServiceKey as ServiceKeyType
 	} from '$lib/apis/serviceKeys';
 	import { searchGroups } from '$lib/apis/groups';
@@ -42,6 +43,20 @@
 	// it. Cleared on explicit dismiss.
 	let revealedPlaintext: string | null = null;
 	let revealedPrefix: string = '';
+
+	// Re-reveal flow — the admin can pull the plaintext back out of
+	// the encrypted blob via the /reveal endpoint. Confirmation modal
+	// first (security: anyone with the response body has the bearer
+	// credential), then a copyable plaintext input that auto-closes
+	// after a short window.
+	let revealCandidate: ServiceKeyType | null = null;
+	let showRevealConfirm: boolean = false;
+	let revealedKeyId: string | null = null;
+	let revealedPlaintextText: string = '';
+	let revealedPlaintextPrefix: string = '';
+	let revealCountdown: number = 0;
+	let revealTimer: ReturnType<typeof setInterval> | null = null;
+	const REVEAL_AUTO_CLOSE_SECONDS = 30;
 
 	// --- List state ---
 	let keys: ServiceKeyType[] = [];
@@ -323,6 +338,70 @@
 	function dismissPlaintext() {
 		revealedPlaintext = null;
 		revealedPrefix = '';
+	}
+
+	// ── Re-reveal flow ──────────────────────────────────────────────────
+
+	function beginReveal(k: ServiceKeyType) {
+		// Allow reveal for any state — active OR revoked. The ciphertext
+		// is preserved at audit-relevant points (before and after
+		// revoke), so the plaintext stays recoverable until either the
+		// row is hard-deleted or WEBUI_SECRET_KEY rotates.
+		revealCandidate = k;
+		showRevealConfirm = true;
+	}
+
+	function cancelReveal() {
+		revealCandidate = null;
+		showRevealConfirm = false;
+	}
+
+	async function confirmReveal() {
+		if (!revealCandidate) return;
+		const target = revealCandidate;
+		try {
+			const res = await revealServiceKey(localStorage.token, target.id);
+			revealedKeyId = target.id;
+			revealedPlaintextText = res.plaintext ?? '';
+			revealedPlaintextPrefix = res.prefix ?? target.prefix;
+			// Start the auto-close timer. Counts down each second; the
+			// modal disappears and the plaintext is dropped from the
+			// DOM when it reaches zero so it isn't lying in memory.
+			revealCountdown = REVEAL_AUTO_CLOSE_SECONDS;
+			if (revealTimer) clearInterval(revealTimer);
+			revealTimer = setInterval(() => {
+				revealCountdown -= 1;
+				if (revealCountdown <= 0) {
+					closeReveal();
+				}
+			}, 1000);
+			cancelReveal();
+		} catch (e: any) {
+			console.error('Failed to reveal service key:', e);
+			toast.error(e?.detail ?? $i18n.t('Failed to reveal service key'));
+			cancelReveal();
+		}
+	}
+
+	function closeReveal() {
+		if (revealTimer) {
+			clearInterval(revealTimer);
+			revealTimer = null;
+		}
+		revealedKeyId = null;
+		revealedPlaintextText = '';
+		revealedPlaintextPrefix = '';
+		revealCountdown = 0;
+	}
+
+	async function copyRevealed() {
+		if (!revealedPlaintextText) return;
+		try {
+			await copyToClipboard(revealedPlaintextText);
+			toast.success($i18n.t('Copied to clipboard'));
+		} catch (e) {
+			toast.error($i18n.t('Failed to copy'));
+		}
 	}
 
 	// Hydrate group labels for visible rows on initial load so the table
@@ -741,8 +820,15 @@
 											</span>
 										</td>
 										<td class="px-3 py-2 text-right">
-											{#if !k.revoked_at}
-												<div class="flex justify-end gap-1">
+											<div class="flex justify-end gap-1">
+												<button
+													type="button"
+													class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-50"
+													on:click={() => beginReveal(k)}
+												>
+													{$i18n.t('service_keys.reveal')}
+												</button>
+												{#if !k.revoked_at}
 													<button
 														type="button"
 														class="text-xs text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
@@ -760,8 +846,8 @@
 													>
 														{$i18n.t('Revoke')}
 													</button>
-												</div>
-											{/if}
+												{/if}
+											</div>
 										</td>
 									{/if}
 								</tr>
@@ -787,3 +873,84 @@
 	onConfirm={() => confirmRevoke && confirmRevokeKey(confirmRevoke)}
 	on:cancel={() => (confirmRevoke = null)}
 />
+
+<!-- Confirm before showing the full plaintext. The plaintext is the
+	bearer credential — anyone with it has full API access. -->
+<ConfirmDialog
+	bind:show={showRevealConfirm}
+	title={revealCandidate
+		? $i18n.t('service_keys.reveal_title', { name: revealCandidate.name })
+		: ''}
+	message={revealCandidate
+		? $i18n.t('service_keys.reveal_confirm_message', {
+				name: revealCandidate.name,
+				prefix: revealCandidate.prefix
+			})
+		: ''}
+	confirmLabel={$i18n.t('service_keys.reveal')}
+	onConfirm={() => confirmReveal()}
+	on:cancel={() => cancelReveal()}
+/>
+
+<!-- Plaintext display after reveal succeeds. The input is readonly +
+	auto-selected-on-focus; a Copy button sits next to it. The modal
+	auto-closes after REVEAL_AUTO_CLOSE_SECONDS so the plaintext
+	doesn't linger in the DOM longer than necessary. -->
+{#if revealedKeyId}
+	<div
+		role="dialog"
+		aria-modal="true"
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+		on:click|self={() => closeReveal()}
+		on:keydown={(e) => {
+			if (e.key === 'Escape') closeReveal();
+		}}
+	>
+		<div
+			class="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-2xl max-w-2xl w-[90vw] p-5"
+			role="document"
+		>
+			<div class="flex items-start justify-between mb-3">
+				<div>
+					<div class="text-sm font-medium text-gray-900 dark:text-white">
+						{$i18n.t('service_keys.reveal_plaintext_title')}
+					</div>
+					<div class="text-xs text-amber-700 dark:text-amber-300 mt-1">
+						{$i18n.t('service_keys.reveal_warning')}
+						{#if revealCountdown > 0}
+							<span class="ml-1 font-mono">
+								({$i18n.t('service_keys.reveal_auto_close', { n: revealCountdown })})
+							</span>
+						{/if}
+					</div>
+				</div>
+				<button
+					type="button"
+					class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+					on:click={() => closeReveal()}
+					aria-label={$i18n.t('Close')}
+				>
+					✕
+				</button>
+			</div>
+			<div class="flex items-center gap-2 mb-2">
+				<input
+					class="flex-1 min-w-0 font-mono text-xs px-3 py-2 rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-white"
+					readonly
+					value={revealedPlaintextText}
+					on:focus={(e) => (e.currentTarget as HTMLInputElement).select()}
+				/>
+				<button
+					type="button"
+					class="px-3 py-2 text-xs font-medium bg-black dark:bg-white text-white dark:text-black rounded transition shrink-0"
+					on:click={copyRevealed}
+				>
+					{$i18n.t('service_keys.copy')}
+				</button>
+			</div>
+			<div class="text-[0.6875rem] text-gray-500 dark:text-gray-400 font-mono">
+				{$i18n.t('service_keys.prefix')}: {revealedPlaintextPrefix}
+			</div>
+		</div>
+	</div>
+{/if}
