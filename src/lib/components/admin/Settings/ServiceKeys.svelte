@@ -122,14 +122,14 @@
 			const expiredFirst =
 				k.expires_at !== null && k.expires_at !== undefined && k.expires_at <= (k.revoked_at ?? 0);
 			return {
-				label: expiredFirst ? i18n.t('Revoked') + ' (expired)' : i18n.t('Revoked'),
+				label: expiredFirst ? $i18n.t('Revoked') + ' (expired)' : $i18n.t('Revoked'),
 				tone: 'muted'
 			};
 		}
 		if (k.expires_at && k.expires_at < now) {
-			return { label: i18n.t('Expired'), tone: 'warn' };
+			return { label: $i18n.t('Expired'), tone: 'warn' };
 		}
-		return { label: i18n.t('Active'), tone: 'ok' };
+		return { label: $i18n.t('Active'), tone: 'ok' };
 	}
 
 	function parseIpWhitelist(text: string): string[] {
