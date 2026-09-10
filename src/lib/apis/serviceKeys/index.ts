@@ -182,3 +182,21 @@ export const revokeServiceKey = async (
 
 	return res ?? { success: false };
 };
+
+export const revealServiceKey = async (
+	token: string,
+	id: string
+): Promise<{ plaintext: string; prefix: string }> => {
+	// Returns the full plaintext of an existing service key. Admin-only
+	// backend endpoint — the ciphertext is Fernet-encrypted at rest and
+	// decrypted on-demand. Use sparingly; anyone with the response body
+	// holds the bearer credential.
+	const res = await fetch(`${WEBUI_API_BASE_URL}/service-keys/${id}/reveal`, {
+		method: 'POST',
+		headers: authHeaders(token)
+	});
+	if (!res.ok) {
+		throw await res.json();
+	}
+	return (await res.json()) as { plaintext: string; prefix: string };
+};
