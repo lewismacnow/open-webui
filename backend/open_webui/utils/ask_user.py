@@ -1,8 +1,11 @@
+import logging
 import time
 from collections.abc import Callable
 from typing import Optional
 
 from open_webui.utils.json_codec import JSONCodec
+
+log = logging.getLogger(__name__)
 
 
 ASK_USER_NAME = 'ask_user'
@@ -26,46 +29,81 @@ def get_ask_user_tool_calls(tool_calls: list[dict]) -> tuple[list[dict], str | N
 
 def normalize_ask_user_request(arguments: dict) -> dict:
     questions = arguments.get('questions')
-    # 1-5 questions per call (relaxed from the upstream 1-3 limit). The
-    # tool's published docstring on tools/builtin.py:ask_user says the
-    # same thing — keep the two in sync.
-    if not isinstance(questions, list) or not 1 <= len(questions) <= 5:
-        raise ValueError('ask_user requires 1-5 questions.')
+    # Lenient validation — models and downstream proxies routinely emit
+    # malformed ask_user payloads (too many questions, missing ids,
+    # wrong option counts, non-dict entries). Log + skip the bad entry
+    # rather than crashing the whole chat. Mirrors the validator in
+    # tools/builtin.py:ask_user; keep the two in sync.
+    if not isinstance(questions, list) or len(questions) == 0:
+        raise ValueError('ask_user requires a non-empty list of questions.')
+
+    if len(questions) > 5:
+        log.warning('ask_user: model sent %d questions, truncating to 5', len(questions))
+        questions = questions[:5]
 
     normalized_questions = []
     seen_ids = set()
     allow_other = bool(arguments.get('allow_other', True))
     for index, question in enumerate(questions):
         if not isinstance(question, dict):
-            raise ValueError('Each question must be an object.')
+            log.warning('ask_user: question at index %d is not a dict, skipping', index)
+            continue
 
         question_id = str(question.get('id') or '').strip()[:64]
         if not question_id:
-            raise ValueError('Each question requires a non-empty id.')
+            question_id = f'q{index}'
         if question_id in seen_ids:
-            raise ValueError(f'Duplicate question id: {question_id}')
+            question_id = f'{question_id}_{index}'
         seen_ids.add(question_id)
 
-        options = question.get('options')
-        # 2-5 options per question (relaxed from the upstream 2-3 limit).
-        # Updated to match the tool's published docstring so the model's
-        # contract is consistent with the validator.
-        if not isinstance(options, list) or not 2 <= len(options) <= 5:
-            raise ValueError('Each question requires 2-5 options.')
+        options = question.get('options') or []
+        if not isinstance(options, list):
+            log.warning('ask_user: question %r options is not a list, skipping', question_id)
+            continue
+        if len(options) < 2:
+            log.warning(
+                'ask_user: question %r has %d options (need 2-5), skipping',
+                question_id,
+                len(options),
+            )
+            continue
+        if len(options) > 5:
+            log.warning(
+                'ask_user: question %r has %d options, truncating to 5',
+                question_id,
+                len(options),
+            )
+            options = options[:5]
 
         normalized_options = []
         for option in options:
             if not isinstance(option, dict):
-                raise ValueError('Each option must be an object.')
+                log.warning(
+                    'ask_user: option under question %r is not a dict, skipping',
+                    question_id,
+                )
+                continue
             label = str(option.get('label') or '').strip()[:80]
             description = str(option.get('description') or '').strip()[:240]
             if not label or not description:
-                raise ValueError('Each option requires a label and description.')
+                log.warning(
+                    'ask_user: option under %r missing label/description, skipping',
+                    question_id,
+                )
+                continue
             normalized_options.append({'label': label, 'description': description})
+
+        if not normalized_options:
+            log.warning(
+                'ask_user: question %r has no usable options after normalization, skipping',
+                question_id,
+            )
+            continue
 
         question_text = str(question.get('question') or '').strip()[:500]
         if not question_text:
-            raise ValueError('Each question requires question text.')
+            log.warning('ask_user: question %r missing question text, skipping', question_id)
+            continue
 
         normalized_questions.append(
             {

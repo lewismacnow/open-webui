@@ -1180,10 +1180,17 @@ async def get_event_emitter(request_info, update_db=True):
 
 async def get_event_call(request_info):
     async def __event_caller__(event_data):
-        session_id = request_info['session_id']
+        # Defensive: request_info is whatever the caller passed in. If the
+        # caller (UI or a downstream proxy) sent a non-string session_id
+        # (e.g. a list/tuple from a malformed payload), hiredis blows up
+        # at SESSION_POOL.get(). Coerce to None so the chat continues;
+        # the ask_user tool falls back to its 'no active browser session'
+        # error path instead of crashing the whole request.
+        raw_session_id = request_info.get('session_id') if isinstance(request_info, dict) else None
+        session_id = raw_session_id if isinstance(raw_session_id, str) else None
 
         # session_id is client-supplied; only the requesting user's own live session may be targeted.
-        session = SESSION_POOL.get(session_id)
+        session = SESSION_POOL.get(session_id) if session_id is not None else None
         if session is None or session.get('id') != request_info.get('user_id'):
             log.warning(f'Event caller: session {session_id} not owned by requesting user or disconnected')
             return {'error': 'Client session disconnected.'}
