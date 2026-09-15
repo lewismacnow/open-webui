@@ -26,8 +26,11 @@ def get_ask_user_tool_calls(tool_calls: list[dict]) -> tuple[list[dict], str | N
 
 def normalize_ask_user_request(arguments: dict) -> dict:
     questions = arguments.get('questions')
-    if not isinstance(questions, list) or not 1 <= len(questions) <= 3:
-        raise ValueError('ask_user requires 1-3 questions.')
+    # 1-5 questions per call (relaxed from the upstream 1-3 limit). The
+    # tool's published docstring on tools/builtin.py:ask_user says the
+    # same thing — keep the two in sync.
+    if not isinstance(questions, list) or not 1 <= len(questions) <= 5:
+        raise ValueError('ask_user requires 1-5 questions.')
 
     normalized_questions = []
     seen_ids = set()

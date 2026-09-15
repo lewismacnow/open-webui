@@ -524,14 +524,14 @@ async def ask_user(
     Ask the user clarifying questions before continuing.
     Use this when the next step depends on user intent, preference, or a tradeoff that cannot be inferred safely.
 
-    :param questions: 1-3 question objects, each with id, header, question, and **2-5 options** (was 2-3 in upstream; relaxed in this fork because models routinely emit 4-5 and rejecting them makes the chat stall). Each option needs label and description.
+    :param questions: 1-5 question objects (was 1-3 in upstream; relaxed in this fork because models routinely emit multiple questions and rejecting them makes the chat stall), each with id, header, question, and **2-5 options** (was 2-3 in upstream; relaxed for the same reason). Each option needs label and description.
     :param allow_other: Whether users may enter a free-form answer instead of choosing one of the options
     :param timeout_ms: How long the browser should keep the prompt open before cancelling it
     :return: JSON with status and answers keyed by question id
     """
     try:
-        if not isinstance(questions, list) or not 1 <= len(questions) <= 3:
-            raise ValueError('ask_user requires 1-3 questions.')
+        if not isinstance(questions, list) or not 1 <= len(questions) <= 5:
+            raise ValueError('ask_user requires 1-5 questions.')
 
         normalized_questions = []
         seen_ids = set()
