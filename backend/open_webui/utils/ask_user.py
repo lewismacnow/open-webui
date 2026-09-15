@@ -1,11 +1,8 @@
-import logging
 import time
 from collections.abc import Callable
 from typing import Optional
 
 from open_webui.utils.json_codec import JSONCodec
-
-log = logging.getLogger(__name__)
 
 
 ASK_USER_NAME = 'ask_user'
@@ -47,25 +44,11 @@ def normalize_ask_user_request(arguments: dict) -> dict:
         seen_ids.add(question_id)
 
         options = question.get('options')
-        if not isinstance(options, list):
-            raise ValueError('Each question requires 2-3 options.')
-        # Lenient: the model's spec says 2-3 but the user-facing reality
-        # is models regularly send 4-5. Silently truncate to the first
-        # 3 (rather than rejecting the whole question) so the chat can
-        # continue. The log warning lets admins see the model drift in
-        # aggregate. Down-side: the model's tool_call.arguments history
-        # will show 3 options even when it emitted 4 — the model sees
-        # its own normalised output on subsequent turns, which is the
-        # safer default for tool-call consistency.
-        if len(options) > 3:
-            log.warning(
-                'ask_user: model sent %d options for question %r, truncating to 3',
-                len(options),
-                question.get('id'),
-            )
-            options = options[:3]
-        if len(options) < 2:
-            raise ValueError('Each question requires 2-3 options.')
+        # 2-5 options per question (relaxed from the upstream 2-3 limit).
+        # Updated to match the tool's published docstring so the model's
+        # contract is consistent with the validator.
+        if not isinstance(options, list) or not 2 <= len(options) <= 5:
+            raise ValueError('Each question requires 2-5 options.')
 
         normalized_options = []
         for option in options:

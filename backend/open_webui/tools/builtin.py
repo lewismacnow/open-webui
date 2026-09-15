@@ -524,7 +524,7 @@ async def ask_user(
     Ask the user clarifying questions before continuing.
     Use this when the next step depends on user intent, preference, or a tradeoff that cannot be inferred safely.
 
-    :param questions: 1-3 question objects, each with id, header, question, and 2-3 options. Each option needs label and description.
+    :param questions: 1-3 question objects, each with id, header, question, and **2-5 options** (was 2-3 in upstream; relaxed in this fork because models routinely emit 4-5 and rejecting them makes the chat stall). Each option needs label and description.
     :param allow_other: Whether users may enter a free-form answer instead of choosing one of the options
     :param timeout_ms: How long the browser should keep the prompt open before cancelling it
     :return: JSON with status and answers keyed by question id
@@ -547,8 +547,8 @@ async def ask_user(
             seen_ids.add(question_id)
 
             options = question.get('options')
-            if not isinstance(options, list) or not 2 <= len(options) <= 3:
-                raise ValueError('Each question requires 2-3 options.')
+            if not isinstance(options, list) or not 2 <= len(options) <= 5:
+                raise ValueError('Each question requires 2-5 options.')
 
             normalized_options = []
             for option in options:
