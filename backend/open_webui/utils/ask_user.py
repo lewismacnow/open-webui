@@ -44,8 +44,11 @@ def normalize_ask_user_request(arguments: dict) -> dict:
         seen_ids.add(question_id)
 
         options = question.get('options')
-        if not isinstance(options, list) or not 2 <= len(options) <= 3:
-            raise ValueError('Each question requires 2-3 options.')
+        # 2-5 options per question (relaxed from the upstream 2-3 limit).
+        # Updated to match the tool's published docstring so the model's
+        # contract is consistent with the validator.
+        if not isinstance(options, list) or not 2 <= len(options) <= 5:
+            raise ValueError('Each question requires 2-5 options.')
 
         normalized_options = []
         for option in options:
@@ -168,7 +171,21 @@ def stage_ask_user_tool_calls(
         # resolved function_call_output so the model can continue. This is
         # the only viable path for non-UI consumers — there's no socket to
         # wait for, so the legacy "pending" stage would deadlock forever.
-        if answers is not None:
+        parsed_args: dict | None = None
+        resolved: dict[str, str] = {}
+        missing: list[str] = []
+
+        # Defensive: a malformed ask_user_answers (None-as-list, a bare
+        # string, etc.) shouldn't crash the loop. Treat anything that
+        # isn't a dict[str, str] as "no answers" and fall back to the
+        # legacy pending stage.
+        answers_dict: Optional[dict[str, str]] = (
+            answers
+            if isinstance(answers, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in answers.items())
+            else None
+        )
+
+        if answers_dict is not None:
             try:
                 parsed_args = JSONCodec.loads(arguments)
             except JSONCodec.JSONDecodeError:
@@ -178,7 +195,21 @@ def stage_ask_user_tool_calls(
 
             if isinstance(parsed_args, dict):
                 questions = parsed_args.get('questions') or []
-                missing = [q.get('id') for q in questions if not (q.get('id') and answers.get(q['id']))]
+                # Normalise every answer value to string so downstream
+                # consumers always see a consistent shape. Non-string
+                # values (e.g. the caller passed numbers) fall through as
+                # missing rather than silently corrupting the resolved
+                # function_call_output.
+                for q in questions:
+                    qid = q.get('id')
+                    if not isinstance(qid, str) or not qid:
+                        missing.append(str(qid) if qid is not None else '<missing>')
+                        continue
+                    selected = answers_dict.get(qid)
+                    if not isinstance(selected, str) or not selected:
+                        missing.append(qid)
+                    else:
+                        resolved[qid] = selected
                 if missing:
                     output.append(
                         {
@@ -209,9 +240,9 @@ def stage_ask_user_tool_calls(
 
                 # All answers present — emit the resolved function_call_output
                 # so the model can continue.
-                resolved = {
+                resolved_payload = {
                     'status': 'ok',
-                    'answers': {q['id']: answers[q['id']] for q in questions if q.get('id')},
+                    'answers': resolved,
                     'responder': 'api-supplied',
                     'answered_at': int(time.time()),
                 }
@@ -221,7 +252,7 @@ def stage_ask_user_tool_calls(
                         'type': 'function_call_output',
                         'id': make_output_id('fco'),
                         'call_id': call_id,
-                        'output': [{'type': 'input_text', 'text': JSONCodec.dumps(resolved)}],
+                        'output': [{'type': 'input_text', 'text': JSONCodec.dumps(resolved_payload)}],
                         'status': 'completed',
                     }
                 )
