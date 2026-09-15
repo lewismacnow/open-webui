@@ -425,11 +425,20 @@ async def chat_completed(request: Request, form_data: dict, user: Any):
     if not data.get('id'):
         raise Exception('Missing message id')
 
+    # Defensive: ``data['session_id']`` comes straight off the request
+    # body. If the caller (or a downstream proxy) sent a non-string
+    # (list/tuple/dict), hiredis blows up at SESSION_POOL.get() because
+    # it can't pack a tuple as a Redis key. Coerce non-strings to None so
+    # the chat still proceeds; ask_user falls back to its 'no active
+    # browser session' error path instead of crashing the whole chat.
+    raw_session_id = data.get('session_id')
+    session_id = raw_session_id if isinstance(raw_session_id, str) else None
+
     metadata = {
         'chat_id': data['chat_id'],
         'message_id': data['id'],
         'filter_ids': data.get('filter_ids', []),
-        'session_id': data['session_id'],
+        'session_id': session_id,
         'user_id': user.id,
     }
 
