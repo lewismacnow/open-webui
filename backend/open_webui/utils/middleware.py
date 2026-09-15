@@ -2911,6 +2911,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     # Stash in metadata so downstream code (Phase 2 Path C streaming branch) can detect.
     metadata['api_tools_active'] = api_tools_active
+    # API caller may pre-supply answers to ``ask_user`` tool calls so the
+    # chat can continue without a downstream UI socket. Format:
+    # ``{question_id: selected_option_label}``. Carried through to
+    # ``stage_ask_user_tool_calls`` which validates coverage and emits
+    # the resolved function_call_output immediately.
+    metadata['ask_user_answers'] = form_data.get('ask_user_answers')
 
     internal_note = (
         chat is not None and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note'
@@ -6528,7 +6534,12 @@ async def streaming_chat_response_handler(response, ctx):
                     tool_call_iterations += 1
 
                     response_tool_calls = tool_calls.pop(0)
-                    ask_user_staged, ask_user_error = stage_ask_user_tool_calls(response_tool_calls, output, output_id)
+                    ask_user_staged, ask_user_error = stage_ask_user_tool_calls(
+                        response_tool_calls,
+                        output,
+                        output_id,
+                        answers=metadata.get('ask_user_answers'),
+                    )
                     if ask_user_error:
                         response_tool_calls = [
                             tool_call
