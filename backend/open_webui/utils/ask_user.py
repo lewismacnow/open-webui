@@ -1,4 +1,6 @@
+import time
 from collections.abc import Callable
+from typing import Optional
 
 from open_webui.utils.json_codec import JSONCodec
 
@@ -84,7 +86,21 @@ def stage_ask_user_tool_calls(
     tool_calls: list[dict],
     output: list[dict],
     make_output_id: Callable[[str], str],
+    answers: Optional[dict[str, str]] = None,
 ) -> tuple[bool, str | None]:
+    """Validate and stage the model's ``ask_user`` tool calls.
+
+    Two modes:
+
+    - **No answers supplied** (legacy / UI-socket flow): stage as
+      ``pending`` and let a downstream UI socket write the function_call_output
+      back. In API Tools mode this deadlocks — the caller must supply
+      ``answers`` explicitly.
+    - **Answers supplied** (API Tools flow): validate the answers cover
+      every question, then immediately emit a ``function_call_output`` with
+      the resolved answers as ``completed``. The model sees the answers on
+      its next turn and continues. No pending stage, no downstream dependency.
+    """
     ask_user_calls, error = get_ask_user_tool_calls(tool_calls)
     if not ask_user_calls:
         return False, None
@@ -145,5 +161,70 @@ def stage_ask_user_tool_calls(
                     'status': 'completed',
                 }
             )
+            continue
+
+        # API Tools path: if the caller supplied ask_user_answers and they
+        # cover every question in this tool call, immediately emit the
+        # resolved function_call_output so the model can continue. This is
+        # the only viable path for non-UI consumers — there's no socket to
+        # wait for, so the legacy "pending" stage would deadlock forever.
+        if answers is not None:
+            try:
+                parsed_args = JSONCodec.loads(arguments)
+            except JSONCodec.JSONDecodeError:
+                # Staging already normalised the args; this should be
+                # unreachable. Fall back to pending rather than crash.
+                parsed_args = None
+
+            if isinstance(parsed_args, dict):
+                questions = parsed_args.get('questions') or []
+                missing = [q.get('id') for q in questions if not (q.get('id') and answers.get(q['id']))]
+                if missing:
+                    output.append(
+                        {
+                            'type': 'function_call_output',
+                            'id': make_output_id('fco'),
+                            'call_id': call_id,
+                            'output': [
+                                {
+                                    'type': 'input_text',
+                                    'text': JSONCodec.dumps(
+                                        {
+                                            'status': 'error',
+                                            'error_type': 'missing_answers',
+                                            'error': (
+                                                f'ask_user is missing answers for question_ids: {missing}. '
+                                                'Resupply the request with ask_user_answers covering every question '
+                                                "in the model's ask_user call."
+                                            ),
+                                            'missing_question_ids': missing,
+                                        }
+                                    ),
+                                }
+                            ],
+                            'status': 'completed',
+                        }
+                    )
+                    continue
+
+                # All answers present — emit the resolved function_call_output
+                # so the model can continue.
+                resolved = {
+                    'status': 'ok',
+                    'answers': {q['id']: answers[q['id']] for q in questions if q.get('id')},
+                    'responder': 'api-supplied',
+                    'answered_at': int(time.time()),
+                }
+                item['status'] = 'completed'
+                output.append(
+                    {
+                        'type': 'function_call_output',
+                        'id': make_output_id('fco'),
+                        'call_id': call_id,
+                        'output': [{'type': 'input_text', 'text': JSONCodec.dumps(resolved)}],
+                        'status': 'completed',
+                    }
+                )
+                continue
 
     return True, error
