@@ -530,30 +530,61 @@ async def ask_user(
     :return: JSON with status and answers keyed by question id
     """
     try:
-        if not isinstance(questions, list) or not 1 <= len(questions) <= 5:
-            raise ValueError('ask_user requires 1-5 questions.')
+        # Lenient validation — models routinely emit malformed ask_user
+        # payloads (too many questions, missing ids, wrong option counts).
+        # Log a warning and skip the bad entry rather than crashing the
+        # whole chat. The human in the UI can still see and answer the
+        # well-formed subset.
+        if not isinstance(questions, list) or len(questions) == 0:
+            raise ValueError('ask_user requires a non-empty list of questions.')
+
+        if len(questions) > 5:
+            log.warning('ask_user: model sent %d questions, truncating to 5', len(questions))
+            questions = questions[:5]
 
         normalized_questions = []
         seen_ids = set()
         for index, question in enumerate(questions):
             if not isinstance(question, dict):
-                raise ValueError('Each question must be an object.')
+                log.warning('ask_user: question at index %d is not a dict, skipping', index)
+                continue
 
             question_id = str(question.get('id') or '').strip()[:64]
             if not question_id:
-                raise ValueError('Each question requires a non-empty id.')
+                # Generate a stable id from the index so the answer still
+                # binds when the model forgot to include one.
+                question_id = f'q{index}'
             if question_id in seen_ids:
-                raise ValueError(f'Duplicate question id: {question_id}')
+                question_id = f'{question_id}_{index}'
             seen_ids.add(question_id)
 
-            options = question.get('options')
-            if not isinstance(options, list) or not 2 <= len(options) <= 5:
-                raise ValueError('Each question requires 2-5 options.')
+            options = question.get('options') or []
+            if not isinstance(options, list):
+                log.warning('ask_user: question %r options is not a list, skipping', question_id)
+                continue
+            if len(options) < 2:
+                log.warning(
+                    'ask_user: question %r has %d options (need 2-5), skipping',
+                    question_id,
+                    len(options),
+                )
+                continue
+            if len(options) > 5:
+                log.warning(
+                    'ask_user: question %r has %d options, truncating to 5',
+                    question_id,
+                    len(options),
+                )
+                options = options[:5]
 
             normalized_options = []
             for option in options:
                 if not isinstance(option, dict):
-                    raise ValueError('Each option must be an object.')
+                    log.warning(
+                        'ask_user: option under question %r is not a dict, skipping',
+                        question_id,
+                    )
+                    continue
 
                 label = str(option.get('label') or '').strip()[:80]
                 description = str(option.get('description') or '').strip()[:240]
