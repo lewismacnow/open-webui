@@ -4930,14 +4930,32 @@ async def api_tool_stream_wrapper(response, ctx, events):
             tool_args_str = tc.get('function', {}).get('arguments', '') or ''
 
             # Parse arguments; tolerate partial/malformed JSON from the model.
-            try:
-                tool_function_params = json.loads(tool_args_str) if tool_args_str.strip() else {}
-            except Exception:
+            # When parsing fails we DON'T silently default to {} — that
+            # would cause the next call into the tool to raise
+            # TypeError('missing 1 required positional argument') which
+            # is opaque to the model. Instead, raise a clear exception
+            # that the outer try/except at line ~5008 catches and returns
+            # to the model as a tool_error, so the model can self-correct
+            # (re-emit with valid JSON, or split into smaller pieces).
+            tool_function_params: dict = {}
+            if tool_args_str and tool_args_str.strip():
                 try:
-                    tool_function_params = ast.literal_eval(tool_args_str)
+                    tool_function_params = json.loads(tool_args_str)
                 except Exception:
-                    log.error(f'Error parsing tool call arguments for {tool_name}: {tool_args_str!r}')
-                    tool_function_params = {}
+                    try:
+                        tool_function_params = ast.literal_eval(tool_args_str)
+                    except Exception as exc:
+                        log.error(
+                            f'Error parsing tool call arguments for {tool_name}: '
+                            f'{tool_args_str!r} ({type(exc).__name__}: {exc})'
+                        )
+                        raise ValueError(
+                            f'ask_user tool call arguments are malformed JSON and '
+                            f'could not be parsed. The model emitted a truncated or '
+                            f'invalid JSON payload for tool {tool_name!r}; please '
+                            f're-emit the tool call with complete, valid JSON arguments. '
+                            f'Original parser error: {type(exc).__name__}: {exc}'
+                        )
 
             # Start event — includes parsed arguments.
             start_payload = {
