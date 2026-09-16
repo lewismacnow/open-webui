@@ -615,14 +615,38 @@ async def ask_user(
         if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or not 60_000 <= timeout_ms <= 240_000:
             timeout_ms = 120_000
 
-        if __event_call__ is None:
+        # API-mode detection: when the caller is using the OpenAI-compatible
+        # /api/v1/chat/completions endpoint there is no browser socket
+        # session attached. The __event_call__ closure returns either
+        # `None` (never bound) or `{'error': 'Client session
+        # disconnected.'}` (session_id coerced to None after our session_id
+        # hardening). Either way, there's no UI to push the question UI to.
+        #
+        # We still want ask_user to be USABLE end-to-end over the API. The
+        # contract with downstream callers: instead of returning an opaque
+        # 'WebSocket disconnected' error, surface the questions back in
+        # the function_call_output so the downstream can parse them, ask
+        # the user, and resubmit with `ask_user_answers` (Pattern B).
+        # The downstream regex-scans for `error_type=missing_answers`
+        # and acts on `missing_question_ids`. The model sees a neutral
+        # 'questions_pending' status (not an error) and continues with
+        # best-effort; the second call's `answers` settle the answer
+        # cleanly.
+        def _api_mode_questions_pending() -> str:
             return JSONCodec.dumps(
                 {
-                    'status': 'error',
-                    'error': 'User input requires an active browser session with WebSocket connection.',
+                    'status': 'questions_pending',
+                    'error_type': 'missing_answers',
+                    'missing_question_ids': [q['id'] for q in normalized_questions if q.get('id')],
+                    'questions': normalized_questions,
+                    'allow_other': allow_other,
+                    'timeout_ms': timeout_ms,
                 },
                 ensure_ascii=False,
             )
+
+        if __event_call__ is None:
+            return _api_mode_questions_pending()
 
         output = await __event_call__(
             {
@@ -634,6 +658,13 @@ async def ask_user(
                 },
             }
         )
+
+        # No socket session attached (API mode) — same path as the
+        # `__event_call__ is None` branch above. The __event_caller__
+        # closure returns the disconnection error from
+        # socket/main.py:1188, but we re-shape it into Pattern B.
+        if isinstance(output, dict) and output.get('error') == 'Client session disconnected.':
+            return _api_mode_questions_pending()
 
         if not isinstance(output, dict):
             return JSONCodec.dumps({'status': 'error', 'error': 'Invalid user input response.'}, ensure_ascii=False)
