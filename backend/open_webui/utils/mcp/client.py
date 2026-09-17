@@ -62,7 +62,18 @@ class MCPClient:
         self.exit_stack = None
 
     async def connect(self, url: str, headers: Optional[dict] = None):
-        async with AsyncExitStack() as exit_stack:
+        # The MCP SDK's `async with streamablehttp_client(...)` and
+        # `async with anyio.create_task_group()` contexts can fire benign
+        # cleanup race errors during __aexit__: 'aclose(): asynchronous
+        # generator is already running' and 'Attempted to exit cancel
+        # scope in a different task than it was entered in'. These surface
+        # when a sibling task cancels the transport while we're in the
+        # middle of an aclose. They're non-fatal (the underlying sockets
+        # are torn down anyway) but they propagate up to the asyncio
+        # loop as 'Task exception was never retrieved' warnings. Catch them
+        # both here AND in disconnect() so the user never sees them.
+        exit_stack = AsyncExitStack()
+        try:
             try:
                 self._streams_context = streamablehttp_client(
                     url,
@@ -81,9 +92,35 @@ class MCPClient:
                 with anyio.fail_after(MCP_INITIALIZE_TIMEOUT):
                     await self.session.initialize()
                 self.exit_stack = exit_stack.pop_all()
-            except Exception as e:
-                await self.disconnect()
-                raise e
+            except BaseException:
+                # Connection failure path — close the exit_stack before
+                # the outer `async with` re-raises, and suppress the SDK's
+                # cleanup race conditions here too (they're independent of
+                # the body exception).
+                try:
+                    await exit_stack.aclose()
+                except (RuntimeError, asyncio.CancelledError, Exception) as exc:
+                    log.debug(
+                        'MCPClient.connect() suppressed aclose() error on failure path: %s: %s',
+                        type(exc).__name__,
+                        exc,
+                    )
+                # Re-raise the original body exception so callers see the
+                # real failure cause.
+                raise
+        except RuntimeError as exc:
+            msg = str(exc)
+            # Two known benign SDK cleanup races that surface here:
+            #   - 'aclose(): asynchronous generator is already running'
+            #   - 'Attempted to exit cancel scope in a different task
+            #      than it was entered in'
+            if 'aclose()' in msg or 'cancel scope' in msg:
+                log.debug(
+                    'MCPClient.connect() suppressed known SDK cleanup race: %s',
+                    exc,
+                )
+            else:
+                raise
 
     async def list_tool_specs(self) -> Optional[dict]:
         if not self.session:
