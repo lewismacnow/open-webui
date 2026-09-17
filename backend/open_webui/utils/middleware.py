@@ -4937,6 +4937,11 @@ async def api_tool_stream_wrapper(response, ctx, events):
             # that the outer try/except at line ~5008 catches and returns
             # to the model as a tool_error, so the model can self-correct
             # (re-emit with valid JSON, or split into smaller pieces).
+            #
+            # We also SANITIZE the function_call item in `output` so the
+            # malformed JSON doesn't pollute the chat history and trigger
+            # a cascade failure at the next provider call (which would
+            # reject the malformed JSON with 400 Unterminated string).
             tool_function_params: dict = {}
             if tool_args_str and tool_args_str.strip():
                 try:
@@ -4949,6 +4954,15 @@ async def api_tool_stream_wrapper(response, ctx, events):
                             f'Error parsing tool call arguments for {tool_name}: '
                             f'{tool_args_str!r} ({type(exc).__name__}: {exc})'
                         )
+                        # Sanitize the persisted function_call so the
+                        # next provider call doesn't see the malformed
+                        # JSON embedded in the chat history. Replace
+                        # with an empty dict (valid JSON, harmless).
+                        for item in output:
+                            if item.get('type') == 'function_call' and item.get('call_id') == tool_call_id:
+                                item['arguments'] = '{}'
+                                item.setdefault('parse_error', str(exc))
+                                break
                         raise ValueError(
                             f'ask_user tool call arguments are malformed JSON and '
                             f'could not be parsed. The model emitted a truncated or '
