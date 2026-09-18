@@ -535,8 +535,18 @@ async def ask_user(
         # Log a warning and skip the bad entry rather than crashing the
         # whole chat. The human in the UI can still see and answer the
         # well-formed subset.
-        if not isinstance(questions, list) or len(questions) == 0:
-            raise ValueError('ask_user requires a non-empty list of questions.')
+        if not isinstance(questions, list):
+            raise ValueError('ask_user arguments must be an object.')
+        if len(questions) == 0:
+            # Empty questions list is legitimate in API mode — the
+            # downstream will supply answers via ask_user_answers on
+            # the second call. Only error out in UI mode where there is
+            # no follow-up path.
+            if __event_call__ is None:
+                normalized_questions = []
+                # fall through to the questions_pending return below
+            else:
+                raise ValueError('ask_user requires a non-empty list of questions.')
 
         if len(questions) > 5:
             log.warning('ask_user: model sent %d questions, truncating to 5', len(questions))

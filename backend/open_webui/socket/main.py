@@ -1192,7 +1192,13 @@ async def get_event_call(request_info):
         # session_id is client-supplied; only the requesting user's own live session may be targeted.
         session = SESSION_POOL.get(session_id) if session_id is not None else None
         if session is None or session.get('id') != request_info.get('user_id'):
-            log.warning(f'Event caller: session {session_id} not owned by requesting user or disconnected')
+            # Session_id being None is EXPECTED in API mode (Bearer / API key
+            # callers have no WebSocket session). Only log the warning when
+            # a session_id was actually supplied but failed to match — the
+            # itomlab proxy and other downstream servers are now expected to
+            # hit this path silently on every API-mode ask_user call.
+            if session_id is not None:
+                log.warning(f'Event caller: session {session_id} not owned by requesting user or disconnected')
             return {'error': 'Client session disconnected.'}
 
         try:
