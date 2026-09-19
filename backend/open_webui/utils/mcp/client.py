@@ -18,6 +18,56 @@ from open_webui.env import (
 )
 
 
+def _install_mcp_cleanup_filter() -> None:
+    """Suppress the two known-benign MCP SDK cleanup races from the
+    asyncio loop's 'Task exception was never retrieved' warning. The SDK
+    spawns internal anyio task groups that race on cancellation during
+    aclose(); the resulting RuntimeError fires in fire-and-forget tasks
+    that nobody awaits, so the per-call except handler in
+    MCPClient.disconnect() / .connect() cannot catch them. Filter them at
+    the loop level so the user never sees the noise.
+
+    Both patterns are upstream MCP SDK bugs (anyio task-group cleanup
+    from a sibling task, generator-still-iterating on aclose). They are
+    non-fatal — the transport is torn down anyway — so suppression is
+    safe.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        # No running loop (called at import time before app start).
+        return
+
+    # Marker stored in a side-dict on the loop instance to avoid the
+    # type-checker complaint about setting arbitrary attributes on the
+    # abstract event loop class.
+    installed = getattr(loop, '__dict__', {}).get('_open_webui_mcp_cleanup_filter_installed', False)
+    if installed:
+        return
+
+    original = loop.get_exception_handler()
+
+    def _filter(loop, context):
+        exc = context.get('exception')
+        msg = str(exc) if exc else ''
+        if 'aclose(): asynchronous generator is already running' in msg or 'Attempted to exit cancel scope' in msg:
+            log.debug('Suppressed MCP SDK cleanup race: %s', msg)
+            return
+        return original(loop, context)
+
+    loop.set_exception_handler(_filter)
+    # Mark the loop (bypasses the abstract-class attribute type checker).
+    try:
+        loop.__dict__['_open_webui_mcp_cleanup_filter_installed'] = True
+    except Exception:
+        # Some loops disallow __dict__ mutation — give up silently.
+        pass
+
+
+# Install at import time. Safe to call multiple times — idempotent.
+_install_mcp_cleanup_filter()
+
+
 def _build_httpx_client(headers=None, timeout=None, auth=None, verify=True):
     """Create an httpx AsyncClient for MCP transport.
 
