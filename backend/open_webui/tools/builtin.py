@@ -536,7 +536,29 @@ async def ask_user(
         # whole chat. The human in the UI can still see and answer the
         # well-formed subset.
         if not isinstance(questions, list):
-            raise ValueError('ask_user arguments must be an object.')
+            # Coerce a single-question dict to a one-item list before
+            # bailing. Models occasionally emit the legacy single-object
+            # shape ({"question": ..., "options": [...]}) instead of the
+            # newer list-of-objects shape, and we want both to work.
+            if isinstance(questions, dict):
+                log.warning('ask_user: received a single object instead of a list, wrapping')
+                questions = [questions]
+            else:
+                # Return a structured error so the model sees a clear
+                # hint in the tool_result instead of an opaque crash.
+                # Returning through the except branch is also fine, but
+                # this message is specific to the type mismatch.
+                log.warning('ask_user: questions must be a list (got %s)', type(questions).__name__)
+                return JSONCodec.dumps(
+                    {
+                        'status': 'error',
+                        'error': (
+                            f'ask_user expects a JSON array of question objects, got {type(questions).__name__}. '
+                            'Resend with questions=[{...}, {...}] (a list, even for one question).'
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
         if len(questions) == 0:
             # Empty questions list is legitimate in API mode — the
             # downstream will supply answers via ask_user_answers on
