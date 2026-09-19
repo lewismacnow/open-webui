@@ -5109,6 +5109,20 @@ async def api_tool_stream_wrapper(response, ctx, events):
                 end_payload['embeds'] = tool_result_embeds
             if tool_result_citations:
                 end_payload['citations'] = tool_result_citations
+            # ask_user API-mode discriminator — downstream proxies (e.g.
+            # the itomlab chat.php two-phase routing) can match on
+            # ``tool_event.phase == 'ask_user_pending'`` directly
+            # without regex-scanning ``content``. Attached only when ask_user
+            # returns the questions_pending shape in API mode.
+            if tool_name == 'ask_user':
+                try:
+                    parsed_result = json.loads(normalized_result) if normalized_result else {}
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    parsed_result = {}
+                if isinstance(parsed_result, dict) and parsed_result.get('status') == 'questions_pending':
+                    end_payload['phase'] = 'ask_user_pending'
+                    end_payload['questions'] = parsed_result.get('questions') or []
+                    end_payload['missing_question_ids'] = parsed_result.get('missing_question_ids') or []
             collected_tool_events.append(end_payload)
             yield wrap_item(
                 json.dumps(
