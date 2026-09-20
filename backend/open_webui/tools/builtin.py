@@ -524,6 +524,12 @@ async def ask_user(
     Ask the user clarifying questions before continuing.
     Use this when the next step depends on user intent, preference, or a tradeoff that cannot be inferred safely.
 
+    IMPORTANT — this tool pauses the conversation and waits for the user's answers.
+    Call it as the LAST action of your turn, after any content the user should read first.
+    Do NOT write any content after calling it: the user cannot see anything you generate
+    after the call until they answer, so narration, previews, or summaries around the call
+    are wasted. Ask the questions, then stop and wait for the answers.
+
     :param questions: 1-5 question objects (was 1-3 in upstream; relaxed in this fork because models routinely emit multiple questions and rejecting them makes the chat stall), each with id, header, question, and **2-5 options** (was 2-3 in upstream; relaxed for the same reason). Each option needs label and description.
     :param allow_other: Whether users may enter a free-form answer instead of choosing one of the options
     :param timeout_ms: How long the browser should keep the prompt open before cancelling it
@@ -693,6 +699,17 @@ async def ask_user(
                     'questions': normalized_questions,
                     'allow_other': allow_other,
                     'timeout_ms': timeout_ms,
+                    # Explicit behavioural instruction for the model — many
+                    # chat templates "generate through" the tool call and
+                    # produce narration/preview content around the pending
+                    # panel. This field tells the model to halt instead.
+                    # Downstream consumers parsing this shape should treat
+                    # it as optional (additive field).
+                    'instruction': (
+                        'The user has not answered yet. Stop generating — do not re-emit ask_user '
+                        'and do not produce further content. End your turn now and wait for the '
+                        "user's answers to arrive in a function_call_output."
+                    ),
                 },
                 ensure_ascii=False,
             )

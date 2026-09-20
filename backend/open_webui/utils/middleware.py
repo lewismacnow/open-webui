@@ -2851,16 +2851,19 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     )
     available_skills = []
     view_skill_ids = []
-    # Fork: API Tools — relax the session_id requirement when the model has the
-    # api_tools capability AND the global config chat.api_tools.enabled is True.
-    # When unlocked via API capability (no session_id), builtin tools are restricted
-    # to an allowlist (time, knowledge, web_search) to avoid leaking personal data
-    # (chats, memory, channels, notes, automations, calendar) across shared API keys.
-    model_capabilities = model.get('info', {}).get('meta', {}).get('capabilities') or {}
+    # Fork: API Tools — relax the session_id requirement when the global config
+    # chat.api_tools.enabled is True. Models participate by DEFAULT (opt-out
+    # semantics): a model is excluded only when it explicitly sets
+    # info.meta.capabilities.api_tools = false. When unlocked via API
+    # capability (no session_id), builtin tools are restricted to an
+    # allowlist (time, knowledge, web_search) to avoid leaking personal data
+    # (chats, memory, channels, notes, automations, calendar) across shared
+    # API keys.
+    model_capabilities = model.get('info', {}).get('meta').get('capabilities') or {}
 
     api_tools_active = (
         not bool(metadata.get('session_id'))
-        and bool(model_capabilities.get('api_tools', False))
+        and model_capabilities.get('api_tools', True)
         and bool(model_capabilities.get('builtin_tools', True))
         and (await Config.get('chat.api_tools.enabled', False))
     )
@@ -4773,6 +4776,12 @@ async def api_tool_stream_wrapper(response, ctx, events):
         upstream_created = None
         upstream_model = None
         upstream_system_fingerprint = None
+        # Content the model generates AFTER the first tool_call fragment.
+        # Buffered (not yielded) so a pending-ask_user halt can discard the
+        # post-panel narration/preview noise; flushed in order on every
+        # other path. See the flush site below tool_calls_list.
+        saw_tool_fragment = False
+        trailing_content_chunks = []
 
         # Consume the upstream stream. Each yielded item is typically a
         # pre-formatted SSE string ("data: {...}\n\n"); bytes are decoded.
@@ -4834,6 +4843,7 @@ async def api_tool_stream_wrapper(response, ctx, events):
                 if tcs:
                     # Accumulate tool_call fragments — do NOT pass through.
                     # Args can span many chunks, keyed by tool_call.index.
+                    saw_tool_fragment = True
                     for tc in tcs:
                         idx = tc.get('index', 0)
                         if idx not in accumulated_tool_calls:
@@ -4850,6 +4860,12 @@ async def api_tool_stream_wrapper(response, ctx, events):
                             cur['function']['name'] = (cur['function']['name'] or '') + fn['name']
                         if fn.get('arguments'):
                             cur['function']['arguments'] = (cur['function']['arguments'] or '') + fn['arguments']
+                elif saw_tool_fragment:
+                    # Content generated after a tool_call fragment — buffer
+                    # instead of forwarding (see the per-stream declaration
+                    # above for the rationale). Flushed or discarded after
+                    # the stream ends, depending on the ask_user decision.
+                    trailing_content_chunks.append(chunk)
                 else:
                     # Content / reasoning chunk — pass through unchanged.
                     yield wrap_item(json.dumps(chunk))
@@ -4873,6 +4889,53 @@ async def api_tool_stream_wrapper(response, ctx, events):
                 )
             )
             break
+
+        # ---- ask_user staging -------------------------------------------
+        # The UI path stages ask_user via stage_ask_user_tool_calls and
+        # halts; this wrapper previously executed it as a generic tool,
+        # fed the questions_pending result back, and re-prompted the LLM —
+        # which made the model "generate through" the pending panel
+        # (narration + preview tables around the questions) or re-emit
+        # ask_user in a duplicate loop. Stage it here instead:
+        #   * answers supplied -> resolve via Pattern B (reuses the shared
+        #     duplicate guard + coverage validation from
+        #     stage_ask_user_tool_calls) and feed the resolved
+        #     function_call_output back so the model continues with the
+        #     user's answers.
+        #   * no answers -> execute generically below (which emits the
+        #     phase:'ask_user_pending' tool_event), then HALT the loop
+        #     instead of re-prompting.
+        ask_user_resolved_outputs: dict = {}
+        halt_for_ask_user_pending = False
+        ask_user_tcs = [tc for tc in tool_calls_list if tc.get('function', {}).get('name') == 'ask_user']
+        if ask_user_tcs:
+            _answers = metadata.get('ask_user_answers')
+            if isinstance(_answers, dict) and _answers:
+                stage_output: list = []
+                stage_ask_user_tool_calls(
+                    ask_user_tcs,
+                    stage_output,
+                    lambda _prefix: f'call_{uuid4().hex}',
+                    answers=_answers,
+                )
+                for item in stage_output:
+                    if item.get('type') == 'function_call_output':
+                        _call_id = item.get('call_id') or ''
+                        _text = ''.join(
+                            part.get('text', '') or '' for part in (item.get('output') or []) if isinstance(part, dict)
+                        )
+                        ask_user_resolved_outputs[_call_id] = _text
+            else:
+                halt_for_ask_user_pending = True
+
+        # Flush content the model generated after the first tool_call
+        # fragment. On the pending-ask_user halt path this is DISCARDED —
+        # it is post-panel narration/preview noise the user shouldn't see
+        # (the interactive panel supersedes it). Every other path flushes
+        # the buffered chunks in their original order.
+        if not halt_for_ask_user_pending:
+            for buffered_chunk in trailing_content_chunks:
+                yield wrap_item(json.dumps(buffered_chunk))
 
         # Hit the iteration cap before executing again.
         if MAX_ITER is not None and iterations >= MAX_ITER:
@@ -4992,6 +5055,50 @@ async def api_tool_stream_wrapper(response, ctx, events):
                     )
                 )
             )
+
+            # Pattern B ask_user resolution — when the caller supplied
+            # ask_user_answers, the resolved function_call_output was
+            # precomputed above via stage_ask_user_tool_calls. Emit the
+            # tool_call_end event with the resolved result and append the
+            # role:tool message WITHOUT executing the builtin (the builtin
+            # has no answers parameter — executing it would return
+            # questions_pending and stall the loop).
+            if tool_name == 'ask_user' and ask_user_resolved_outputs:
+                resolved_text = ask_user_resolved_outputs.get(tool_call_id)
+                if resolved_text is None and len(ask_user_resolved_outputs) == 1:
+                    # Fallback for id-less tool calls (stage minted a
+                    # synthetic call_id the per-tool loop can't see).
+                    resolved_text = next(iter(ask_user_resolved_outputs.values()))
+                if resolved_text is not None:
+                    resolved_end_payload = {
+                        'type': 'tool_call_end',
+                        'tool_call_id': tool_call_id,
+                        'tool_name': tool_name,
+                        'iteration': iterations,
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'result_summary': resolved_text[:500],
+                        'arguments': tool_function_params,
+                    }
+                    collected_tool_events.append(resolved_end_payload)
+                    yield wrap_item(
+                        json.dumps(
+                            make_tool_event(
+                                upstream_id,
+                                upstream_created,
+                                upstream_model,
+                                upstream_system_fingerprint,
+                                resolved_end_payload,
+                            )
+                        )
+                    )
+                    form_data.setdefault('messages', []).append(
+                        {
+                            'role': 'tool',
+                            'tool_call_id': tool_call_id,
+                            'content': resolved_text,
+                        }
+                    )
+                    continue
 
             # Dispatch.
             end_type = 'tool_call_end'
@@ -5144,6 +5251,26 @@ async def api_tool_stream_wrapper(response, ctx, events):
                     'content': result_str,
                 }
             )
+
+        # Pending ask_user halt — the questions reached the user via the
+        # phase:'ask_user_pending' tool_event emitted above; the model
+        # cannot continue until they answer. Halting here (stop chunk +
+        # terminal summary + [DONE]) instead of re-prompting the LLM,
+        # which would otherwise best-effort generate through the pending
+        # panel or re-emit ask_user in a duplicate loop.
+        if halt_for_ask_user_pending:
+            yield wrap_item(
+                json.dumps(
+                    base_chunk(
+                        upstream_id,
+                        upstream_created,
+                        upstream_model,
+                        upstream_system_fingerprint,
+                        finish_reason='stop',
+                    )
+                )
+            )
+            break
 
         # Request the next completion turn, mirroring Path A's call (L5054).
         try:

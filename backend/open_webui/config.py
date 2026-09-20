@@ -496,7 +496,7 @@ CODE_EXECUTION_JUPYTER_TIMEOUT = int(os.getenv('CODE_EXECUTION_JUPYTER_TIMEOUT',
 ENABLE_CODE_INTERPRETER = os.getenv('ENABLE_CODE_INTERPRETER', 'True').lower() == 'true'
 
 # Fork: API Tools — allow models to expose builtin/attached tools to API callers (no UI session).
-# Default OFF; per-model capabilities (meta.capabilities.api_tools / api_terminal) further gate this.
+# Default OFF; models participate by default when enabled (opt-out via meta.capabilities.api_tools = false).
 CHAT_API_TOOLS_ENABLED = os.getenv('CHAT_API_TOOLS_ENABLED', 'False').lower() == 'true'
 
 # Fork: API Tools policy — which tool categories are available to API callers.
