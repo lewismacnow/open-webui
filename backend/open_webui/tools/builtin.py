@@ -536,29 +536,49 @@ async def ask_user(
         # whole chat. The human in the UI can still see and answer the
         # well-formed subset.
         if not isinstance(questions, list):
+            # JSON-decode a stringified questions list. Some models
+            # double-encode the questions field as a JSON string instead
+            # of emitting the array directly — usually because the tool
+            # template stringifies nested JSON objects before passing them
+            # to the tool. The model then loops forever emitting the same
+            # wrong shape because the error message ("got str") isn't
+            # actionable — so we accept the encoded form instead of
+            # rejecting it.
+            if isinstance(questions, str):
+                try:
+                    decoded = JSONCodec.loads(questions)
+                    if isinstance(decoded, list):
+                        log.warning('ask_user: questions was a JSON-stringified list, decoded')
+                        questions = decoded
+                    elif isinstance(decoded, dict):
+                        log.warning('ask_user: questions was a JSON-stringified dict, decoded + wrapped')
+                        questions = [decoded]
+                    # else: parsed but not a list/dict — fall through to the error path below.
+                except (JSONCodec.JSONDecodeError, TypeError, ValueError):
+                    # Not valid JSON — fall through to the error path below.
+                    pass
             # Coerce a single-question dict to a one-item list before
             # bailing. Models occasionally emit the legacy single-object
             # shape ({"question": ..., "options": [...]}) instead of the
             # newer list-of-objects shape, and we want both to work.
-            if isinstance(questions, dict):
-                log.warning('ask_user: received a single object instead of a list, wrapping')
-                questions = [questions]
-            else:
-                # Return a structured error so the model sees a clear
-                # hint in the tool_result instead of an opaque crash.
-                # Returning through the except branch is also fine, but
-                # this message is specific to the type mismatch.
-                log.warning('ask_user: questions must be a list (got %s)', type(questions).__name__)
-                return JSONCodec.dumps(
-                    {
-                        'status': 'error',
-                        'error': (
-                            f'ask_user expects a JSON array of question objects, got {type(questions).__name__}. '
-                            'Resend with questions=[{...}, {...}] (a list, even for one question).'
-                        ),
-                    },
-                    ensure_ascii=False,
-                )
+            if not isinstance(questions, list):
+                if isinstance(questions, dict):
+                    log.warning('ask_user: received a single object instead of a list, wrapping')
+                    questions = [questions]
+                else:
+                    # Return a structured error so the model sees a clear
+                    # hint in the tool_result instead of an opaque crash.
+                    log.warning('ask_user: questions must be a list (got %s)', type(questions).__name__)
+                    return JSONCodec.dumps(
+                        {
+                            'status': 'error',
+                            'error': (
+                                f'ask_user expects a JSON array of question objects, got {type(questions).__name__}. '
+                                'Resend with questions=[{...}, {...}] (a list, even for one question).'
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
         if len(questions) == 0:
             # Empty questions list is legitimate in API mode — the
             # downstream will supply answers via ask_user_answers on
