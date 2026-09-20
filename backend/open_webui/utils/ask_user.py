@@ -163,6 +163,47 @@ def stage_ask_user_tool_calls(
             except (JSONCodec.JSONDecodeError, TypeError, ValueError) as exc:
                 error = f'Error: {exc}'
 
+        # Duplicate-ask_user guard — some chat templates (notably models with
+        # native function-calling that emit multiple tool_calls per chunk)
+        # keep re-emitting ask_user with the exact same questions across
+        # iterations even after the resolver has already staged or resolved
+        # the prior call. Without this guard the wrapper sees each re-emission
+        # as a fresh pending stage and the model loops forever emitting the
+        # same questions while chat.php persists N byte-for-byte-identical
+        # tool_calls rows.
+        #
+        # Match on normalised arguments (the same normalisation that produces
+        # the function_call.arguments the resolver already wrote into the
+        # output) so trivial whitespace / key-ordering differences in the
+        # raw model output don't defeat the guard. The match is also
+        # strict-on-status: if the prior call was rejected/failed the model
+        # is allowed to retry; if it was completed the model is told the
+        # questions are already answered; if it was pending (legacy UI flow)
+        # the model is told to wait.
+        if not error:
+            for existing in output:
+                if (
+                    existing.get('type') == 'function_call'
+                    and existing.get('name') == ASK_USER_NAME
+                    and existing.get('arguments') == arguments
+                ):
+                    existing_status = existing.get('status')
+                    if existing_status == 'completed':
+                        error = (
+                            'ask_user was already called with these questions and the '
+                            "user's answers have been supplied. Do not re-emit ask_user "
+                            'with the same questions. Continue with the resolved answers '
+                            'from the prior function_call_output and generate your final response.'
+                        )
+                    elif existing_status == 'pending':
+                        error = (
+                            'ask_user was already called with these questions and the '
+                            "response is pending the user's input. Do not re-emit ask_user "
+                            'with the same questions. Wait for the user to answer.'
+                        )
+                    # status == 'rejected' / 'failed' — fall through, allow retry
+                    break
+
         item = {
             'type': 'function_call',
             'id': call_id or make_output_id('fc'),
