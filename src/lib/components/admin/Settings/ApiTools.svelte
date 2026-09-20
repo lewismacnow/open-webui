@@ -82,7 +82,9 @@
 	}
 
 	function modelHasApiTools(model: any): boolean {
-		return !!model?.info?.meta?.capabilities?.api_tools;
+		// Opt-out semantics: a model participates unless it explicitly sets
+		// capabilities.api_tools = false. Unset/undefined/true all mean "on".
+		return model?.info?.meta?.capabilities?.api_tools !== false;
 	}
 
 	async function toggleCategory(id: string, value: boolean) {
@@ -115,6 +117,9 @@
 		try {
 			const meta = JSON.parse(JSON.stringify(model?.info?.meta || {}));
 			const capabilities = JSON.parse(JSON.stringify(meta.capabilities || {}));
+			// Opt-out semantics: switching OFF writes an explicit false;
+			// switching ON writes an explicit true (behaves identically to
+			// unset, but records the admin's deliberate choice).
 			capabilities.api_tools = !wasOn;
 			// api_tools implicitly requires builtin_tools to be on; if the model
 			// has it explicitly disabled, don't silently override — let the admin
@@ -265,10 +270,10 @@
 			</AdminSettingField>
 		</AdminSettingSection>
 
-		<AdminSettingSection title={$i18n.t('Per-Model API Tools Capability')}>
+		<AdminSettingSection title={$i18n.t('Per-Model API Tools Opt-Out')}>
 			<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
 				{$i18n.t(
-					'Each model must explicitly opt in to API Tools before the wrapper will execute tools for it. Toggle a model on to allow it to receive and execute builtin tools server-side when called via the API. The model also needs the builtin_tools capability, which is enabled by default. The global master switch above must be on for these per-model toggles to take effect.'
+					'When the master switch above is on, every model participates in API Tools by default — no per-model setup required. Use the toggles below to exclude specific models (they will never execute tools for API callers). Models also need the builtin_tools capability, which is enabled by default.'
 				)}
 			</p>
 
@@ -297,13 +302,13 @@
 								</div>
 								<p class="text-xs text-gray-400 truncate">
 									{model.id}
-									{#if !modelHasApiTools(model)}
-										<span class="ml-2 text-amber-500">
-											· {$i18n.t('API Tools: off')}
-										</span>
-									{:else}
+									{#if modelHasApiTools(model)}
 										<span class="ml-2 text-green-500">
 											· {$i18n.t('API Tools: on')}
+										</span>
+									{:else}
+										<span class="ml-2 text-amber-500">
+											· {$i18n.t('API Tools: off (opted out)')}
 										</span>
 									{/if}
 								</p>

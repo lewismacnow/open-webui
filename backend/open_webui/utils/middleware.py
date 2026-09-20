@@ -2851,16 +2851,19 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     )
     available_skills = []
     view_skill_ids = []
-    # Fork: API Tools — relax the session_id requirement when the model has the
-    # api_tools capability AND the global config chat.api_tools.enabled is True.
-    # When unlocked via API capability (no session_id), builtin tools are restricted
-    # to an allowlist (time, knowledge, web_search) to avoid leaking personal data
-    # (chats, memory, channels, notes, automations, calendar) across shared API keys.
-    model_capabilities = model.get('info', {}).get('meta', {}).get('capabilities') or {}
+    # Fork: API Tools — relax the session_id requirement when the global config
+    # chat.api_tools.enabled is True. Models participate by DEFAULT (opt-out
+    # semantics): a model is excluded only when it explicitly sets
+    # info.meta.capabilities.api_tools = false. When unlocked via API
+    # capability (no session_id), builtin tools are restricted to an
+    # allowlist (time, knowledge, web_search) to avoid leaking personal data
+    # (chats, memory, channels, notes, automations, calendar) across shared
+    # API keys.
+    model_capabilities = model.get('info', {}).get('meta').get('capabilities') or {}
 
     api_tools_active = (
         not bool(metadata.get('session_id'))
-        and bool(model_capabilities.get('api_tools', False))
+        and model_capabilities.get('api_tools', True)
         and bool(model_capabilities.get('builtin_tools', True))
         and (await Config.get('chat.api_tools.enabled', False))
     )

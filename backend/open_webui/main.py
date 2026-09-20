@@ -1343,9 +1343,12 @@ async def chat_completion(
     1. **Global config `chat.api_tools.enabled`** is `True`.
        Admins can set this via the DB config or the `CHAT_API_TOOLS_ENABLED=True`
        environment variable. **Default: `False`.**
-    2. **The model has the `api_tools` capability** — set
-       `info.meta.capabilities.api_tools: true` on the model (e.g. via the
-       model editor at `/workspace/models/edit`). **Default: `False`.**
+    2. **The model has not opted out of the `api_tools` capability.**
+       Models participate by default when the global switch is on — a model
+       is excluded only by explicitly setting
+       `info.meta.capabilities.api_tools: false` on it (e.g. via the model
+       editor at `/workspace/models/edit` or the per-model opt-out list in
+       Admin Settings → API Tools). **Default: enabled (opt-out).**
     3. **`function_calling != 'legacy'`** — set on the model params or in the
        request `params.function_calling` field. Anything other than `'legacy'`
        qualifies; the default is `'native'`.
@@ -1648,8 +1651,8 @@ async def chat_completion(
 
     ### Examples
 
-    Both examples assume `my-web-enabled-model` has
-    `info.meta.capabilities.api_tools: true`, `function_calling` is not
+    Both examples assume `my-web-enabled-model` has not opted out
+    (`info.meta.capabilities.api_tools` unset or `true`), `function_calling` is not
     `'legacy'`, and the admin has enabled `chat.api_tools.enabled`.
 
     #### Example A — Streaming (`stream: true`)
