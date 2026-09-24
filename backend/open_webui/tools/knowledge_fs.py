@@ -154,6 +154,42 @@ def validate_regex_quantifiers(pattern: str) -> str | None:
     return None
 
 
+# Separator tokens inside a "simple" regex branch: wildcards (.*, .+, .?),
+# single-dot wildcards, escape classes (\d \w \s ...), and bracket classes.
+# Everything else in a simple branch is a required literal. Note: every
+# alternative consumes at least one character — no empty-match risk in split.
+_BRANCH_SEPARATOR_RE = re.compile(r'\\[dDwWsSbBn]|\.\*|\.\+|\.\?|\[\^?[^\]]*\]|\.')
+# Regex specials that make extracted literals optional (groups, quantifiers,
+# anchors, escapes beyond the class set) — a branch containing any of these
+# outside separator form can't be safely prefitered.
+_BRANCH_SPECIALS_RE = re.compile(r'[\\()\[\].*+?{}^$|]')
+
+
+def _branch_literals(branch: str, lower: bool) -> Optional[list[str]]:
+    """Required literal substrings for one alternation branch, or None when
+    the branch uses constructs (groups, optional quantifiers) that would make
+    a literal prefilter unsound.
+
+    A line can only match a "simple" branch (literals separated by wildcards
+    and escape/bracket classes) if every extracted literal appears on the
+    line — so ``all(lit in line)`` is a safe necessary condition, letting the
+    matcher skip the (slow) regex engine for the vast majority of lines.
+    This is the classic grep literal-prefilter trick; without it,
+    multi-branch alternations like "write.*CMDB|destination|CI.*write to"
+    burn the whole match budget in the ``regex`` module across large KBs.
+    """
+    pieces = _BRANCH_SEPARATOR_RE.split(branch)
+    for piece in pieces:
+        if _BRANCH_SPECIALS_RE.search(piece):
+            return None
+    literals = []
+    for piece in pieces:
+        piece = piece.strip()
+        if len(piece) >= 2:
+            literals.append(piece.lower() if lower else piece)
+    return literals or None
+
+
 def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool = False) -> tuple:
     """Build a matcher function. Returns (match_fn, error_str_or_None)."""
     if not use_regex and is_regex_pattern(pattern):
@@ -172,7 +208,24 @@ def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool 
 
         budget = _active_budget.get() or MatchBudget()
 
+        # Literal prefilter — only when EVERY alternation branch yields
+        # required literals. Any unsound branch disables the prefilter
+        # entirely (fall back to regex-only, the previous behaviour).
+        prefilter_literals: Optional[list[list[str]]] = None
+        branches = normalized.split('|')
+        if branches:
+            per_branch = [_branch_literals(b, case_insensitive) for b in branches]
+            if all(per_branch):
+                # all() truthy ⇒ every branch yielded a non-empty literal list
+                prefilter_literals = [lits for lits in per_branch if lits]
+
         def matches(line: str) -> bool:
+            if prefilter_literals is not None:
+                target = line.lower() if case_insensitive else line
+                if not any(all(lit in target for lit in lits) for lits in prefilter_literals):
+                    # No branch's required literals are present — the regex
+                    # cannot match. Skip the engine; costs no budget time.
+                    return False
             started = time.monotonic()
             try:
                 # A negative timeout disables it, so an exhausted budget must not reach search().
@@ -180,7 +233,11 @@ def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool 
                     raise TimeoutError
                 return bool(compiled.search(line, timeout=budget.remaining))
             except TimeoutError:
-                raise MatchBudgetExceeded(f'Search exceeded {_match_budget_seconds():g}s, narrow the pattern') from None
+                raise MatchBudgetExceeded(
+                    f'Search exceeded {_match_budget_seconds():g}s — narrow the search: '
+                    'split alternations into separate calls, use case_insensitive=true '
+                    'instead of "Foo|foo" variants, or scope to one file with file_id'
+                ) from None
             finally:
                 budget.remaining -= time.monotonic() - started
 
