@@ -67,6 +67,7 @@ from open_webui.tools.builtin import (
     list_chat_files,
     list_knowledge,
     list_knowledge_bases,
+    list_knowledge_files,
     list_memories,
     list_memory_paths,
     notify,
@@ -633,7 +634,13 @@ async def get_builtin_tools(
                 builtin_functions.append(search_knowledge_bases)
         elif model_knowledge:
             builtin_functions.extend(
-                [list_knowledge, search_knowledge_files, grep_knowledge_files, query_knowledge_files]
+                [
+                    list_knowledge,
+                    list_knowledge_files,
+                    search_knowledge_files,
+                    grep_knowledge_files,
+                    query_knowledge_files,
+                ]
             )
 
             knowledge_types = {item.get('type') for item in model_knowledge}
@@ -645,6 +652,7 @@ async def get_builtin_tools(
             builtin_functions.extend(
                 [
                     list_knowledge_bases,
+                    list_knowledge_files,
                     search_knowledge_bases,
                     query_knowledge_bases,
                     grep_knowledge_files,

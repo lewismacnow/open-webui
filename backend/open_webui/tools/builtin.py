@@ -2528,6 +2528,15 @@ def _grep_file_models(
     output = '\n'.join(results)
     if total_matches > KNOWLEDGE_GREP_MAX_MATCHES:
         output += f'\n[{KNOWLEDGE_GREP_MAX_MATCHES} of {total_matches} matches shown — use file_id to narrow]'
+    # Teach the follow-up: models repeatedly reach for a nonexistent
+    # read_file/path-style tool after grepping. Point at view_file with
+    # the leading file ID from a result line instead.
+    first_file_id = results[0].split('  ', 1)[0].strip()
+    if first_file_id:
+        output += (
+            f'\n[read context around a match: view_file(file_id="{first_file_id}", '
+            'start_line=<line-10>, end_line=<line+10>)]'
+        )
     return output
 
 
@@ -2576,6 +2585,7 @@ async def grep_chat_files(
     file_id: Optional[str] = None,
     case_insensitive: bool = False,
     count_only: bool = False,
+    path: Optional[str] = None,
     __request__: Request = None,
     __user__: dict = None,
     __files__: list[dict] = None,
@@ -2588,6 +2598,7 @@ async def grep_chat_files(
     :param file_id: Optional attached file ID to search within a single file
     :param case_insensitive: If true, ignore case when matching
     :param count_only: If true, return only match counts per file
+    :param path: Alias for file_id
     :return: Matching lines with file IDs, filenames, and line numbers
     """
     if __request__ is None:
@@ -2599,6 +2610,8 @@ async def grep_chat_files(
     if not pattern or not pattern.strip():
         return JSONCodec.dumps({'error': 'Pattern is required'})
 
+    if not file_id and path:
+        file_id = path
     if isinstance(file_id, str) and file_id.lower() in ('none', 'null', ''):
         file_id = None
 
@@ -2750,6 +2763,7 @@ async def grep_knowledge_files(
     file_id: Optional[str] = None,
     case_insensitive: bool = False,
     count_only: bool = False,
+    path: Optional[str] = None,
     __request__: Request = None,
     __user__: dict = None,
     __model_knowledge__: Optional[list[dict]] = None,
@@ -2759,12 +2773,15 @@ async def grep_knowledge_files(
     Unlike query_knowledge_files (semantic/vector search), this performs exact string matching.
     Automatically detects regex patterns (e.g. "error|warn", "version \\d+").
     Helpful for literal strings, identifiers, error messages, or regex-style searches.
+    IMPORTANT: prefer case_insensitive=true over "Foo|foo" alternations, and keep
+    alternations short — complex regexes can exceed the time budget.
 
     :param pattern: The text pattern to search for (regex auto-detected)
-    :param file_id: Optional file ID to search within a single file only
+    :param file_id: Optional file ID to search within a single file only (the ID shown at the start of each result line)
     :param case_insensitive: If true, ignore case when matching (default: false)
     :param count_only: If true, return only match counts per file (default: false)
-    :return: Matching lines with file IDs, filenames, and line numbers
+    :param path: Alias for file_id (a grep result line's leading file ID)
+    :return: Matching lines with file IDs, filenames, and line numbers. Read the surrounding context of a match with view_file(file_id=<id>, start_line=<n-10>, end_line=<n+10>).
     """
     if __request__ is None:
         return JSONCodec.dumps({'error': 'Request context not available'})
@@ -2774,6 +2791,12 @@ async def grep_knowledge_files(
 
     if not pattern or not pattern.strip():
         return JSONCodec.dumps({'error': 'Pattern is required'})
+
+    # Accept the common LLM-emitted alias and normalise nullish strings.
+    if not file_id and path:
+        file_id = path
+    if isinstance(file_id, str) and file_id.lower() in ('none', 'null', ''):
+        file_id = None
 
     try:
         from open_webui.models.files import Files
@@ -2872,12 +2895,15 @@ async def view_file(
     line_numbers: bool = False,
     start_line: Optional[int] = None,
     end_line: Optional[int] = None,
+    path: Optional[str] = None,
     __request__: Request = None,
     __user__: dict = None,
     __model_knowledge__: Optional[list[dict]] = None,
 ) -> str:
     """
     Get the content of a file by its ID. Supports pagination for large files.
+    This is the tool for reading a file that grep_knowledge_files matched
+    (use the file ID at the start of the grep result line).
 
     :param file_id: The ID of the file to retrieve
     :param offset: Character offset to start reading from (default: 0)
@@ -2885,6 +2911,7 @@ async def view_file(
     :param line_numbers: If true, prefix each line with its 1-indexed line number
     :param start_line: Optional 1-indexed start line (overrides offset/max_chars when set)
     :param end_line: Optional 1-indexed end line (inclusive)
+    :param path: Alias for file_id
     :return: JSON with the file's id, filename, content, and pagination metadata if truncated
     """
     if __request__ is None:
@@ -2892,6 +2919,14 @@ async def view_file(
 
     if not __user__:
         return JSONCodec.dumps({'error': 'User context not available'})
+
+    # Accept the common LLM-emitted alias and normalise nullish strings.
+    if not file_id and path:
+        file_id = path
+    if isinstance(file_id, str) and file_id.lower() in ('none', 'null', ''):
+        file_id = None
+    if not file_id:
+        return JSONCodec.dumps({'error': 'file_id is required (use the file ID from a grep result line)'})
 
     # Coerce parameters from LLM tool calls (may come as strings)
     if isinstance(offset, str):
@@ -2985,11 +3020,13 @@ async def view_knowledge_file(
     line_numbers: bool = False,
     start_line: Optional[int] = None,
     end_line: Optional[int] = None,
+    path: Optional[str] = None,
     __request__: Request = None,
     __user__: dict = None,
 ) -> str:
     """
     Get the content of a file from a knowledge base. Supports pagination for large files.
+    Use the file ID at the start of a grep_knowledge_files result line.
 
     :param file_id: The ID of the file to retrieve
     :param offset: Character offset to start reading from (default: 0)
@@ -2997,6 +3034,7 @@ async def view_knowledge_file(
     :param line_numbers: If true, prefix each line with its 1-indexed line number
     :param start_line: Optional 1-indexed start line (overrides offset/max_chars when set)
     :param end_line: Optional 1-indexed end line (inclusive)
+    :param path: Alias for file_id
     :return: JSON with the file's id, filename, content, and pagination metadata if truncated
     """
     if __request__ is None:
@@ -3004,6 +3042,14 @@ async def view_knowledge_file(
 
     if not __user__:
         return JSONCodec.dumps({'error': 'User context not available'})
+
+    # Accept the common LLM-emitted alias and normalise nullish strings.
+    if not file_id and path:
+        file_id = path
+    if isinstance(file_id, str) and file_id.lower() in ('none', 'null', ''):
+        file_id = None
+    if not file_id:
+        return JSONCodec.dumps({'error': 'file_id is required (use the file ID from a grep result line)'})
 
     # Coerce parameters from LLM tool calls (may come as strings)
     if isinstance(offset, str):
@@ -3263,6 +3309,104 @@ async def list_knowledge(
         )
     except Exception as e:
         log.exception(f'list_knowledge error: {e}')
+        return JSONCodec.dumps({'error': str(e)})
+
+
+async def list_knowledge_files(
+    knowledge_id: str,
+    skip: int = 0,
+    count: int = 50,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    List the files inside a knowledge base, with their file IDs and names.
+    Use this after list_knowledge to enumerate a specific KB's files, then
+    grep_knowledge_files / view_file with the file IDs it returns.
+
+    :param knowledge_id: The knowledge base ID (from list_knowledge / list_knowledge_bases)
+    :param skip: Number of files to skip for pagination (default: 0)
+    :param count: Maximum files per page (default: 50, max: 200)
+    :return: JSON with the knowledge base id, name, and its files (id, filename)
+    """
+    if __request__ is None:
+        return JSONCodec.dumps({'error': 'Request context not available'})
+
+    if not __user__:
+        return JSONCodec.dumps({'error': 'User context not available'})
+
+    if isinstance(skip, str):
+        try:
+            skip = int(skip)
+        except ValueError:
+            skip = 0
+    if isinstance(count, str):
+        try:
+            count = int(count)
+        except ValueError:
+            count = 50
+    if isinstance(knowledge_id, str) and knowledge_id.lower() in ('none', 'null', ''):
+        knowledge_id = None
+    if not knowledge_id:
+        return JSONCodec.dumps({'error': 'knowledge_id is required (get one from list_knowledge)'})
+
+    count = min(count, 200)
+
+    try:
+        from open_webui.models.access_grants import AccessGrants
+        from open_webui.models.files import Files
+        from open_webui.models.knowledge import Knowledges
+
+        user_id = __user__.get('id')
+        user_role = __user__.get('role', 'user')
+        user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id)]
+
+        knowledge = await Knowledges.get_knowledge_by_id(knowledge_id)
+        if not knowledge:
+            return JSONCodec.dumps({'error': 'Knowledge base not found'})
+
+        if not (
+            user_role == 'admin'
+            or knowledge.user_id == user_id
+            or await AccessGrants.has_access(
+                user_id=user_id,
+                resource_type='knowledge',
+                resource_id=knowledge.id,
+                permission='read',
+                user_group_ids=set(user_group_ids),
+            )
+        ):
+            return JSONCodec.dumps({'error': 'Knowledge base not found'})
+
+        kb_files = await Knowledges.get_files_by_id(knowledge_id) or []
+        total = len(kb_files)
+        page = kb_files[skip : skip + count]
+
+        files = []
+        for f in page:
+            meta = f.meta or {}
+            files.append(
+                {
+                    'id': f.id,
+                    'filename': f.filename,
+                    'content_type': meta.get('content_type'),
+                    'size': meta.get('size'),
+                }
+            )
+
+        return JSONCodec.dumps(
+            {
+                'knowledge_id': knowledge.id,
+                'name': knowledge.name,
+                'total_files': total,
+                'skip': skip,
+                'count': len(files),
+                'files': files,
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        log.exception(f'list_knowledge_files error: {e}')
         return JSONCodec.dumps({'error': str(e)})
 
 
