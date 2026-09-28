@@ -2,6 +2,7 @@
 	import { onMount, getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import {
+		pruneFailedFiles,
 		getGithubCredentials,
 		createGithubCredential,
 		deleteGithubCredential,
@@ -128,6 +129,23 @@
 		}
 	}
 
+	async function cleanFailed(source: GithubSyncSource) {
+		if (
+			!confirm(
+				$i18n.t('Remove all FAILED files (empty or unembeddable content) from this knowledge base?')
+			)
+		)
+			return;
+		try {
+			const res = await pruneFailedFiles(localStorage.token, source.knowledge_id);
+			toast.success($i18n.t('Removed {n} failed file(s)', { n: res.removed }));
+			if (res.details?.length) console.info('prune details:', res.details);
+			await refresh();
+		} catch (e) {
+			toast.error(String(e));
+		}
+	}
+
 	async function syncNow(source: GithubSyncSource) {
 		toast.info($i18n.t('Syncing {repo}…', { repo: source.repo_full_name }));
 		try {
@@ -183,9 +201,7 @@
 			const kbResponse = (await getKnowledgeBases(localStorage.token)) ?? [];
 			// /api/v1/knowledge/ returns a paginated envelope {items, total};
 			// fall back to a bare array for forward-compat.
-			knowledgeBases = Array.isArray(kbResponse)
-				? kbResponse
-				: (kbResponse?.items ?? []);
+			knowledgeBases = Array.isArray(kbResponse) ? kbResponse : (kbResponse?.items ?? []);
 		} catch (e) {
 			console.error(e);
 		}
@@ -324,6 +340,14 @@
 								on:click={() => syncNow(source)}
 							>
 								{$i18n.t('Sync now')}
+							</button>
+							<button
+								type="button"
+								title={$i18n.t('Remove failed files (empty/unembeddable) from this knowledge base')}
+								class="text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-gray-850 hover:bg-amber-50 dark:hover:bg-amber-950/20"
+								on:click={() => cleanFailed(source)}
+							>
+								{$i18n.t('Clean failed')}
 							</button>
 							<button
 								type="button"
