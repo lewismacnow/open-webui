@@ -125,6 +125,14 @@ export const deleteGithubSyncSource = async (
 ): Promise<{ status: boolean; files_removed: number }> =>
 	req(`${sourcesUrl}/${id}?remove_files=${removeFiles}`, token, { method: 'DELETE' });
 
+export const pruneFailedFiles = async (
+	token: string,
+	knowledgeId: string
+): Promise<{ status: boolean; removed: number; details: string[] }> =>
+	req(`${WEBUI_API_BASE_URL}/github-sync/knowledge/${knowledgeId}/prune-failed`, token, {
+		method: 'POST'
+	});
+
 export const syncGithubSyncSourceNow = async (
 	token: string,
 	id: string
