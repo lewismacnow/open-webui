@@ -1290,6 +1290,9 @@ class ApiToolsConfigForm(BaseModel):
     enabled: bool = False
     allowed_categories: list[str] = ['time', 'knowledge', 'web_search']
     allow_tool_servers: bool = False
+    # Models excluded from API Tools (admin-panel per-model opt-out).
+    # Works for base/connection models too — no workspace DB row needed.
+    opt_out_models: list[str] = []
 
 
 @router.get('/api-tools', response_model=ApiToolsConfigForm)
@@ -1299,6 +1302,7 @@ async def get_api_tools_config(request: Request, user=Depends(get_admin_user)):
         'allowed_categories': (await Config.get('chat.api_tools.allowed_categories'))
         or ['time', 'knowledge', 'web_search'],
         'allow_tool_servers': bool(await Config.get('chat.api_tools.allow_tool_servers', False)),
+        'opt_out_models': (await Config.get('chat.api_tools.opt_out_models')) or [],
     }
 
 
@@ -1309,10 +1313,12 @@ async def set_api_tools_config(request: Request, form_data: ApiToolsConfigForm, 
             'chat.api_tools.enabled': form_data.enabled,
             'chat.api_tools.allowed_categories': form_data.allowed_categories,
             'chat.api_tools.allow_tool_servers': form_data.allow_tool_servers,
+            'chat.api_tools.opt_out_models': form_data.opt_out_models,
         }
     )
     return {
         'enabled': form_data.enabled,
         'allowed_categories': form_data.allowed_categories,
         'allow_tool_servers': form_data.allow_tool_servers,
+        'opt_out_models': form_data.opt_out_models,
     }

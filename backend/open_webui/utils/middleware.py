@@ -2893,17 +2893,23 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     view_skill_ids = []
     # Fork: API Tools — relax the session_id requirement when the global config
     # chat.api_tools.enabled is True. Models participate by DEFAULT (opt-out
-    # semantics): a model is excluded only when it explicitly sets
-    # info.meta.capabilities.api_tools = false. When unlocked via API
-    # capability (no session_id), builtin tools are restricted to an
-    # allowlist (time, knowledge, web_search) to avoid leaking personal data
-    # (chats, memory, channels, notes, automations, calendar) across shared
-    # API keys.
-    model_capabilities = model.get('info', {}).get('meta').get('capabilities') or {}
+    # semantics): a model is excluded when it explicitly sets
+    # info.meta.capabilities.api_tools = false OR appears in the admin's
+    # chat.api_tools.opt_out_models list (the admin-panel per-model toggles —
+    # works for base/connection models that have no workspace DB row).
+    # When unlocked via API capability (no session_id), builtin tools are
+    # restricted to an allowlist (time, knowledge, web_search) to avoid
+    # leaking personal data (chats, memory, channels, notes, automations,
+    # calendar) across shared API keys.
+    model_capabilities = (model.get('info', {}) or {}).get('meta', {}).get('capabilities') or {}
+
+    _opt_out_models = await Config.get('chat.api_tools.opt_out_models', [])
+    _model_id = model.get('id') if isinstance(model, dict) else model
 
     api_tools_active = (
         not bool(metadata.get('session_id'))
         and model_capabilities.get('api_tools', True)
+        and (_model_id not in (_opt_out_models or []))
         and bool(model_capabilities.get('builtin_tools', True))
         and (await Config.get('chat.api_tools.enabled', False))
     )
@@ -2984,17 +2990,22 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             if model_tool_ids:
                 tool_ids = list(model_tool_ids)
 
-        # Fork: filter External Tool Servers (MCP) based on admin policy.
-        # When allow_tool_servers is False, strip MCP tool IDs from the
-        # auto-resolved set — they require explicit API permission.
-        _allow_tool_servers = await Config.get('chat.api_tools.allow_tool_servers', False)
-        if not _allow_tool_servers and tool_ids:
-            tool_ids = [tid for tid in tool_ids if not tid.startswith('server:mcp:')]
-
         if bool(model_capabilities.get('api_terminal', False)) and not terminal_id:
             model_terminal_id = (model.get('info', {}).get('meta', {}) or {}).get('terminalId')
             if model_terminal_id:
                 terminal_id = model_terminal_id
+
+    # Fork: filter External Tool Servers (MCP) based on admin policy — applied
+    # to EVERY stateless API request (no session_id), not just the
+    # auto-resolved set. Covers BOTH sources of tool_ids: model meta
+    # toolIds AND caller-supplied body tool_ids. Without this, a model
+    # with an MCP server attached (for UI use) drags every stateless API
+    # call through a synchronous MCP handshake during payload processing —
+    # the source of mid-initialize cancellations surfacing as ASGI 500s.
+    if not bool(metadata.get('session_id')):
+        _allow_tool_servers = await Config.get('chat.api_tools.allow_tool_servers', False)
+        if not _allow_tool_servers and tool_ids:
+            tool_ids = [tid for tid in tool_ids if not tid.startswith('server:mcp:')]
 
     # Upstream v0.11.4: also load skills for builtin-tools callers, not just
     # explicitly-requested skill_ids.

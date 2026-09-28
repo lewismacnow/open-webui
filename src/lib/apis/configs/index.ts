@@ -1332,6 +1332,7 @@ export const getApiToolsConfig = async (
 	enabled: boolean;
 	allowed_categories: string[];
 	allow_tool_servers: boolean;
+	opt_out_models: string[];
 }> => {
 	let error = null;
 	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/api-tools`, {
@@ -1358,14 +1359,25 @@ export const getApiToolsConfig = async (
 	return {
 		enabled: res?.enabled ?? false,
 		allowed_categories: res?.allowed_categories ?? ['time', 'knowledge', 'web_search'],
-		allow_tool_servers: res?.allow_tool_servers ?? false
+		allow_tool_servers: res?.allow_tool_servers ?? false,
+		opt_out_models: res?.opt_out_models ?? []
 	};
 };
 
 export const setApiToolsConfig = async (
 	token: string,
-	config: { enabled: boolean; allowed_categories: string[]; allow_tool_servers: boolean }
-): Promise<{ enabled: boolean; allowed_categories: string[]; allow_tool_servers: boolean }> => {
+	config: {
+		enabled: boolean;
+		allowed_categories: string[];
+		allow_tool_servers: boolean;
+		opt_out_models?: string[];
+	}
+): Promise<{
+		enabled: boolean;
+		allowed_categories: string[];
+		allow_tool_servers: boolean;
+		opt_out_models: string[];
+	}> => {
 	let error = null;
 	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/api-tools`, {
 		method: 'POST',
@@ -1376,7 +1388,8 @@ export const setApiToolsConfig = async (
 		body: JSON.stringify({
 			enabled: config.enabled,
 			allowed_categories: config.allowed_categories,
-			allow_tool_servers: config.allow_tool_servers
+			allow_tool_servers: config.allow_tool_servers,
+			opt_out_models: config.opt_out_models ?? []
 		})
 	})
 		.then(async (res) => {
@@ -1396,7 +1409,8 @@ export const setApiToolsConfig = async (
 	return {
 		enabled: res?.enabled ?? config.enabled,
 		allowed_categories: res?.allowed_categories ?? config.allowed_categories,
-		allow_tool_servers: res?.allow_tool_servers ?? config.allow_tool_servers
+		allow_tool_servers: res?.allow_tool_servers ?? config.allow_tool_servers,
+		opt_out_models: res?.opt_out_models ?? config.opt_out_models ?? []
 	};
 };
 
