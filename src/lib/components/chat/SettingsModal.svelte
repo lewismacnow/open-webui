@@ -303,12 +303,16 @@
 		},
 		{
 			id: 'admin:wrapper-model-providers',
+			titleKey: 'admin.wrapper-model-providers',
 			title: 'Wrapper Model Providers',
+			searchPrefixes: ['admin.wrapper-model-providers.'],
 			keywords: ['failover', 'provider', 'chain', 'global', 'concurrency']
 		},
 		{
 			id: 'admin:failover-queue',
+			titleKey: 'admin.failover-queue',
 			title: 'Failover Capacity Queue',
+			searchPrefixes: ['admin.failover-queue.'],
 			keywords: [
 				'failover',
 				'queue',
@@ -373,7 +377,9 @@
 		},
 		{
 			id: 'admin:api-tools',
+			titleKey: 'admin.api-tools',
 			title: 'API Tools',
+			searchPrefixes: ['admin.api-tools.'],
 			keywords: [
 				'api tools',
 				'tool servers',
@@ -388,7 +394,9 @@
 		},
 		{
 			id: 'admin:service-keys',
+			titleKey: 'admin.service-keys',
 			title: 'Service API Keys',
+			searchPrefixes: ['admin.service-keys.'],
 			keywords: [
 				'service',
 				'api',
@@ -405,12 +413,16 @@
 		},
 		{
 			id: 'admin:tools-config',
+			titleKey: 'admin.tools-config',
 			title: 'Tools Config',
+			searchPrefixes: ['admin.tools-config.'],
 			keywords: ['tools', 'grep', 'regex', 'budget', 'timeout', 'ranking', 'knowledge files']
 		},
 		{
 			id: 'admin:token-caps',
+			titleKey: 'admin.token-caps',
 			title: 'Token Caps',
+			searchPrefixes: ['admin.token-caps.'],
 			keywords: [
 				'token',
 				'cap',
