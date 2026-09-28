@@ -33,11 +33,14 @@ import uuid
 import re
 import time
 from fnmatch import fnmatch
+from types import SimpleNamespace
 from typing import Any, Optional
 import httpx
 
+from open_webui.internal.db import get_async_db_context
 from open_webui.models.files import Files, FileForm
 from open_webui.models.knowledge import Knowledges
+from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.models.users import Users
 from open_webui.models.knowledge_github_source import KnowledgeGithubSourceModel
 from open_webui.storage.provider import Storage
@@ -215,6 +218,20 @@ class GithubSyncClient:
         return await self._client.get(f'{RAW_BASE}/{owner}/{repo}/{branch}/{repo_path}')
 
 
+async def ensure_github_directory(knowledge_id: str, owner: str, repo: str, branch: str, user_id: str):
+    """Get-or-create a root-level KB directory labelled github/{owner}/{repo}@{branch}.
+
+    Gives synced files a visible folder in the knowledge file list so
+    multiple GitHub sources feeding one KB stay distinguishable.
+    """
+    name = f'github/{owner}/{repo}@{branch}'
+    for d in await Knowledges.get_all_directories(knowledge_id):
+        if d.parent_id is None and d.name == name:
+            return d
+    created = await Knowledges.create_directory(knowledge_id, name, user_id)
+    return created or None
+
+
 async def _sync_error(source, message: str, status: str = 'error') -> dict:
     result = {
         'status': status,
@@ -325,6 +342,11 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
         if not user:
             return await _sync_error(source, 'Owning admin user no longer exists')
 
+        # Per-source folder in the KB file list (github/owner/repo@branch) so
+        # multiple sources feeding one KB stay visually distinguishable.
+        directory = await ensure_github_directory(source.knowledge_id, owner, repo, branch, user.id)
+        directory_id = directory.id if directory else None
+
         # ── Fetch + gate + insert ─────────────────────────────────────
         sem = asyncio.Semaphore(CONCURRENT_FETCHES)
 
@@ -406,18 +428,25 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
                         {'OpenWebUI-GitHub-Source': source.id},
                     )
 
+                    # Insert with status 'processing' — extraction runs BELOW
+                    # before the KB link exists. The durable worker's KB-link
+                    # path requires either stored data.content or existing
+                    # file-{id} vector chunks (it reuses them); linking a file
+                    # that never went through extraction is what produced the
+                    # previous "The content provided is empty" failures.
                     await Files.insert_new_file(
                         user.id,
                         FileForm(
                             id=file_id,
                             filename=display_name,
                             path=file_path,
-                            data={'status': 'pending'},
+                            data={'status': 'processing'},
                             meta={
                                 'name': display_name,
                                 'content_type': content_type,
                                 'size': len(content),
                                 'file_hash': file_hash,
+                                'source_label': f'{owner}/{repo}@{branch}',
                                 'data': {
                                     'knowledge_id': source.knowledge_id,
                                     'github_source_id': source.id,
@@ -427,11 +456,33 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
                             },
                         ),
                     )
+
+                    # Extraction pass (same as the upload flow): loader reads
+                    # the stored bytes, embeds into the per-file collection and
+                    # caches data.content. One failure marks the file failed
+                    # and never creates the KB link.
+                    request_shim = SimpleNamespace(app=app)
+                    try:
+                        async with get_async_db() as db:
+                            await process_file(
+                                request_shim,
+                                ProcessFileForm(file_id=file_id),
+                                user=user,
+                                db=db,
+                            )
+                    except Exception as exc:
+                        await Files.update_file_data_by_id(
+                            file_id, {'status': 'failed', 'error': str(exc)}
+                        )
+                        result['errors'].append(f'{path}: extraction failed: {exc}')
+                        return
+
                     await Knowledges.add_file_to_knowledge_by_id(
                         knowledge_id=source.knowledge_id,
                         file_id=file_id,
                         user_id=user.id,
-                        status='pending',  # durable embedding worker takes it from here
+                        directory_id=directory_id,
+                        status='pending',  # durable embedding worker reuses the extracted chunks
                     )
                     result['updated' if existing else 'added'] += 1
                 except Exception as e:  # one bad file never aborts the sync

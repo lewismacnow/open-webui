@@ -153,6 +153,35 @@ async def delete_source(
     return {'status': True, 'files_removed': removed}
 
 
+@router.post('/knowledge/{knowledge_id}/prune-failed')
+async def prune_failed_files(knowledge_id: str, user=Depends(get_admin_user)):
+    """Remove files whose processing failed (empty extraction, embed errors)
+    from a knowledge base — deletes the KB link AND the stored file. Returns
+    the removed count and the per-file reasons."""
+    from open_webui.models.files import Files
+
+    await _validate_knowledge(knowledge_id, user)
+
+    removed, details = 0, []
+    for f in await Knowledges.get_files_by_id(knowledge_id):
+        data = f.data or {}
+        status = data.get('status')
+        error = data.get('error')
+        failed = status == 'failed' or (error and status != 'completed')
+        if not failed:
+            continue
+        reason = str(error) if error else f'status={status}'
+        try:
+            await Knowledges.remove_file_from_knowledge_by_id(knowledge_id, f.id)
+            await Files.delete_file_by_id(f.id)
+            removed += 1
+        except Exception as e:
+            details.append(f'{f.filename}: prune failed: {e}')
+        else:
+            details.append(f'{f.filename}: {reason[:120]}')
+    return {'status': True, 'removed': removed, 'details': details}
+
+
 @router.post('/sources/{id}/sync')
 async def sync_source_now(id: str, request: Request, user=Depends(get_admin_user)):
     """Trigger a sync immediately (does not reset the schedule)."""
