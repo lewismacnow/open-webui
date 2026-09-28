@@ -10,6 +10,7 @@ import asyncio
 import logging
 import time
 from typing import Literal, Optional
+from urllib.parse import unquote
 
 from fastapi import HTTPException, Request
 
@@ -28,7 +29,7 @@ from open_webui.models.memories import Memories
 from open_webui.models.messages import Message, Messages
 from open_webui.models.notes import Notes
 from open_webui.models.users import UserModel
-from open_webui.retrieval.utils import get_content_from_url
+from open_webui.retrieval.utils import filter_source_metadata, get_content_from_url
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.images import (
     CreateImageForm,
@@ -531,6 +532,7 @@ async def ask_user(
     are wasted. Ask the questions, then stop and wait for the answers.
 
     :param questions: 1-5 question objects (was 1-3 in upstream; relaxed in this fork because models routinely emit multiple questions and rejecting them makes the chat stall), each with id, header, question, and **2-5 options** (was 2-3 in upstream; relaxed for the same reason). Each option needs label and description.
+        List the option you recommend first; the UI labels the first option Recommended.
     :param allow_other: Whether users may enter a free-form answer instead of choosing one of the options
     :param timeout_ms: How long the browser should keep the prompt open before cancelling it
     :return: JSON with status and answers keyed by question id
@@ -1471,6 +1473,14 @@ async def replace_note_content(
 ) -> str:
     """
     Update an existing note by replacing the whole markdown content or applying range operations.
+
+    Prefer "replace_range" when only part of the note changes.
+    A "replace" operation must be the only operation in the request.
+    start and end are 0-indexed character offsets into the markdown content from view_note.
+    end is exclusive.
+    Offsets never shift as operations are applied.
+    Ranges must not overlap.
+    expected is optional. When set, the request is rejected if the range's current text does not match it.
 
     :param note_id: The ID of the note to update
     :param content: The new markdown content for a whole-note update
@@ -2593,6 +2603,7 @@ async def grep_chat_files(
     """
     Search exact text across files attached to the current chat.
     Pass file_id from the attached_files block to search one file.
+    Auto-detected regex uses RE2 syntax; no lookarounds/backreferences, and shorthand classes are ASCII-only.
 
     :param pattern: The text pattern to search for
     :param file_id: Optional attached file ID to search within a single file
@@ -2633,7 +2644,7 @@ async def grep_chat_files(
         if not files_to_search:
             return JSONCodec.dumps({'error': 'No accessible files found'})
 
-        return _grep_file_models(files_to_search, pattern, case_insensitive, count_only)
+        return await asyncio.to_thread(_grep_file_models, files_to_search, pattern, case_insensitive, count_only)
     except Exception as e:
         log.exception(f'grep_chat_files error: {e}')
         return JSONCodec.dumps({'error': str(e)})
@@ -2744,6 +2755,7 @@ async def query_chat_files(
             for idx, doc in enumerate(documents):
                 metadata = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
                 chunk = {
+                    **filter_source_metadata(metadata),
                     'content': doc,
                     'source': metadata.get('source', metadata.get('name', source_info.get('name', 'Unknown'))),
                     'file_id': metadata.get('file_id', source_info.get('id', '')),
@@ -2772,6 +2784,7 @@ async def grep_knowledge_files(
     Search for exact text across knowledge files. Returns matching lines with line numbers.
     Unlike query_knowledge_files (semantic/vector search), this performs exact string matching.
     Automatically detects regex patterns (e.g. "error|warn", "version \\d+").
+    Regex uses RE2 syntax; no lookarounds/backreferences, and shorthand character classes are ASCII-only.
     Helpful for literal strings, identifiers, error messages, or regex-style searches.
     IMPORTANT: prefer case_insensitive=true over "Foo|foo" alternations, and keep
     alternations short — complex regexes can exceed the time budget.
@@ -2881,7 +2894,7 @@ async def grep_knowledge_files(
         if not files_to_search:
             return JSONCodec.dumps({'error': 'No accessible files found'})
 
-        return _grep_file_models(files_to_search, pattern, case_insensitive, count_only)
+        return await asyncio.to_thread(_grep_file_models, files_to_search, pattern, case_insensitive, count_only)
 
     except Exception as e:
         log.exception(f'grep_knowledge_files error: {e}')
@@ -3587,6 +3600,7 @@ async def query_knowledge_files(
 
                 for idx, doc in enumerate(documents):
                     chunk_info = {
+                        **filter_source_metadata(metadatas[idx]),
                         'content': doc,
                         'source': metadatas[idx].get('source', metadatas[idx].get('name', 'Unknown')),
                         'file_id': metadatas[idx].get('file_id', ''),
@@ -3610,6 +3624,7 @@ async def query_knowledge_files(
             for idx, doc in enumerate(documents):
                 metadata = metadatas[idx] if idx < len(metadatas) else {}
                 chunk_info = {
+                    **filter_source_metadata(metadata),
                     'content': doc,
                     'source': metadata.get('source', metadata.get('name', knowledge.name)),
                     'file_id': metadata.get('file_id', f'external-{knowledge.id}'),
@@ -3743,6 +3758,7 @@ async def view_skill(
     id: str,
     __request__: Request = None,
     __user__: dict = None,
+    __metadata__: dict = None,
 ) -> str:
     """
     Load the full instructions of a skill by its id from the available skills manifest.
@@ -3758,6 +3774,16 @@ async def view_skill(
         return JSONCodec.dumps({'error': 'User context not available'})
 
     try:
+        terminal_skill_prefix = 'terminal:'
+        if isinstance(id, str) and id.startswith(terminal_skill_prefix):
+            from open_webui.utils.terminals import get_terminal_skill
+
+            skill_name = unquote(id.removeprefix(terminal_skill_prefix))
+            skill = await get_terminal_skill(__request__, __user__, __metadata__ or {}, skill_name)
+            if not skill:
+                return JSONCodec.dumps({'error': f"Skill '{id}' not found"})
+            return JSONCodec.dumps(skill, ensure_ascii=False)
+
         from open_webui.models.access_grants import AccessGrants
         from open_webui.models.skills import Skills
 
@@ -4017,7 +4043,7 @@ async def create_automation(
 
         # Validate the RRULE
         try:
-            validate_rrule(rrule, tz=user.timezone)
+            await validate_rrule(rrule, tz=user.timezone)
         except ValueError as e:
             return JSONCodec.dumps({'error': f'Invalid schedule: {e}'})
 
@@ -4043,7 +4069,7 @@ async def create_automation(
             is_active=True,
         )
 
-        automation = await Automations.insert(user_id, form, next_run_ns(rrule, tz=tz))
+        automation = await Automations.insert(user_id, form, await next_run_ns(rrule, tz=tz))
 
         return JSONCodec.dumps(
             {
@@ -4054,7 +4080,7 @@ async def create_automation(
                 'model_id': model_id,
                 'target': automation.data.get('target'),
                 'is_active': automation.is_active,
-                'next_runs': next_n_runs_ns(rrule, tz=tz),
+                'next_runs': await next_n_runs_ns(rrule, tz=tz),
             },
             ensure_ascii=False,
         )
@@ -4125,7 +4151,7 @@ async def update_automation(
         # Validate RRULE if changed
         if rrule is not None:
             try:
-                validate_rrule(new_rrule, tz=user.timezone)
+                await validate_rrule(new_rrule, tz=user.timezone)
             except ValueError as e:
                 return JSONCodec.dumps({'error': f'Invalid schedule: {e}'})
 
@@ -4147,7 +4173,7 @@ async def update_automation(
             is_active=automation.is_active,
         )
 
-        updated = await Automations.update_by_id(automation_id, form, next_run_ns(new_rrule, tz=tz))
+        updated = await Automations.update_by_id(automation_id, form, await next_run_ns(new_rrule, tz=tz))
 
         return JSONCodec.dumps(
             {
@@ -4158,7 +4184,7 @@ async def update_automation(
                 'model_id': new_model_id,
                 'target': updated.data.get('target'),
                 'is_active': updated.is_active,
-                'next_runs': next_n_runs_ns(new_rrule, tz=tz),
+                'next_runs': await next_n_runs_ns(new_rrule, tz=tz),
             },
             ensure_ascii=False,
         )
@@ -4226,7 +4252,7 @@ async def list_automations(
                     'rrule': rrule,
                     'is_active': item.is_active,
                     'last_run_at': item.last_run_at,
-                    'next_runs': next_n_runs_ns(rrule, tz=user.timezone if user else None),
+                    'next_runs': await next_n_runs_ns(rrule, tz=user.timezone if user else None),
                 }
             )
 
@@ -4273,7 +4299,7 @@ async def toggle_automation(
         rrule = automation.data.get('rrule', '')
         toggled = await Automations.toggle(
             automation_id,
-            next_run_ns(rrule, tz=user.timezone if user else None),
+            await next_run_ns(rrule, tz=user.timezone if user else None),
         )
 
         return JSONCodec.dumps(

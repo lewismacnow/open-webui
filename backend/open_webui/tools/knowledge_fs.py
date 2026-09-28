@@ -7,15 +7,17 @@ for AI models to interact with knowledge bases using commands they already know.
 Re-exported through builtin.py for consistent imports.
 """
 
+import asyncio
 import contextvars
 import logging
 import re
 import shlex
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Optional
 
-import regex
+import re2
 from fastapi import Request
 
 from open_webui.env import (
@@ -28,6 +30,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_HEAD_LINES = 10
 DEFAULT_TAIL_LINES = 10
+
+# Pattern-length guard (upstream v0.11.4) — bounds compile cost per search.
+MAX_SEARCH_PATTERN_LENGTH = 4_096
 
 # Tool config — values are sourced from the ``tools.*`` DB config
 # namespace (admin-controllable via Admin → Tools Config). Defaults here
@@ -119,39 +124,23 @@ def match_budget():
 
 
 def is_regex_pattern(pattern: str) -> bool:
-    """Detect if a pattern looks like regex (|, .*, .+, \d, \w, \s, [...])."""
+    r"""Detect if a pattern looks like regex (|, .*, .+, \d, \w, \s, [...])."""
     return (
         '|' in pattern
         or '.*' in pattern
         or '.+' in pattern
         or '.?' in pattern
-        or '\d' in pattern
-        or '\w' in pattern
-        or '\s' in pattern
+        or r'\d' in pattern
+        or r'\w' in pattern
+        or r'\s' in pattern
         or bool(re.search(r'\[.+\]', pattern))
     )
 
 
 def normalize_regex(pattern: str) -> str:
-    """Normalize POSIX BRE patterns to Python regex (\| → |)."""
-    return pattern.replace('\\|', '|').replace('\|', '|')
-
-
-def validate_regex_quantifiers(pattern: str) -> str | None:
-    """Reject counted quantifiers that make regex compilation expand too much."""
-    quantifier_expansion = 1
-    for quantifier in _COUNTED_QUANTIFIER_RE.finditer(pattern):
-        count_text = quantifier.group(1)
-        count = int(count_text) if len(count_text) <= 6 else _max_regex_quantifier_count() + 1
-        if count > _max_regex_quantifier_count():
-            return f'Regex quantifier counts over {_max_regex_quantifier_count():g} are not supported'
-
-        # ponytail: conservative expansion catches nested quantifier bombs without mirroring regex syntax.
-        quantifier_expansion *= max(count, 1)
-        if quantifier_expansion > _max_regex_quantifier_expansion():
-            return 'Regex quantifiers expand too much, lower the counts'
-
-    return None
+    r"""Normalize POSIX BRE patterns to Python regex (\| → |)."""
+    # Two passes: an escaped backslash in front of a pipe leaves a second escape behind.
+    return pattern.replace(r'\|', '|').replace(r'\|', '|')
 
 
 # Separator tokens inside a "simple" regex branch: wildcards (.*, .+, .?),
@@ -192,19 +181,22 @@ def _branch_literals(branch: str, lower: bool) -> Optional[list[str]]:
 
 def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool = False) -> tuple:
     """Build a matcher function. Returns (match_fn, error_str_or_None)."""
+    if len(pattern) > MAX_SEARCH_PATTERN_LENGTH:
+        return None, f'Search patterns over {MAX_SEARCH_PATTERN_LENGTH} characters are not supported'
+
     if not use_regex and is_regex_pattern(pattern):
         use_regex = True
 
     if use_regex:
         normalized = normalize_regex(pattern)
-        quantifier_error = validate_regex_quantifiers(normalized)
-        if quantifier_error:
-            return None, quantifier_error
         try:
-            re_flags = regex.IGNORECASE if case_insensitive else 0
-            compiled = regex.compile(normalized, re_flags)
-        except regex.error as e:
-            return None, f'Invalid regex: {e}'
+            options = re2.Options()
+            options.case_sensitive = not case_insensitive
+            options.max_mem = 1 << 20  # Bound compiled programs and the engine's matching cache to 1 MiB.
+            options.log_errors = False
+            compiled = re2.compile(normalized, options=options)
+        except re2.error as e:
+            return None, f'Invalid or unsupported regex (RE2 syntax): {e}'
 
         budget = _active_budget.get() or MatchBudget()
 
@@ -228,10 +220,12 @@ def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool 
                     return False
             started = time.monotonic()
             try:
-                # A negative timeout disables it, so an exhausted budget must not reach search().
                 if budget.remaining <= 0:
                     raise TimeoutError
-                return bool(compiled.search(line, timeout=budget.remaining))
+                matched = bool(compiled.search(line))
+                if time.monotonic() - started >= budget.remaining:
+                    raise TimeoutError
+                return matched
             except TimeoutError:
                 raise MatchBudgetExceeded(
                     f'Search exceeded {_match_budget_seconds():g}s — narrow the search: '
@@ -693,7 +687,7 @@ async def _kb_ls(args: list[str], flags: set[str], user: dict, model_knowledge: 
         if flat_mode:
             # Flat mode: build full tree (legitimate use)
             tree = await _build_directory_tree(kb_id)
-            for f in tree['files']:
+            for f in _sort_files(tree['files'], flags):
                 lines.append(f'  {f["id"]}  {f["path"]}  {_fmt_size(f)}  {_fmt_date(f)}')
             lines.append('')
             continue
@@ -716,7 +710,7 @@ async def _kb_ls(args: list[str], flags: set[str], user: dict, model_knowledge: 
         # Show files at this level (filter from accessible files)
         accessible = await _get_accessible_files(user, model_knowledge, knowledge_id=kb_id)
         dir_files = [f for f in accessible if f['directory_id'] == target_dir_id]
-        for f in dir_files:
+        for f in _sort_files(dir_files, flags):
             lines.append(f'  {f["id"]}  {f["filename"]}  {_fmt_size(f)}  {_fmt_date(f)}')
 
         if not subdirs and not dir_files:
@@ -725,11 +719,22 @@ async def _kb_ls(args: list[str], flags: set[str], user: dict, model_knowledge: 
 
     if direct_files and not target_kb_id and not dir_path:
         lines.append('Attached Files:')
-        for f in direct_files:
+        for f in _sort_files(direct_files, flags):
             lines.append(f'  {f["id"]}  {f["filename"]}  {_fmt_size(f)}  {_fmt_date(f)}')
         lines.append('')
 
     return '\n'.join(lines).rstrip()
+
+
+def _sort_files(files: list[dict], flags: set[str]) -> list[dict]:
+    """ls-style ordering: by name or path, -t newest first, -S largest first, -r reverses."""
+    if 't' in flags:
+        files = sorted(files, key=lambda f: f.get('updated_at') or 0, reverse=True)
+    elif 'S' in flags:
+        files = sorted(files, key=lambda f: f.get('size') or 0, reverse=True)
+    else:
+        files = sorted(files, key=lambda f: f.get('path') or f['filename'])
+    return files[::-1] if 'r' in flags else files
 
 
 def _fmt_size(f: dict) -> str:
@@ -822,6 +827,10 @@ async def _kb_tail(
     return result
 
 
+def _match_lines(content: str, matches: Callable[[str], bool]) -> list[tuple[int, str]]:
+    return [(i, line) for i, line in enumerate(content.split('\n'), 1) if matches(line)]
+
+
 async def _kb_grep(
     args: list[str], flags: set[str], user: dict, model_knowledge: list[dict] | None, piped_input: str | None = None
 ) -> str:
@@ -847,17 +856,14 @@ async def _kb_grep(
     count_only = 'c' in flags
     use_regex = 'E' in flags
 
-    _matches, err = build_matcher(pattern, case_insensitive, use_regex)
+    _matches, err = await asyncio.to_thread(build_matcher, pattern, case_insensitive, use_regex)
     if err:
         return err
 
     # Grep on piped input
     if piped_input is not None:
-        lines = piped_input.split('\n')
-        matched = []
-        for i, line in enumerate(lines, 1):
-            if _matches(line):
-                matched.append(f'{i}: {line}')
+        found = await asyncio.to_thread(_match_lines, piped_input, _matches)
+        matched = [f'{i}: {line}' for i, line in found]
         if count_only:
             return str(len(matched))
         if filenames_only:
@@ -873,11 +879,8 @@ async def _kb_grep(
         elif 'error' in resolved:
             return resolved['error']
         else:
-            lines = resolved['content'].split('\n')
-            matched = []
-            for i, line in enumerate(lines, 1):
-                if _matches(line):
-                    matched.append(f'{i}: {line}')
+            found = await asyncio.to_thread(_match_lines, resolved['content'], _matches)
+            matched = [f'{i}: {line}' for i, line in found]
 
             if count_only:
                 return f'{resolved["id"]}  {resolved["filename"]}: {len(matched)}'
@@ -928,11 +931,7 @@ async def _kb_grep(
         if not content:
             continue
 
-        lines = content.split('\n')
-        file_matches = []
-        for i, line in enumerate(lines, 1):
-            if _matches(line):
-                file_matches.append((i, line))
+        file_matches = await asyncio.to_thread(_match_lines, content, _matches)
 
         if file_matches:
             files_with_matches.append(file_info)
@@ -999,7 +998,7 @@ async def _kb_find(args: list[str], flags: set[str], user: dict, model_knowledge
         return f'No files matching "{pattern}"{scope_str}'
 
     lines = []
-    for f in matched:
+    for f in _sort_files(matched, flags):
         kb_info = f' ({f["knowledge_name"]})' if f.get('knowledge_name') else ''
         lines.append(f'{f["id"]}  {f["filename"]}{kb_info}')
     return '\n'.join(lines)
@@ -1171,7 +1170,7 @@ async def _kb_tree(args: list[str], flags: set[str], user: dict, model_knowledge
         def _render_tree(parent_id, prefix='  '):
             items = []
             subdirs = _get_subdirs(tree, parent_id)
-            files = _get_files_in_dir(tree, parent_id)
+            files = _sort_files(_get_files_in_dir(tree, parent_id), flags)
             entries = [('dir', d) for d in subdirs] + [('file', f) for f in files]
 
             for idx, (etype, entry) in enumerate(entries):
@@ -1196,7 +1195,7 @@ async def _kb_tree(args: list[str], flags: set[str], user: dict, model_knowledge
 
     if direct_files and not dir_scope:
         output.append('Attached Files:')
-        for idx, f in enumerate(direct_files):
+        for idx, f in enumerate(_sort_files(direct_files, flags)):
             connector = '└── ' if idx == len(direct_files) - 1 else '├── '
             output.append(f'  {connector}{f["filename"]}')
         output.append(f'\n  0 directories, {len(direct_files)} files')
@@ -1264,6 +1263,9 @@ async def kb_exec(
       ls                              — list root files and directories
       ls docs/                        — list contents of a directory
       ls -a                           — flat list of all files with full paths
+      ls -t                           — newest modified first
+      ls -S                           — largest first
+      ls -r                           — reverse file order
       tree                            — recursive directory tree view
       tree docs/                      — subtree from a directory
       cat -n <file>                   — read file with line numbers
@@ -1278,11 +1280,13 @@ async def kb_exec(
       grep "text" *.py                — filter by extension
       find "*.md"                     — find files by glob
       find docs/ "*.md"               — find within a directory
+      find -t "*.md", tree -t         — same sort flags as ls
       wc <file>                       — line/word/char counts
       stat <file>                     — file metadata
 
     Pipes:  grep "auth" | head -5
     Files:  reference by path (docs/api/auth.md), filename, or file ID
+    Regex: RE2 syntax; no lookarounds/backreferences. Shorthand character classes are ASCII-only.
 
     :param command: A filesystem command string
     :return: Command output as text

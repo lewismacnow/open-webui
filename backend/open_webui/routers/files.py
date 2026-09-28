@@ -227,11 +227,27 @@ async def process_uploaded_file(
                             f'{knowledge_id}: user {user.id} lacks write access'
                         )
                     else:
+                        # Upstream v0.11.4: validate the client-supplied directory
+                        # belongs to this knowledge before linking; ignore cross-KB ids.
+                        directory_id = file_metadata.get('directory_id') or None
+                        if directory_id:
+                            directory = await Knowledges.get_directory_by_id(directory_id, db=db_session)
+                            if not directory or directory.knowledge_id != knowledge_id:
+                                log.warning(
+                                    'Ignoring directory %s: not a directory of knowledge %s', directory_id, knowledge_id
+                                )
+                                directory_id = None
+
+                        # Fork: durable embedding worker — the link is created as
+                        # 'pending' (NOT processed inline) and the background worker
+                        # performs the KB-collection embedding, keeping uploads fast
+                        # and ingestion resumable. Upstream's inline process_file()
+                        # path is intentionally superseded by the worker.
                         knowledge_file = await Knowledges.add_file_to_knowledge_by_id(
                             knowledge_id=knowledge_id,
                             file_id=file_item.id,
                             user_id=user.id,
-                            directory_id=file_metadata.get('directory_id'),
+                            directory_id=directory_id,
                             status='pending',
                             db=db_session,
                         )
@@ -471,7 +487,11 @@ async def upload_file_handler(
         log.exception(e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT('Error uploading file'),
+            detail=(
+                ERROR_MESSAGES.EMPTY_CONTENT
+                if isinstance(e, ValueError) and e.args == (ERROR_MESSAGES.EMPTY_CONTENT,)
+                else ERROR_MESSAGES.DEFAULT('Error uploading file')
+            ),
         )
 
 
