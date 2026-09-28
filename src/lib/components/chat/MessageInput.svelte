@@ -743,12 +743,7 @@
 	export let placeholder = '';
 
 	type ModelCapability =
-		| 'vision'
-		| 'file_upload'
-		| 'web_search'
-		| 'image_generation'
-		| 'code_interpreter'
-		| 'terminal';
+		'vision' | 'file_upload' | 'web_search' | 'image_generation' | 'code_interpreter' | 'terminal';
 	type ModelCapabilitiesById = Record<string, Partial<Record<ModelCapability, boolean>>>;
 
 	let modelCapabilitiesById: ModelCapabilitiesById = {};
@@ -1123,15 +1118,20 @@
 				return;
 			}
 
-			// Upstream v0.11.4 gates only raster images (SVGs are documents now);
-			// fork keeps the vision-support escape hatch — images are allowed on
-			// non-vision models when a Vision RAG support model is configured.
-			if (isRasterImageContentType(file['type'])) {
-				if (visionCapableModels.length === 0 && !($config?.features?.enable_vision_support)) {
-					toast.error($i18n.t('Selected model(s) do not support image inputs'));
-					return;
+			// Restore the upstream-style image-type wrapper the conflict edit
+			// collapsed — the body below assumes it sits inside an image-type
+			// branch (4-tab indent), and the matching `} else {` at the end
+			// is the else-branch for the original wrapper.
+			if (file['type'].startsWith('image/')) {
+				// Upstream v0.11.4 gates only raster images (SVGs are documents now);
+				// fork keeps the vision-support escape hatch — images are allowed on
+				// non-vision models when a Vision RAG support model is configured.
+				if (isRasterImageContentType(file['type'])) {
+					if (visionCapableModels.length === 0 && !$config?.features?.enable_vision_support) {
+						toast.error($i18n.t('Selected model(s) do not support image inputs'));
+						return;
+					}
 				}
-			}
 
 				const compressImageHandler = async (imageUrl, settings = {}, config = {}) => {
 					// Quick shortcut so we don’t do unnecessary work.
