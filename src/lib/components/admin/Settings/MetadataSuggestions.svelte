@@ -170,10 +170,16 @@
 	onMount(async () => {
 		const token = localStorage.token;
 		try {
-			[knowledgeBases, models] = await Promise.all([
+			const [kbResponse, modelsResponse] = await Promise.all([
 				getKnowledgeBases(token),
 				getBaseModels(token)
 			]);
+			// /api/v1/knowledge/ returns a paginated envelope {items, total};
+			// fall back to a bare array for forward-compat.
+			knowledgeBases = Array.isArray(kbResponse)
+				? kbResponse
+				: (kbResponse?.items ?? []);
+			models = Array.isArray(modelsResponse) ? modelsResponse : (modelsResponse?.items ?? modelsResponse ?? []);
 		} catch (e) {
 			console.error(e);
 		}
