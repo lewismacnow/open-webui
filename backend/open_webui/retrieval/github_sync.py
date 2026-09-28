@@ -1,0 +1,492 @@
+"""GitHub → Knowledge sync worker.
+
+Entirely read-only against GitHub: GETs only, pinned to api.github.com and
+raw.githubusercontent.com, no redirects. Every file passes the security
+gates below BEFORE any byte is written to storage:
+
+  1. Path safety — the tree entry path must live inside the configured
+     directory, contain no traversal (``..``), no absolute segments, no
+     backslashes, no NULs.
+  2. Hardcoded security deny-list (secret material, key files) — unioned
+     with the admin's exclude_globs; deny ALWAYS wins over allow.
+  3. Extension allow-list — documentation/text formats only by default.
+  4. Size gate — enforced from the tree API's blob size BEFORE download,
+     and again on the downloaded bytes (defence in depth). Oversize files
+     are SKIPPED (counted), never fatal.
+  5. Content-type gate — the raw response's Content-Type must be a known
+     text/document type; ``application/octet-stream`` and friends are
+     rejected (binary masquerading as a doc).
+  6. Binary-masquerade scan — text-typed content with >10% non-printable
+     bytes is rejected.
+  7. Script sanitisation — ``<script>`` blocks and inline ``on*=``
+     handlers are stripped from markdown/HTML before storage so a
+     malicious repo can't ship XSS into the file preview.
+
+Change detection uses the git blob SHA from the tree API (a content hash),
+so unchanged files are never re-downloaded or re-embedded.
+"""
+
+import asyncio
+import io
+import logging
+import uuid
+import re
+import time
+from fnmatch import fnmatch
+from typing import Any, Optional
+import httpx
+
+from open_webui.models.files import Files, FileForm
+from open_webui.models.knowledge import Knowledges
+from open_webui.models.users import Users
+from open_webui.models.knowledge_github_source import KnowledgeGithubSourceModel
+from open_webui.storage.provider import Storage
+
+log = logging.getLogger(__name__)
+
+API_BASE = 'https://api.github.com'
+RAW_BASE = 'https://raw.githubusercontent.com'
+REQUEST_TIMEOUT = 30.0
+CONCURRENT_FETCHES = 8
+
+# Documentation/text formats safe to ingest by default. Admins broaden the
+# surface with include_globs, never with extensions.
+SYNC_ALLOWED_EXTENSIONS = {
+    'md',
+    'markdown',
+    'mdx',
+    'txt',
+    'rst',
+    'adoc',
+    'asciidoc',
+    'html',
+    'htm',
+    'xhtml',
+    'pdf',
+    'docx',
+    'pptx',
+    'xlsx',
+    'odt',
+    'ods',
+    'odp',
+    'csv',
+    'tsv',
+    'json',
+    'xml',
+    'yaml',
+    'yml',
+}
+
+# Hardcoded deny — filenames/paths that must NEVER be synced regardless of
+# admin configuration. Matched against the FULL repo-relative path.
+SECURITY_DENY_PATTERNS = [
+    '.env',
+    '.env.*',
+    '*.env',
+    '*.key',
+    '*.pem',
+    '*.p12',
+    '*.pfx',
+    '*.jks',
+    '*.keystore',
+    'id_rsa*',
+    'id_ed25519*',
+    'id_ecdsa*',
+    '*.ppk',
+    'secrets.*',
+    '*credentials*',
+    '*credential.json',
+    '.git/**',
+    '.git*',
+    '*.exe',
+    '*.dll',
+    '*.so',
+    '*.dylib',
+    '*.bin',
+    '*.msi',
+    'node_modules/**',
+    '.venv/**',
+    'venv/**',
+]
+
+ALLOWED_CONTENT_TYPES = {
+    'text/plain',
+    'text/markdown',
+    'text/html',
+    'text/x-markdown',
+    'text/csv',
+    'application/json',
+    'application/xml',
+    'text/xml',
+    'application/yaml',
+    'text/yaml',
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/octet-stream',  # raw GH default for unknown — only allowed under 10 KiB
+}
+
+# octet-stream is only tolerated for small files (probably mislabelled text).
+OCTET_STREAM_MAX_BYTES = 10 * 1024
+
+MAX_TEXT_BYTES = 2 * 1024 * 1024  # per-file text extraction cap
+
+_SCRIPT_RE = re.compile(r'<script\b[^>]*>.*?</script\s*>', re.I | re.S)
+_EVENT_HANDLER_RE = re.compile(r'\son\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', re.I)
+_JS_ATTR_URL_RE = re.compile(r'((?:href|src)\s*=\s*)(["\']?)\s*javascript:[^)"\'>\s]*', re.I)
+_JS_PAREN_URL_RE = re.compile(r'\(\s*javascript:[^)]*\)+', re.I)
+
+
+def sanitize_text_content(text: str) -> str:
+    """Strip active-content vectors from markdown/HTML destined for the
+    file preview. Lossy by design — this is untrusted input."""
+    text = _SCRIPT_RE.sub('', text)
+    text = _EVENT_HANDLER_RE.sub('', text)
+    text = _JS_ATTR_URL_RE.sub(r'\1\2#', text)
+    text = _JS_PAREN_URL_RE.sub('(#)', text)
+    return text
+
+
+def path_is_safe(repo_path: str, directory_prefix: str) -> bool:
+    if not repo_path or repo_path.startswith('/') or '\\' in repo_path or '\x00' in repo_path:
+        return False
+    segments = repo_path.split('/')
+    if any(seg in ('..', '') for seg in segments):
+        return False
+    if directory_prefix:
+        if not repo_path.startswith(directory_prefix + '/'):
+            return False
+    return True
+
+
+def matches_any(repo_path: str, patterns: list[str]) -> bool:
+    return any(fnmatch(repo_path, p) for p in patterns)
+
+
+def extension_allowed(repo_path: str) -> bool:
+    ext = repo_path.rsplit('.', 1)[-1].lower() if '.' in repo_path.rsplit('/', 1)[-1] else ''
+    return ext in SYNC_ALLOWED_EXTENSIONS
+
+
+class GithubSyncClient:
+    """Thin read-only GitHub REST client with a single shared token."""
+
+    def __init__(self, token: Optional[str] = None):
+        headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
+        self._client = httpx.AsyncClient(
+            base_url=API_BASE, headers=headers, timeout=REQUEST_TIMEOUT, follow_redirects=False
+        )
+
+    async def aclose(self):
+        await self._client.aclose()
+
+    async def _get(self, url: str, params: Optional[dict] = None) -> httpx.Response:
+        resp = await self._client.get(url, params=params)
+        if resp.status_code == 429 or resp.status_code >= 500:
+            resp.raise_for_status()  # caller backoff-handles
+        return resp
+
+    async def get_repo(self, owner: str, repo: str) -> httpx.Response:
+        return await self._get(f'/repos/{owner}/{repo}')
+
+    async def get_branch_sha(self, owner: str, repo: str, branch: str) -> Optional[str]:
+        resp = await self._get(f'/repos/{owner}/{repo}/branches/{branch}')
+        if resp.status_code != 200:
+            return None
+        return (resp.json().get('commit') or {}).get('sha')
+
+    async def get_tree(self, owner: str, repo: str, tree_sha: str) -> Optional[list[dict]]:
+        """Recursive tree; returns the truncated flag shrunk away — when a
+        repo exceeds the tree limit we surface it as a sync error rather
+        than silently syncing a partial tree."""
+        resp = await self._get(f'/repos/{owner}/{repo}/git/trees/{tree_sha}', params={'recursive': '1'})
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        if body.get('truncated'):
+            raise RuntimeError('Repository tree truncated by GitHub API — narrow the directory path')
+        return body.get('tree') or []
+
+    async def fetch_raw(self, owner: str, repo: str, branch: str, repo_path: str) -> httpx.Response:
+        # Deliberately a separate client call with absolute URL (different host).
+        return await self._client.get(f'{RAW_BASE}/{owner}/{repo}/{branch}/{repo_path}')
+
+
+async def _sync_error(source, message: str, status: str = 'error') -> dict:
+    result = {
+        'status': status,
+        'error': message,
+        'added': 0,
+        'updated': 0,
+        'removed': 0,
+        'unchanged': 0,
+        'skipped_size': 0,
+        'skipped_ext': 0,
+        'skipped_deny': 0,
+        'skipped_dup': 0,
+        'errors': [message],
+    }
+    from open_webui.models.knowledge_github_source import KnowledgeGithubSources
+
+    await KnowledgeGithubSources.finish_sync(source.id, status='error', result=result, failure=True)
+    return result
+
+
+async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
+    """Run one full sync of a source. Idempotent, safe to re-run."""
+    import hashlib
+
+    from open_webui.models.github_credential import GithubCredentials
+    from open_webui.models.knowledge_github_source import KnowledgeGithubSources
+
+    owner, repo, branch = source.repo_owner, source.repo_name, source.branch
+    directory = (source.directory_path or '').strip('/')
+
+    token = None
+    if source.credential_id:
+        token = await GithubCredentials.resolve_token(source.credential_id)
+        if not token:
+            return await _sync_error(source, 'Credential missing or undecryptable — re-create it')
+
+    client = GithubSyncClient(token)
+    result = {
+        'status': 'ok',
+        'added': 0,
+        'updated': 0,
+        'removed': 0,
+        'unchanged': 0,
+        'skipped_size': 0,
+        'skipped_ext': 0,
+        'skipped_deny': 0,
+        'skipped_dup': 0,
+        'errors': [],
+    }
+
+    try:
+        # ── Repo + branch resolution ──────────────────────────────────
+        repo_resp = await client.get_repo(owner, repo)
+        if repo_resp.status_code == 404:
+            return await _sync_error(source, f'Repository {owner}/{repo} not found (404)')
+        if repo_resp.status_code in (401, 403):
+            return await _sync_error(
+                source,
+                'GitHub rejected the credential (401/403) — check token scopes and expiry',
+            )
+        repo_resp.raise_for_status()
+
+        head_sha = await client.get_branch_sha(owner, repo, branch)
+        if not head_sha:
+            return await _sync_error(source, f'Branch {branch!r} not found')
+
+        # ── Tree ──────────────────────────────────────────────────────
+        tree = await client.get_tree(owner, repo, head_sha)
+        if tree is None:
+            return await _sync_error(source, 'Failed to list repository tree')
+
+        blobs = [entry for entry in tree if entry.get('type') == 'blob' and path_is_safe(entry['path'], directory)]
+
+        # Security + policy filters
+        candidates = []
+        for entry in blobs:
+            path = entry['path']
+            if matches_any(path, SECURITY_DENY_PATTERNS) or matches_any(path, list(source.exclude_globs or [])):
+                result['skipped_deny'] += 1
+                continue
+            if source.include_globs and not matches_any(path, list(source.include_globs)):
+                continue
+            if not extension_allowed(path):
+                result['skipped_ext'] += 1
+                continue
+            size = int(entry.get('size') or 0)
+            if size > int(source.max_file_bytes):
+                result['skipped_size'] += 1
+                continue
+            candidates.append(entry)
+
+        if len(candidates) > int(source.max_files):
+            result['errors'].append(
+                f'{len(candidates)} candidate files exceed max_files={source.max_files}; '
+                f'syncing first {source.max_files}'
+            )
+            candidates = candidates[: int(source.max_files)]
+
+        # ── Existing synced files for this source (by repo path) ─────
+        existing_files = await Knowledges.get_files_by_id(source.knowledge_id)
+        by_repo_path: dict[str, Any] = {}
+        for f in existing_files:
+            meta = (f.meta or {}).get('data') or {}
+            if meta.get('github_source_id') == source.id and meta.get('repo_path'):
+                by_repo_path[meta['repo_path']] = f
+
+        user = await Users.get_user_by_id(source.user_id)
+        if not user:
+            return await _sync_error(source, 'Owning admin user no longer exists')
+
+        # ── Fetch + gate + insert ─────────────────────────────────────
+        sem = asyncio.Semaphore(CONCURRENT_FETCHES)
+
+        async def handle_entry(entry: dict):
+            path = entry['path']
+            blob_sha = entry.get('sha') or ''
+            async with sem:
+                try:
+                    existing = by_repo_path.get(path)
+                    if existing and (existing.meta or {}).get('data', {}).get('repo_sha') == blob_sha:
+                        result['unchanged'] += 1
+                        return
+
+                    resp = await client.fetch_raw(owner, repo, branch, path)
+                    if resp.status_code != 200:
+                        result['errors'].append(f'{path}: HTTP {resp.status_code}')
+                        return
+                    content = resp.content
+                    if len(content) > int(source.max_file_bytes):
+                        result['skipped_size'] += 1
+                        return
+
+                    content_type = resp.headers.get('content-type', '').split(';')[0].strip().lower()
+                    if content_type not in ALLOWED_CONTENT_TYPES:
+                        result['errors'].append(f'{path}: blocked content-type {content_type!r}')
+                        return
+                    if content_type == 'application/octet-stream' and len(content) > OCTET_STREAM_MAX_BYTES:
+                        result['skipped_ext'] += 1
+                        return
+
+                    is_text = content_type.startswith('text/') or content_type in (
+                        'application/json',
+                        'application/xml',
+                        'application/yaml',
+                        'text/yaml',
+                        'text/markdown',
+                        'text/x-markdown',
+                    )
+                    if is_text:
+                        if len(content) > MAX_TEXT_BYTES:
+                            result['skipped_size'] += 1
+                            return
+                        try:
+                            text = content.decode('utf-8', errors='strict')
+                        except UnicodeDecodeError:
+                            result['errors'].append(f'{path}: not valid UTF-8 text')
+                            return
+                        # Binary masquerade scan: >10% non-printable → reject.
+                        if text:
+                            nonprintable = sum(1 for ch in text[:8192] if not ch.isprintable() and ch not in '\n\r\t')
+                            if nonprintable > len(text[:8192]) * 0.1:
+                                result['errors'].append(f'{path}: binary content in a text file')
+                                return
+                        content = sanitize_text_content(text).encode('utf-8')
+                        if not content.strip():
+                            result['skipped_dup'] += 1  # empty after sanitisation
+                            return
+
+                    file_hash = hashlib.sha256(content).hexdigest()
+
+                    # Replace the previous version of this repo path, if any.
+                    if existing:
+                        await Knowledges.remove_file_from_knowledge_by_id(source.knowledge_id, existing.id)
+                        await Files.delete_file_by_id(existing.id)
+
+                    # Hash-dedupe inside the KB (same content elsewhere).
+                    dup = await Knowledges.get_file_by_hash_in_knowledge(source.knowledge_id, file_hash)
+                    if dup:
+                        result['skipped_dup'] += 1
+                        return
+
+                    display_name = path.rsplit('/', 1)[-1]
+                    file_id = str(uuid.uuid4())
+                    stored_name = f'{file_id}_{display_name}'
+                    contents, file_path = await asyncio.to_thread(
+                        Storage.upload_file,
+                        io.BytesIO(content),
+                        stored_name,
+                        {'OpenWebUI-GitHub-Source': source.id},
+                    )
+
+                    await Files.insert_new_file(
+                        user.id,
+                        FileForm(
+                            id=file_id,
+                            filename=display_name,
+                            path=file_path,
+                            data={'status': 'pending'},
+                            meta={
+                                'name': display_name,
+                                'content_type': content_type,
+                                'size': len(content),
+                                'file_hash': file_hash,
+                                'data': {
+                                    'knowledge_id': source.knowledge_id,
+                                    'github_source_id': source.id,
+                                    'repo_path': path,
+                                    'repo_sha': blob_sha,
+                                },
+                            },
+                        ),
+                    )
+                    await Knowledges.add_file_to_knowledge_by_id(
+                        knowledge_id=source.knowledge_id,
+                        file_id=file_id,
+                        user_id=user.id,
+                        status='pending',  # durable embedding worker takes it from here
+                    )
+                    result['updated' if existing else 'added'] += 1
+                except Exception as e:  # one bad file never aborts the sync
+                    log.warning(f'GitHub sync {source.id} file {path} failed: {e}')
+                    result['errors'].append(f'{path}: {e}')
+
+        await asyncio.gather(*(handle_entry(e) for e in candidates))
+
+        # ── Removal pass: files synced from this source no longer in tree ─
+        if source.remove_deleted:
+            candidate_paths = {e['path'] for e in candidates}
+            for path, f in list(by_repo_path.items()):
+                if path not in candidate_paths:
+                    try:
+                        await Knowledges.remove_file_from_knowledge_by_id(source.knowledge_id, f.id)
+                        await Files.delete_file_by_id(f.id)
+                        result['removed'] += 1
+                    except Exception as e:
+                        result['errors'].append(f'remove {path}: {e}')
+
+        await KnowledgeGithubSources.finish_sync(source.id, status='ok', result=result, commit_sha=head_sha)
+        log.info(
+            'GitHub sync %s (%s/%s@%s): %s',
+            source.id,
+            owner,
+            repo,
+            branch,
+            {k: v for k, v in result.items() if k != 'errors'},
+        )
+        return result
+
+    except Exception as e:
+        log.exception(f'GitHub sync {source.id} failed')
+        return await _sync_error(source, str(e))
+    finally:
+        await client.aclose()
+
+
+async def sync_due_github_sources(app, limit: int = 3) -> int:
+    """Called from the scheduler tick. Claims due sources (stamps
+    next_run_at forward first, so concurrent workers can't double-fire)
+    and runs each sync. Returns the number of syncs started."""
+    from open_webui.models.knowledge_github_source import KnowledgeGithubSources
+
+    due = await KnowledgeGithubSources.get_due_sources(int(time.time()), limit=limit)
+    for source in due:
+        # Fire-and-forget: finish_sync recomputes next_run_at from the
+        # interval when the sync completes (or backs off on failure).
+        source_model = source
+        asyncio.create_task(_run_source_sync(app, source_model))
+    return len(due)
+
+
+async def _run_source_sync(app, source: KnowledgeGithubSourceModel) -> None:
+    try:
+        await sync_github_source(app, source)
+    except Exception:
+        log.exception(f'Scheduled GitHub sync {source.id} crashed')

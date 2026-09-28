@@ -324,7 +324,15 @@
 			return;
 		}
 
-		if (preset && !info.base_model_id) {
+		// Fork: the failover chain replaces the base model. A model is valid
+		// when it has a base model OR at least one configured failover
+		// provider — the submit path below mirrors the chain's primary into
+		// the legacy info.base_model_id, but that happens AFTER this guard,
+		// so the guard must also accept a non-empty chain (this was blocking
+		// every new wrapper-model creation since the base-model UI section
+		// was removed).
+		const hasFailoverChain = (failoverProviders ?? []).some((p) => p?.model_id);
+		if (preset && !info.base_model_id && !hasFailoverChain) {
 			toast.error($i18n.t('Base Model is required.'));
 			loading = false;
 

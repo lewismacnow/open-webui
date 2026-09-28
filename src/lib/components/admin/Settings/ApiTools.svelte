@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, getContext } from 'svelte';
 	import { getApiToolsConfig, setApiToolsConfig } from '$lib/apis/configs';
-	import { getBaseModels, updateModelById } from '$lib/apis/models';
+	import { getBaseModels } from '$lib/apis/models';
 	import { toast } from 'svelte-sonner';
 
 	import Switch from '$lib/components/common/Switch.svelte';
@@ -68,13 +68,13 @@
 	let allowToolServers = false;
 	let loaded = false;
 
-	// Per-model api_tools capability — required for any model to participate
-	// in API Tools mode. The global config (above) gates the feature; this
-	// section decides WHICH MODELS opt in. Without a model listed here as
-	// "API Tools: on", api_tools_active stays False and the wrapper never
-	// runs regardless of the master switch.
+	// Per-model opt-OUT list — persisted as chat.api_tools.opt_out_models in
+	// the global config (NOT per-model capability writes). Base/connection
+	// models have no workspace DB row, so updateModelById fails for them;
+	// a config-level list works for every model kind.
 	let models: any[] = [];
 	let modelsLoading = false;
+	let optOutModels: string[] = [];
 	let savingModelId: string | null = null;
 
 	function isAllowed(id: string): boolean {
@@ -82,9 +82,12 @@
 	}
 
 	function modelHasApiTools(model: any): boolean {
-		// Opt-out semantics: a model participates unless it explicitly sets
-		// capabilities.api_tools = false. Unset/undefined/true all mean "on".
-		return model?.info?.meta?.capabilities?.api_tools !== false;
+		// Opt-out semantics: on unless in the admin's opt-out list AND not
+		// explicitly disabled via the model editor's capability flag.
+		return (
+			!optOutModels.includes(model.id) &&
+			model?.info?.meta?.capabilities?.api_tools !== false
+		);
 	}
 
 	async function toggleCategory(id: string, value: boolean) {
@@ -103,7 +106,8 @@
 			await setApiToolsConfig(localStorage.token, {
 				enabled: enabled,
 				allowed_categories: allowedCategories,
-				allow_tool_servers: allowToolServers
+				allow_tool_servers: allowToolServers,
+				opt_out_models: optOutModels
 			});
 			toast.success($i18n.t('API Tools settings saved'));
 		} catch (e) {
@@ -115,34 +119,26 @@
 		const wasOn = modelHasApiTools(model);
 		savingModelId = model.id;
 		try {
-			const meta = JSON.parse(JSON.stringify(model?.info?.meta || {}));
-			const capabilities = JSON.parse(JSON.stringify(meta.capabilities || {}));
-			// Opt-out semantics: switching OFF writes an explicit false;
-			// switching ON writes an explicit true (behaves identically to
-			// unset, but records the admin's deliberate choice).
-			capabilities.api_tools = !wasOn;
-			// api_tools implicitly requires builtin_tools to be on; if the model
-			// has it explicitly disabled, don't silently override — let the admin
-			// fix it via the model editor.
-			capabilities.builtin_tools = capabilities.builtin_tools ?? true;
-			meta.capabilities = capabilities;
-
-			await updateModelById(localStorage.token, model.id, {
-				...model,
-				info: { ...model.info, meta }
+			optOutModels = wasOn
+				? [...new Set([...optOutModels, model.id])]
+				: optOutModels.filter((id) => id !== model.id);
+			await setApiToolsConfig(localStorage.token, {
+				enabled: enabled,
+				allowed_categories: allowedCategories,
+				allow_tool_servers: allowToolServers,
+				opt_out_models: optOutModels
 			});
-
-			// Update local state so the switch reflects the change immediately.
-			model.info.meta.capabilities = capabilities;
-			models = [...models];
-
 			toast.success(
 				wasOn
 					? $i18n.t('API Tools disabled for {name}', { name: model.name })
 					: $i18n.t('API Tools enabled for {name}', { name: model.name })
 			);
 		} catch (e) {
-			console.error('Failed to toggle API Tools for model:', e);
+			console.error('Failed to toggle API Tools opt-out for model:', e);
+			// revert local state on failure
+			optOutModels = wasOn
+				? optOutModels.filter((id) => id !== model.id)
+				: [...new Set([...optOutModels, model.id])];
 			toast.error($i18n.t('Failed to update model API Tools capability'));
 		} finally {
 			savingModelId = null;
@@ -155,6 +151,7 @@
 			enabled = config.enabled;
 			allowedCategories = config.allowed_categories;
 			allowToolServers = config.allow_tool_servers;
+			optOutModels = config.opt_out_models ?? [];
 		} catch (e) {
 			console.error('Failed to load API tools config:', e);
 		}

@@ -59,6 +59,8 @@
 	import TokenCaps from '$lib/components/admin/Settings/TokenCaps.svelte';
 	import FailoverQueue from '$lib/components/admin/Settings/FailoverQueue.svelte';
 	import ServiceKeys from '$lib/components/admin/Settings/ServiceKeys.svelte';
+	import GithubSync from '$lib/components/admin/Settings/GithubSync.svelte';
+	import MetadataSuggestions from '$lib/components/admin/Settings/MetadataSuggestions.svelte';
 	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
 	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
 	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
@@ -176,6 +178,8 @@
 		'admin:service-keys': $i18n.t('Tools'),
 		'admin:tools-config': $i18n.t('Tools'),
 		'admin:token-caps': $i18n.t('Tools'),
+		'admin:github-sync': $i18n.t('Tools'),
+		'admin:metadata-suggestions': $i18n.t('Tools'),
 		'admin:web': $i18n.t('Tools'),
 		'admin:code-execution': $i18n.t('Tools'),
 		'admin:pipelines': $i18n.t('Tools'),
@@ -436,6 +440,20 @@
 				'group',
 				'user'
 			]
+		},
+		{
+			id: 'admin:github-sync',
+			titleKey: 'admin.github-sync',
+			title: 'GitHub Sync',
+			searchPrefixes: ['admin.github-sync.'],
+			keywords: ['github', 'repository', 'repo', 'branch', 'sync', 'pat', 'token']
+		},
+		{
+			id: 'admin:metadata-suggestions',
+			titleKey: 'admin.metadata-suggestions',
+			title: 'Metadata Suggestions',
+			searchPrefixes: ['admin.metadata-suggestions.'],
+			keywords: ['metadata', 'improve', 'title', 'description', 'tags', 'llm']
 		},
 		{
 			id: 'admin:web',
@@ -984,6 +1002,10 @@
 				<ToolsConfig />
 			{:else if selectedTab === 'admin:token-caps'}
 				<TokenCaps />
+			{:else if selectedTab === 'admin:github-sync'}
+				<GithubSync />
+			{:else if selectedTab === 'admin:metadata-suggestions'}
+				<MetadataSuggestions />
 			{:else if selectedTab === 'admin:web'}
 				<AdminWebSearch saveHandler={adminConfigSaveHandler} />
 			{:else if selectedTab === 'admin:code-execution'}

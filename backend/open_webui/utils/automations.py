@@ -120,6 +120,17 @@ async def scheduler_worker_loop(app) -> None:
                 except Exception:
                     log.exception('Scheduler: calendar alert error')
 
+            # ── GitHub Knowledge Sync ──
+            # Claims due sources (stamps next_run_at forward first) and
+            # runs each sync as a fire-and-forget task. Silent no-op when
+            # no sources are scheduled.
+            try:
+                from open_webui.retrieval.github_sync import sync_due_github_sources
+
+                await sync_due_github_sources(app)
+            except Exception:
+                log.exception('Scheduler: github sync error')
+
         except Exception:
             log.exception('Scheduler worker error')
 
