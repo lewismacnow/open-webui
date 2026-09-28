@@ -1052,9 +1052,7 @@ app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories']
 app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
 app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
 app.include_router(service_keys.router, prefix='/api/v1/service-keys', tags=['service-keys'])
-app.include_router(
-    github_sync_admin.router, prefix='/api/v1/github-sync', tags=['github-sync']
-)
+app.include_router(github_sync_admin.router, prefix='/api/v1/github-sync', tags=['github-sync'])
 app.include_router(
     metadata_suggestions.router,
     prefix='/api/v1/metadata-suggestions',
@@ -2576,6 +2574,27 @@ async def chat_completion(
                 await asyncio.shield(emit_cancel_event())
             except Exception:
                 pass
+            # UI (socket) callers need the CancelledError to propagate so
+            # the surrounding task machinery unwinds correctly. Stateless
+            # API callers (no session_id) have no such machinery — and an
+            # escaping CancelledError is converted by uvicorn into an
+            # "Exception in ASGI application" + HTTP 500 whenever the
+            # transport is still open (e.g. an in-process cancellation or
+            # a mid-handshake client timeout, commonly landing inside
+            # connect_mcp_server's session.initialize() for models with
+            # MCP tool servers attached). Return a clean 499 instead so
+            # API consumers see an honest "cancelled" rather than a 500.
+            if not metadata.get('session_id'):
+                return JSONResponse(
+                    status_code=499,
+                    content={
+                        'error': {
+                            'message': 'Request cancelled before completion',
+                            'type': 'cancelled',
+                            'code': 'request_cancelled',
+                        }
+                    },
+                )
             raise  # re-raise to ensure proper task cancellation handling
         except Exception as e:
             error_detail = e.detail if isinstance(e, HTTPException) else str(e)
