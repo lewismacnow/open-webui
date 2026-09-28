@@ -180,7 +180,12 @@
 	onMount(async () => {
 		await refresh();
 		try {
-			knowledgeBases = (await getKnowledgeBases(localStorage.token)) ?? [];
+			const kbResponse = (await getKnowledgeBases(localStorage.token)) ?? [];
+			// /api/v1/knowledge/ returns a paginated envelope {items, total};
+			// fall back to a bare array for forward-compat.
+			knowledgeBases = Array.isArray(kbResponse)
+				? kbResponse
+				: (kbResponse?.items ?? []);
 		} catch (e) {
 			console.error(e);
 		}
