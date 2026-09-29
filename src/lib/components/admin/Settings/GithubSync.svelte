@@ -115,11 +115,22 @@
 				directory_path: srcDirectory.trim(),
 				credential_id: srcCredentialId || null,
 				remove_deleted: srcRemoveDeleted,
-				interval_seconds: srcIntervalHours > 0 ? srcIntervalHours * 3600 : null
+				interval_seconds: srcIntervalHours > 0 ? srcIntervalHours * 3600 : null,
+				allowed_extensions: srcAllowedExtensions
+					.split(',')
+					.map((s) => s.trim().replace(/^\./, '').toLowerCase())
+					.filter(Boolean)
+					.length
+					? srcAllowedExtensions
+						.split(',')
+						.map((s) => s.trim().replace(/^\./, '').toLowerCase())
+						.filter(Boolean)
+					: null
 			});
 			toast.success($i18n.t('Source created — run "Sync now" to import'));
 			srcRepoUrl = srcBranch = 'main';
 			srcDirectory = '';
+			srcAllowedExtensions = '';
 			showSourceForm = false;
 			await refresh();
 		} catch (e) {
@@ -421,12 +432,13 @@
 					bind:value={srcIntervalHours}
 				/>
 			<input
-				class="text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5 col-span-2"
-				placeholder={$i18n.t('Allowed extensions (e.g. md, txt, py, json) — empty uses admin default')}
-				bind:value={srcAllowedExtensions}
-			/>
-			</div>
 			<AdminSettingField
+		</div>
+		<input
+			class="text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5 w-full"
+			placeholder={$i18n.t('Allowed extensions (e.g. md, txt, py, json) - empty uses admin default')}
+			bind:value={srcAllowedExtensions}
+		/>
 				label={$i18n.t('Remove files deleted from the repository')}
 				description={$i18n.t(
 					'On each sync, files removed from the repo are also removed from the knowledge base.'
