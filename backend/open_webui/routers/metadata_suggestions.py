@@ -60,6 +60,20 @@ async def list_scans(knowledge_id: Optional[str] = None, limit: int = 20, user=D
     return await MetadataScans.get_scans(knowledge_id=knowledge_id, limit=limit)
 
 
+@router.post('/scans/{id}/cancel')
+async def cancel_scan(id: str, user=Depends(get_admin_user)):
+    """Request cancellation of a running scan. The worker checks the status
+    between files and exits early; files already processed keep their
+    proposals."""
+    scan = await MetadataScans.get_scan(id)
+    if not scan:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail='Scan not found')
+    if scan.status != 'running':
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=f'Scan is {scan.status}, not running')
+    await MetadataScans.finish_scan(id, 'cancelled')
+    return {'status': True}
+
+
 @router.get('/scans/{id}', response_model=MetadataScanModel)
 async def get_scan(id: str, user=Depends(get_admin_user)):
     scan = await MetadataScans.get_scan(id)

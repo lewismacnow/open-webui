@@ -2,6 +2,7 @@
 	import { onMount, onDestroy, getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import {
+		cancelMetadataScan,
 		startMetadataScan,
 		getMetadataScans,
 		getMetadataProposals,
@@ -125,6 +126,17 @@
 			toast.error(String(e));
 		} finally {
 			busy = false;
+		}
+	}
+
+	async function cancelScan() {
+		if (!latestScan || latestScan.status !== 'running') return;
+		try {
+			await cancelMetadataScan(localStorage.token, latestScan.id);
+			toast.info($i18n.t('Cancellation requested - in-flight file finishes, then stops'));
+			await refresh();
+		} catch (e) {
+			toast.error(String(e));
 		}
 	}
 
@@ -325,6 +337,18 @@
 						: 0}%"
 				/>
 			</div>
+
+				{#if latestScan.status === 'running'}
+					<div class="mt-2 text-right">
+						<button
+							type="button"
+							class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-850"
+							on:click={cancelScan}
+						>
+							{$i18n.t('Cancel scan')}
+						</button>
+					</div>
+				{/if}
 		</div>
 	{/if}
 </AdminSettingSection>
