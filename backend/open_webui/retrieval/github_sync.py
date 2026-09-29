@@ -167,13 +167,48 @@ def matches_any(repo_path: str, patterns: list[str]) -> bool:
     return any(fnmatch(repo_path, p) for p in patterns)
 
 
-def extension_allowed(repo_path: str) -> bool:
-    ext = repo_path.rsplit('.', 1)[-1].lower() if '.' in repo_path.rsplit('/', 1)[-1] else ''
-    return ext in SYNC_ALLOWED_EXTENSIONS
+# --- Per-source extension allow-list ---
+#
+# Resolved per file (highest priority first):
+#   1. source.allowed_extensions (per-source override; non-empty list)
+#   2. rag.github.allowed_extensions (admin default config; mutable from UI)
+#   3. SYNC_ALLOWED_EXTENSIONS (hardcoded fallback for docs repos)
+_ADMIN_ALLOWED_DEFAULT = [
+    'md', 'markdown', 'mdx', 'txt', 'rst', 'adoc', 'asciidoc',
+    'html', 'htm', 'xhtml',
+    'pdf', 'docx', 'pptx', 'xlsx', 'odt', 'ods', 'odp',
+    'csv', 'tsv', 'json', 'xml', 'yaml', 'yml',
+]
 
 
-class GithubSyncClient:
-    """Thin read-only GitHub REST client with a single shared token."""
+def _filename_deny(name: str) -> bool:
+    """Match the FINAL filename component only (not the full repo path).
+    Substring globs in the previous design mis-fired on documentation
+    files like api-credentials-management.md or secrets.md."""
+    name_lc = name.lower()
+    if name_lc in {
+        '.env', '.env.production', '.env.local', '.env.development', '.env.staging',
+        'secrets', 'secrets.json', 'secrets.yaml', 'secrets.toml',
+        'credentials', 'credentials.json', 'credentials.yaml',
+        '.htpasswd', '.netrc',
+    }:
+        return True
+    if name_lc.startswith(('id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa')):
+        return True
+    if name_lc.endswith(('.key', '.pem', '.p12', '.pfx', '.jks', '.keystore')):
+        return True
+    if name in ('node_modules', '.venv'):
+        return True
+    return False
+
+
+def extension_allowed(repo_path: str, allowed_extensions: list[str]) -> bool:
+    if not allowed_extensions:
+        return False
+    last = repo_path.rsplit('/', 1)[-1]
+    ext = last.rsplit('.', 1)[-1].lower() if '.' in last else ''
+    allowed = {e.lstrip('.').lower() for e in allowed_extensions}
+    return ext in allowed
 
     def __init__(self, token: Optional[str] = None):
         headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
@@ -234,8 +269,7 @@ async def ensure_github_directory(knowledge_id: str, owner: str, repo: str, bran
 
 async def _sync_error(source, message: str, status: str = 'error') -> dict:
     result = {
-        'status': status,
-        'error': message,
+        'status': 'ok',
         'added': 0,
         'updated': 0,
         'removed': 0,
@@ -244,7 +278,9 @@ async def _sync_error(source, message: str, status: str = 'error') -> dict:
         'skipped_ext': 0,
         'skipped_deny': 0,
         'skipped_dup': 0,
-        'errors': [message],
+        'truncated': False,
+        'total_candidates': 0,
+        'errors': [],
     }
     from open_webui.models.knowledge_github_source import KnowledgeGithubSources
 
@@ -299,18 +335,46 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
             return await _sync_error(source, f'Branch {branch!r} not found')
 
         # ── Tree ──────────────────────────────────────────────────────
-        tree = await client.get_tree(owner, repo, head_sha)
+        try:
+            tree = await client.get_tree(owner, repo, head_sha)
+        except httpx.HTTPStatusError as exc:
+            status = getattr(exc.response, 'status_code', None)
+            resp_headers = getattr(exc.response, 'headers', {}) if getattr(exc, 'response', None) else {}
+            remaining = resp_headers.get('x-ratelimit-remaining') if resp_headers else None
+            retry_after = resp_headers.get('retry-after') if resp_headers else None
+            if status in (403, 429) or remaining == '0':
+                msg = f'GitHub rate-limited (HTTP {status}'
+                if remaining == '0':
+                    msg += ', remaining=0'
+                if retry_after:
+                    msg += f', retry after {retry_after}s'
+                msg += '). Add a GitHub token to raise the limit to 5,000 req/h, or wait and re-sync.'
+                return await _sync_error(source, msg)
+            return await _sync_error(source, f'Failed to list repository tree (HTTP {status})')
         if tree is None:
             return await _sync_error(source, 'Failed to list repository tree')
 
         blobs = [entry for entry in tree if entry.get('type') == 'blob' and path_is_safe(entry['path'], directory)]
 
+        # Resolve the extension allow-list for this source (per-source override -> admin default -> hardcoded fallback)
+        try:
+            admin_default_exts = await Config.get('rag.github.allowed_extensions') or _ADMIN_ALLOWED_DEFAULT
+        except Exception:
+            admin_default_exts = _ADMIN_ALLOWED_DEFAULT
+        allowed_exts = list(source.allowed_extensions) if source.allowed_extensions else list(admin_default_exts)
+
         # Security + policy filters
         candidates = []
         for entry in blobs:
             path = entry['path']
-            if matches_any(path, SECURITY_DENY_PATTERNS) or matches_any(path, list(source.exclude_globs or [])):
+            name = path.rsplit('/', 1)[-1]
+            if _filename_deny(name) or matches_any(path, list(source.exclude_globs or [])):
                 result['skipped_deny'] += 1
+                continue
+            if source.include_globs and not matches_any(path, list(source.include_globs)):
+                continue
+            if not extension_allowed(path, allowed_exts):
+                result['skipped_ext'] += 1
                 continue
             if source.include_globs and not matches_any(path, list(source.include_globs)):
                 continue
@@ -323,10 +387,15 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
                 continue
             candidates.append(entry)
 
-        if len(candidates) > int(source.max_files):
+        total_candidates = len(candidates)
+        if total_candidates > int(source.max_files):
+            result['truncated'] = True
+            result['total_candidates'] = total_candidates
+            result['max_files'] = int(source.max_files)
             result['errors'].append(
-                f'{len(candidates)} candidate files exceed max_files={source.max_files}; '
-                f'syncing first {source.max_files}'
+                f'{total_candidates} candidate files exceed max_files={source.max_files}; '
+                f'syncing first {source.max_files}. Bump the source max_files (currently '
+                f'capped at {int(source.max_files)}) to import more in one run.'
             )
             candidates = candidates[: int(source.max_files)]
 
