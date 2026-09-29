@@ -43,11 +43,20 @@
 	let srcCredentialId = '';
 	let srcIntervalHours = 24;
 	let srcRemoveDeleted = true;
+	let srcAllowedExtensions = '';
 
 	function parseRepoUrl(url: string): { owner: string; repo: string } | null {
 		const m = url.trim().match(/(?:github\.com[\/:])([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/);
 		if (!m) return null;
 		return { owner: m[1], repo: m[2].replace(/\.git$/, '') };
+	}
+
+	function parseExtensions(raw: string): string[] | null {
+		const list = raw
+			.split(',')
+			.map((s) => s.trim().replace(/^\./, '').toLowerCase())
+			.filter(Boolean);
+		return list.length ? list : null;
 	}
 
 	async function refresh() {
@@ -116,16 +125,7 @@
 				credential_id: srcCredentialId || null,
 				remove_deleted: srcRemoveDeleted,
 				interval_seconds: srcIntervalHours > 0 ? srcIntervalHours * 3600 : null,
-				allowed_extensions: srcAllowedExtensions
-					.split(',')
-					.map((s) => s.trim().replace(/^\./, '').toLowerCase())
-					.filter(Boolean)
-					.length
-					? srcAllowedExtensions
-						.split(',')
-						.map((s) => s.trim().replace(/^\./, '').toLowerCase())
-						.filter(Boolean)
-					: null
+				allowed_extensions: parseExtensions(srcAllowedExtensions)
 			});
 			toast.success($i18n.t('Source created — run "Sync now" to import'));
 			srcRepoUrl = srcBranch = 'main';
@@ -414,38 +414,37 @@
 					bind:value={srcDirectory}
 				/>
 			</div>
-			<div class="grid grid-cols-2 gap-3">
-				<select
-					class="text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5"
-					bind:value={srcCredentialId}
-				>
-					<option value="">{$i18n.t('No token (public repos, rate-limited)')}</option>
-					{#each credentials as cred (cred.id)}
-						<option value={cred.id}>{cred.name} (…{cred.token_suffix})</option>
-					{/each}
-				</select>
-				<input
-					type="number"
-					min="0"
-					class="text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5"
-					placeholder={$i18n.t('Sync every N hours (0 = manual)')}
-					bind:value={srcIntervalHours}
-				/>
+		<div class="grid grid-cols-2 gap-3">
+			<select
+				class="text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5"
+				bind:value={srcCredentialId}
+			>
+				<option value="">{$i18n.t('No token (public repos, rate-limited)')}</option>
+				{#each credentials as cred (cred.id)}
+					<option value={cred.id}>{cred.name} (...{cred.token_suffix})</option>
+				{/each}
+			</select>
 			<input
-			<AdminSettingField
+				type="number"
+				min="0"
+				class="text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5"
+				placeholder={$i18n.t('Sync every N hours (0 = manual)')}
+				bind:value={srcIntervalHours}
+			/>
 		</div>
 		<input
 			class="text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5 w-full"
 			placeholder={$i18n.t('Allowed extensions (e.g. md, txt, py, json) - empty uses admin default')}
 			bind:value={srcAllowedExtensions}
 		/>
-				label={$i18n.t('Remove files deleted from the repository')}
-				description={$i18n.t(
-					'On each sync, files removed from the repo are also removed from the knowledge base.'
-				)}
-			>
-				<Switch bind:state={srcRemoveDeleted} />
-			</AdminSettingField>
+		<AdminSettingField
+			label={$i18n.t('Remove files deleted from the repository')}
+			description={$i18n.t(
+				'On each sync, files removed from the repo are also removed from the knowledge base.'
+			)}
+		>
+			<Switch bind:state={srcRemoveDeleted} />
+		</AdminSettingField>
 			<div class="flex gap-2">
 				<button
 					type="button"
