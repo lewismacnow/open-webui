@@ -420,6 +420,11 @@
 					placeholder={$i18n.t('Sync every N hours (0 = manual)')}
 					bind:value={srcIntervalHours}
 				/>
+			<input
+				class="text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5 col-span-2"
+				placeholder={$i18n.t('Allowed extensions (e.g. md, txt, py, json) — empty uses admin default')}
+				bind:value={srcAllowedExtensions}
+			/>
 			</div>
 			<AdminSettingField
 				label={$i18n.t('Remove files deleted from the repository')}
