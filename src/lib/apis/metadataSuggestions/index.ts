@@ -86,6 +86,9 @@ export const getMetadataScans = async (
 ): Promise<MetadataScan[]> =>
 	req(`${base}/scans?limit=${limit}${knowledgeId ? `&knowledge_id=${knowledgeId}` : ''}`, token);
 
+export const cancelMetadataScan = async (token: string, id: string): Promise<boolean> =>
+	req(`${base}/scans/${id}/cancel`, token, { method: 'POST' });
+
 export const getMetadataScan = async (token: string, id: string): Promise<MetadataScan> =>
 	req(`${base}/scans/${id}`, token);
 

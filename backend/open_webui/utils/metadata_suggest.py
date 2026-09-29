@@ -154,15 +154,24 @@ def _current_metadata(file) -> dict:
 
 
 def _file_excerpt(file) -> str:
-    """Read the stored file bytes and return a bounded text excerpt."""
-    try:
-        import os
+    """Read the stored file bytes and return a bounded text excerpt.
 
-        path = file.path or ''
-        filename = os.path.basename(path)
-        local = os.path.join(UPLOAD_DIR, filename)
-        if not os.path.isfile(local):
+    Goes through the Storage abstraction (Storage.get_file) so S3-backed
+    deployments work, not just local UPLOAD_DIR. Blocking IO is acceptable
+    here - the scan worker is already bounded by max_parallel=1 default.
+    """
+    try:
+        from open_webui.storage.provider import Storage
+
+        if not file.path:
             return ''
+        local = Storage.get_file(file.path)
+        with open(local, 'rb') as fh:
+            raw = fh.read(CONTENT_EXCERPT_CHARS * 4)  # bytes headroom for multi-byte
+        text = raw.decode('utf-8', errors='replace')
+        return text[:CONTENT_EXCERPT_CHARS]
+    except Exception:
+        return ''
         with open(local, 'rb') as fh:
             raw = fh.read(CONTENT_EXCERPT_CHARS * 4)  # bytes headroom for multi-byte
         text = raw.decode('utf-8', errors='replace')
@@ -260,6 +269,13 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
 
     async def handle_file(file):
         nonlocal processed, proposals, redactions_total
+
+        # Cancellation checkpoint: the cancel endpoint flips status to
+        # 'cancelled'; stop picking up new files (in-flight ones finish).
+        current = await MetadataScans.get_scan(scan.id)
+        if current and current.status == 'cancelled':
+            return
+
         async with sem:
             try:
                 raw = await _suggest_one(request, user, scan.model_id, file, attributes)
@@ -305,6 +321,16 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
 
             async with lock:
                 if proposal:
+                    # Dedupe: dismiss older pending proposals for this file so
+                    # apply-all never stacks multiple rounds on one document.
+                    try:
+                        for older in await MetadataProposals.get_proposals(
+                            knowledge_id=scan.knowledge_id, status='pending', limit=10000
+                        ):
+                            if older.file_id == file.id:
+                                await MetadataProposals.set_status(older.id, 'dismissed')
+                    except Exception:
+                        pass
                     await MetadataProposals.insert_proposal(
                         {
                             'scan_id': scan.id,
@@ -330,7 +356,9 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                 )
 
     await asyncio.gather(*(handle_file(f) for f in files))
-    await MetadataScans.finish_scan(scan.id, 'completed', errors or None)
+    final = await MetadataScans.get_scan(scan.id)
+    final_status = 'cancelled' if (final and final.status == 'cancelled') else 'completed'
+    await MetadataScans.finish_scan(scan.id, final_status, errors or None)
     log.info(
         'Metadata scan %s finished: %s/%s files, %s proposals, %s redactions',
         scan.id,

@@ -329,6 +329,39 @@ async def ensure_github_directory(knowledge_id: str, owner: str, repo: str, bran
     return created or None
 
 
+# Per-source in-process locks + active-sync set. Prevents a manual "Sync
+# now" and a scheduled tick from running the SAME source concurrently
+# (both would see empty by_repo_path state and double-insert files).
+_source_locks: dict = {}
+_active_syncs: set = set()
+
+
+def _get_source_lock(source_id: str) -> asyncio.Lock:
+    if source_id not in _source_locks:
+        _source_locks[source_id] = asyncio.Lock()
+    return _source_locks[source_id]
+
+
+async def _sweep_stale_processing_files(source_id: str) -> int:
+    """Delete files left status='processing' with no KB link by a previous
+    sync that died mid-extraction (process restart, cancellation). Without
+    this they linger as invisible orphans in the file table forever."""
+    from sqlalchemy import delete as sa_delete
+
+    from open_webui.internal.db import get_async_db_context
+    from open_webui.models.files import File
+
+    async with get_async_db_context() as db:
+        result = await db.execute(
+            sa_delete(File).where(
+                File.data['status'].as_string() == 'processing',
+                File.meta['data']['github_source_id'].as_string() == source_id,
+            )
+        )
+        await db.commit()
+        return int(result.rowcount or 0)
+
+
 async def _sync_error(source, message: str, status: str = 'error') -> dict:
     result = {
         'status': 'ok',
@@ -351,7 +384,30 @@ async def _sync_error(source, message: str, status: str = 'error') -> dict:
 
 
 async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
-    """Run one full sync of a source. Idempotent, safe to re-run."""
+    """Run one full sync of a source. Idempotent, safe to re-run.
+
+    Serialised per source: a second concurrent caller (manual Sync now
+    racing a scheduled tick) gets an already-running marker instead of
+    double-inserting files.
+    """
+    lock = _get_source_lock(source.id)
+    if lock.locked() or source.id in _active_syncs:
+        return {
+            'status': 'already_running',
+            'error': 'A sync for this source is already in progress',
+            'added': 0, 'updated': 0, 'removed': 0, 'unchanged': 0,
+            'skipped_size': 0, 'skipped_ext': 0, 'skipped_deny': 0, 'skipped_dup': 0,
+            'truncated': False, 'total_candidates': 0, 'errors': ['already running'],
+        }
+    async with lock:
+        _active_syncs.add(source.id)
+        try:
+            return await _sync_github_source_inner(app, source)
+        finally:
+            _active_syncs.discard(source.id)
+
+
+async def _sync_github_source_inner(app, source: KnowledgeGithubSourceModel) -> dict:
     import hashlib
 
     from open_webui.models.github_credential import GithubCredentials
@@ -359,6 +415,16 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
 
     owner, repo, branch = source.repo_owner, source.repo_name, source.branch
     directory = (source.directory_path or '').strip('/')
+
+    # Clean files orphaned by a previously crashed sync (status='processing',
+    # never linked into the KB). Counted in the result envelope.
+    try:
+        result_orphans = await _sweep_stale_processing_files(source.id)
+        if result_orphans:
+            log.info('GitHub sync %s: swept %d orphaned processing file(s)', source.id, result_orphans)
+    except Exception:
+        log.exception('GitHub sync %s: orphan sweep failed (continuing)', source.id)
+        result_orphans = 0
 
     token = None
     if source.credential_id:
@@ -496,7 +562,13 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
 
                     resp = await client.fetch_raw(owner, repo, branch, path)
                     if resp.status_code != 200:
-                        result['errors'].append(f'{path}: HTTP {resp.status_code}')
+                        if resp.status_code in (301, 302, 303, 307, 308):
+                            result['errors'].append(
+                                f'{path}: redirect ({resp.status_code}) not followed - likely a '
+                                'Git LFS pointer or renamed path; excluded by policy'
+                            )
+                        else:
+                            result['errors'].append(f'{path}: HTTP {resp.status_code}')
                         return
                     content = resp.content
                     if len(content) > int(source.max_file_bytes):
@@ -627,9 +699,13 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
 
         # ── Removal pass: files synced from this source no longer in tree ─
         if source.remove_deleted:
-            candidate_paths = {e['path'] for e in candidates}
+            # Compare against the PRE-policy tree paths, NOT the post-filter
+            # candidates: a file that still exists in the repo but is now
+            # excluded by policy (extension/size/globs) must NOT be deleted
+            # from the KB - only files actually removed from the repo are.
+            tree_paths = {e['path'] for e in blobs}
             for path, f in list(by_repo_path.items()):
-                if path not in candidate_paths:
+                if path not in tree_paths:
                     try:
                         await Knowledges.remove_file_from_knowledge_by_id(source.knowledge_id, f.id)
                         await Files.delete_file_by_id(f.id)
@@ -637,6 +713,8 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
                     except Exception as e:
                         result['errors'].append(f'remove {path}: {e}')
 
+        result['orphans_swept'] = result_orphans
+        result['rate_limit_remaining'] = client._remaining
         await KnowledgeGithubSources.finish_sync(source.id, status='ok', result=result, commit_sha=head_sha)
         log.info(
             'GitHub sync %s (%s/%s@%s): %s',

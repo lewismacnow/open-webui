@@ -191,5 +191,11 @@ async def sync_source_now(id: str, request: Request, user=Depends(get_admin_user
     if not source:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail='Source not found')
     await _validate_knowledge(source.knowledge_id, user)
-    result = await sync_github_source(request.app, source)
-    return result
+
+    # Fire-and-forget: rate-limit pacing can legitimately sleep for up to an
+    # hour on anonymous sources. Awaiting inline would hold the HTTP request
+    # open, and the frontend proxy timeout (nginx/Plesk, typically 60s) would
+    # cancel the request - killing the sync mid-run via CancelledError. The
+    # panel polls source status for the outcome.
+    asyncio.create_task(sync_github_source(request.app, source))
+    return {'status': 'started', 'detail': 'Sync running in background; poll the source for results'}
