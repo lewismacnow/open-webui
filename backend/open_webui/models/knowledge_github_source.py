@@ -42,8 +42,12 @@ class KnowledgeGithubSource(Base):
     include_globs = Column(JSON, nullable=True)  # list[str] | None = all
     exclude_globs = Column(JSON, nullable=True)  # list[str] | None
     max_file_bytes = Column(BigInteger, nullable=False, default=5 * 1024 * 1024)
-    max_files = Column(BigInteger, nullable=False, default=1000)
+    max_files = Column(BigInteger, nullable=False, default=0)  # 0 = no cap; pace via GitHub rate-limit headers
     remove_deleted = Column(BigInteger, nullable=False, default=1)  # bool as int
+    # Per-source extension allow-list override. NULL = use admin default
+    # (chat.api_tools.allowed_categories-style key: rag.github.allowed_extensions),
+    # falling back to SYNC_ALLOWED_EXTENSIONS.
+    allowed_extensions = Column(JSON, nullable=True)
 
     # Schedule — interval only (croniter-free). NULL disables scheduling;
     # manual "sync now" still works.
@@ -82,8 +86,9 @@ class KnowledgeGithubSourceModel(BaseModel):
     include_globs: Optional[list[str]] = None
     exclude_globs: Optional[list[str]] = None
     max_file_bytes: int = 5 * 1024 * 1024
-    max_files: int = 1000
+    max_files: int = 0  # 0 = no cap; pace via GitHub rate-limit headers
     remove_deleted: bool = True
+    allowed_extensions: Optional[list[str]] = None
     interval_seconds: Optional[int] = None
     next_run_at: Optional[int] = None
     enabled: bool = True
@@ -110,6 +115,7 @@ class KnowledgeGithubSourceForm(BaseModel):
     remove_deleted: bool = True
     interval_seconds: Optional[int] = DEFAULT_SYNC_INTERVAL_SECONDS
     enabled: bool = True
+    allowed_extensions: Optional[list[str]] = None
 
 
 class KnowledgeGithubSourceUpdateForm(BaseModel):
@@ -119,10 +125,11 @@ class KnowledgeGithubSourceUpdateForm(BaseModel):
     include_globs: Optional[list[str]] = None
     exclude_globs: Optional[list[str]] = None
     max_file_bytes: Optional[int] = None
-    max_files: Optional[int] = None
+    max_files: Optional[int] = 0  # 0 = no cap
     remove_deleted: Optional[bool] = None
     interval_seconds: Optional[int] = None
     enabled: Optional[bool] = None
+    allowed_extensions: Optional[list[str]] = None
 
 
 def _compute_next_run(interval_seconds: Optional[int], now: Optional[int] = None) -> Optional[int]:
@@ -157,6 +164,7 @@ class KnowledgeGithubSourcesTable:
                     interval_seconds=form_data.interval_seconds,
                     next_run_at=_compute_next_run(form_data.interval_seconds, now),
                     enabled=1 if form_data.enabled else 0,
+                    allowed_extensions=form_data.allowed_extensions,
                     created_at=now,
                     updated_at=now,
                 )
@@ -257,6 +265,8 @@ class KnowledgeGithubSourcesTable:
             if form_data.interval_seconds is not None:
                 values['interval_seconds'] = form_data.interval_seconds
                 values['next_run_at'] = _compute_next_run(form_data.interval_seconds)
+            if form_data.allowed_extensions is not None:
+                values['allowed_extensions'] = form_data.allowed_extensions
             await db.execute(update(KnowledgeGithubSource).where(KnowledgeGithubSource.id == id).values(**values))
             await db.commit()
         return await self.get_source(id)

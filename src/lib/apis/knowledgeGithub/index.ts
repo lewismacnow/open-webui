@@ -43,6 +43,7 @@ export type GithubSyncSource = {
 	consecutive_failures: number;
 	created_at: number;
 	updated_at: number;
+	allowed_extensions: string[] | null;
 };
 
 export type CreateGithubSyncSourceInput = {
@@ -59,6 +60,7 @@ export type CreateGithubSyncSourceInput = {
 	remove_deleted?: boolean;
 	interval_seconds?: number | null;
 	enabled?: boolean;
+	allowed_extensions?: string[] | null;
 };
 
 const credsUrl = `${WEBUI_API_BASE_URL}/github-sync/credentials`;
