@@ -42,7 +42,7 @@ class KnowledgeGithubSource(Base):
     include_globs = Column(JSON, nullable=True)  # list[str] | None = all
     exclude_globs = Column(JSON, nullable=True)  # list[str] | None
     max_file_bytes = Column(BigInteger, nullable=False, default=5 * 1024 * 1024)
-    max_files = Column(BigInteger, nullable=False, default=1000)
+    max_files = Column(BigInteger, nullable=False, default=0)  # 0 = no cap; pace via GitHub rate-limit headers
     remove_deleted = Column(BigInteger, nullable=False, default=1)  # bool as int
     # Per-source extension allow-list override. NULL = use admin default
     # (chat.api_tools.allowed_categories-style key: rag.github.allowed_extensions),
@@ -86,7 +86,7 @@ class KnowledgeGithubSourceModel(BaseModel):
     include_globs: Optional[list[str]] = None
     exclude_globs: Optional[list[str]] = None
     max_file_bytes: int = 5 * 1024 * 1024
-    max_files: int = 1000
+    max_files: int = 0  # 0 = no cap; pace via GitHub rate-limit headers
     remove_deleted: bool = True
     allowed_extensions: Optional[list[str]] = None
     interval_seconds: Optional[int] = None
@@ -125,7 +125,7 @@ class KnowledgeGithubSourceUpdateForm(BaseModel):
     include_globs: Optional[list[str]] = None
     exclude_globs: Optional[list[str]] = None
     max_file_bytes: Optional[int] = None
-    max_files: Optional[int] = None
+    max_files: Optional[int] = 0  # 0 = no cap
     remove_deleted: Optional[bool] = None
     interval_seconds: Optional[int] = None
     enabled: Optional[bool] = None

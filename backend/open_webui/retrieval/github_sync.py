@@ -210,6 +210,13 @@ def extension_allowed(repo_path: str, allowed_extensions: list[str]) -> bool:
     allowed = {e.lstrip('.').lower() for e in allowed_extensions}
     return ext in allowed
 
+# Rate-limit safety margin - start pacing when we have this many calls
+# remaining (in addition to the one we're about to make). Lower bound that
+# leaves headroom for the catch-up burst after a sleep.
+RATELIMIT_SAFETY_MARGIN = 50
+
+
+class GithubSyncClient:
     def __init__(self, token: Optional[str] = None):
         headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
         if token:
@@ -217,14 +224,65 @@ def extension_allowed(repo_path: str, allowed_extensions: list[str]) -> bool:
         self._client = httpx.AsyncClient(
             base_url=API_BASE, headers=headers, timeout=REQUEST_TIMEOUT, follow_redirects=False
         )
+        # Rate-limit tracking (x-ratelimit-remaining, x-ratelimit-reset epoch
+        # seconds). Optional - anonymous/no-header responses stay None and
+        # pacing falls through to no sleep.
+        self._remaining: Optional[int] = None
+        self._reset_at: Optional[float] = None
+        self._lock = asyncio.Lock()
 
     async def aclose(self):
         await self._client.aclose()
 
+    def _record_rate_limit(self, resp: httpx.Response) -> None:
+        try:
+            remaining_raw = resp.headers.get('x-ratelimit-remaining')
+            reset_raw = resp.headers.get('x-ratelimit-reset')
+            if remaining_raw is not None:
+                self._remaining = int(remaining_raw)
+            if reset_raw is not None:
+                self._reset_at = float(reset_raw) or (time.time() + 60)
+        except (TypeError, ValueError):
+            pass
+
+    async def _pace(self) -> None:
+        """Sleep before a request when the GitHub rate-limit budget is low.
+
+        Strategy:
+          * remaining is None (no header) -> no pacing (admin-tier or older API).
+          * remaining <= 0 -> sleep until x-ratelimit-reset (hard cap).
+          * remaining <= RATELIMIT_SAFETY_MARGIN -> sleep until reset so we
+            never hit the cap mid-run.
+          * otherwise -> no sleep.
+
+        Self-resets the cached values whenever the reset window passes, so
+        the sync resumes naturally after a long pause. The lock prevents
+        multiple concurrent fetches from racing to wait the same window.
+        """
+        async with self._lock:
+            if self._remaining is None:
+                return
+            now = time.time()
+            if self._reset_at and now >= self._reset_at:
+                self._remaining = None
+                self._reset_at = None
+                return
+            if self._remaining <= 0 or self._remaining <= RATELIMIT_SAFETY_MARGIN:
+                sleep_for = max((self._reset_at or now + 60) - now, 1.0)
+                log.info(
+                    'GitHub rate-limit pacing: remaining=%s, sleeping %.0fs until reset',
+                    self._remaining, sleep_for,
+                )
+                await asyncio.sleep(sleep_for)
+                self._remaining = None
+                self._reset_at = None
+
     async def _get(self, url: str, params: Optional[dict] = None) -> httpx.Response:
+        await self._pace()
         resp = await self._client.get(url, params=params)
+        self._record_rate_limit(resp)
         if resp.status_code == 429 or resp.status_code >= 500:
-            resp.raise_for_status()  # caller backoff-handles
+            resp.raise_for_status()
         return resp
 
     async def get_repo(self, owner: str, repo: str) -> httpx.Response:
@@ -237,7 +295,7 @@ def extension_allowed(repo_path: str, allowed_extensions: list[str]) -> bool:
         return (resp.json().get('commit') or {}).get('sha')
 
     async def get_tree(self, owner: str, repo: str, tree_sha: str) -> Optional[list[dict]]:
-        """Recursive tree; returns the truncated flag shrunk away — when a
+        """Recursive tree; returns the truncated flag shrunk away - when a
         repo exceeds the tree limit we surface it as a sync error rather
         than silently syncing a partial tree."""
         resp = await self._get(f'/repos/{owner}/{repo}/git/trees/{tree_sha}', params={'recursive': '1'})
@@ -245,12 +303,16 @@ def extension_allowed(repo_path: str, allowed_extensions: list[str]) -> bool:
             return None
         body = resp.json()
         if body.get('truncated'):
-            raise RuntimeError('Repository tree truncated by GitHub API — narrow the directory path')
+            raise RuntimeError('Repository tree truncated by GitHub API - narrow the directory path')
         return body.get('tree') or []
 
     async def fetch_raw(self, owner: str, repo: str, branch: str, repo_path: str) -> httpx.Response:
-        # Deliberately a separate client call with absolute URL (different host).
-        return await self._client.get(f'{RAW_BASE}/{owner}/{repo}/{branch}/{repo_path}')
+        # Pacing is serialised across in-flight fetches (lock) so the budget
+        # is shared fairly instead of N concurrent bursts.
+        await self._pace()
+        resp = await self._client.get(f'{RAW_BASE}/{owner}/{repo}/{branch}/{repo_path}')
+        self._record_rate_limit(resp)
+        return resp
 
 
 async def ensure_github_directory(knowledge_id: str, owner: str, repo: str, branch: str, user_id: str):
@@ -388,16 +450,19 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
             candidates.append(entry)
 
         total_candidates = len(candidates)
-        if total_candidates > int(source.max_files):
+        max_files = int(source.max_files or 0)
+        if max_files > 0 and total_candidates > max_files:
+            # Honour an explicit safety cap if the admin set one. Default
+            # sources (max_files=0) skip the cap entirely and pace via the
+            # GitHub rate-limit headers instead — see GithubSyncClient._pace.
             result['truncated'] = True
             result['total_candidates'] = total_candidates
-            result['max_files'] = int(source.max_files)
+            result['max_files'] = max_files
             result['errors'].append(
-                f'{total_candidates} candidate files exceed max_files={source.max_files}; '
-                f'syncing first {source.max_files}. Bump the source max_files (currently '
-                f'capped at {int(source.max_files)}) to import more in one run.'
+                f'{total_candidates} candidate files exceed max_files={max_files}; '
+                f'syncing first {max_files}. Set max_files to 0 on this source to remove the cap.'
             )
-            candidates = candidates[: int(source.max_files)]
+            candidates = candidates[:max_files]
 
         # ── Existing synced files for this source (by repo path) ─────
         existing_files = await Knowledges.get_files_by_id(source.knowledge_id)
