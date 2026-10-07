@@ -13,7 +13,7 @@
 		type MetadataProposal
 	} from '$lib/apis/metadataSuggestions';
 	import { getKnowledgeBases } from '$lib/apis/knowledge';
-	import { getBaseModels } from '$lib/apis/models';
+	import { getAllModels, getBaseModels } from '$lib/apis/models';
 
 	import Switch from '$lib/components/common/Switch.svelte';
 	import AdminSettingField from './AdminSettingField.svelte';
@@ -29,7 +29,10 @@
 	];
 
 	let knowledgeBases: any[] = [];
-	let models: any[] = [];
+	let baseModels: any[] = [];
+	let workspaceModels: any[] = [];
+	// Proposal ids whose long-field (description/summary) diff is expanded.
+	let expandedProposals = new Set<string>();
 	let loaded = false;
 	let busy = false;
 
@@ -46,6 +49,50 @@
 	let latestScan: MetadataScan | null = null;
 	let proposals: MetadataProposal[] = [];
 	let pollTimer: any = null;
+
+	// Friendly labels for common owned_by values; unknown providers fall
+	// back to titlecase so every group still reads cleanly.
+	const PROVIDER_LABELS: Record<string, string> = {
+		openai: 'OpenAI',
+		ollama: 'Ollama',
+		anthropic: 'Anthropic',
+		azure: 'Azure OpenAI',
+		google: 'Google',
+		'google-vertex': 'Vertex AI',
+		groq: 'Groq',
+		mistral: 'Mistral',
+		cohere: 'Cohere',
+		'openrouter': 'OpenRouter',
+		together: 'Together',
+		deepseek: 'DeepSeek',
+		xai: 'xAI',
+		'z-ai': 'Z.AI',
+		llama_cpp: 'Llama C++',
+		lm_studio: 'LM Studio',
+		vllm: 'vLLM',
+		arena: 'Arena'
+	};
+
+	function providerLabel(ownedBy: string | undefined): string {
+		const key = (ownedBy || 'unknown').toLowerCase();
+		if (PROVIDER_LABELS[key]) return PROVIDER_LABELS[key];
+		return (ownedBy || 'unknown').replace(/\b\w/g, (c) => c.toUpperCase());
+	}
+
+	const byName = (a: any, b: any) => (a?.name ?? '').localeCompare(b?.name ?? '');
+
+	// Group 1: wrapper (workspace) models, alphabetical.
+	$: wrapperModels = [...workspaceModels].sort(byName);
+	// Groups 2..N: base models grouped by owned_by, groups + items alphabetical.
+	$: baseGroups = Object.entries(
+			baseModels.reduce((acc: Record<string, any[]>, m) => {
+				const key = (m?.owned_by || 'unknown').toLowerCase();
+				(acc[key] ??= []).push(m);
+				return acc;
+			}, {})
+		)
+		.map(([key, ms]) => [providerLabel(key), [...ms].sort(byName)] as [string, any[]])
+		.sort(([a], [b]) => a.localeCompare(b));
 
 	const modeLabels: Record<string, string> = {
 		all: 'Entire knowledge base',
@@ -170,6 +217,21 @@
 		}
 	}
 
+	function tagsEqual(a: string[] | null, b: string[] | null): boolean {
+		const sa = [...(a ?? [])].sort();
+		const sb = [...(b ?? [])].sort();
+		return sa.length === sb.length && sa.every((v, i) => v === sb[i]);
+	}
+
+	function toggleExpanded(id: string) {
+		if (expandedProposals.has(id)) {
+			expandedProposals.delete(id);
+		} else {
+			expandedProposals.add(id);
+		}
+		expandedProposals = expandedProposals; // trigger reactivity
+	}
+
 	function attrOf(p: MetadataProposal): string {
 		const parts: string[] = [];
 		if (p.proposed_title) parts.push('title');
@@ -182,16 +244,16 @@
 	onMount(async () => {
 		const token = localStorage.token;
 		try {
-			const [kbResponse, modelsResponse] = await Promise.all([
+			const [kbResponse, baseResponse, allResponse] = await Promise.all([
 				getKnowledgeBases(token),
-				getBaseModels(token)
+				getBaseModels(token), // /models/base — connection models with owned_by
+				getAllModels(token) // /models/all — workspace (wrapper) model records
 			]);
 			// /api/v1/knowledge/ returns a paginated envelope {items, total};
 			// fall back to a bare array for forward-compat.
-			knowledgeBases = Array.isArray(kbResponse)
-				? kbResponse
-				: (kbResponse?.items ?? []);
-			models = Array.isArray(modelsResponse) ? modelsResponse : (modelsResponse?.items ?? modelsResponse ?? []);
+			knowledgeBases = Array.isArray(kbResponse) ? kbResponse : (kbResponse?.items ?? []);
+			baseModels = Array.isArray(baseResponse) ? baseResponse : (baseResponse?.items ?? []);
+			workspaceModels = Array.isArray(allResponse) ? allResponse : (allResponse?.items ?? []);
 		} catch (e) {
 			console.error(e);
 		}
@@ -233,8 +295,19 @@
 				bind:value={scanModelId}
 			>
 				<option value="">{$i18n.t('Select model…')}</option>
-				{#each models as model (model.id)}
-					<option value={model.id}>{model.name}</option>
+				{#if wrapperModels.length}
+					<optgroup label={$i18n.t('Wrapper models')}>
+						{#each wrapperModels as model (model.id)}
+							<option value={model.id}>{model.name}</option>
+						{/each}
+					</optgroup>
+				{/if}
+				{#each baseGroups as [label, groupModels] (label)}
+					<optgroup label={label}>
+						{#each groupModels as model (model.id)}
+							<option value={model.id}>{model.name}</option>
+						{/each}
+					</optgroup>
 				{/each}
 			</select>
 		</div>
@@ -400,32 +473,81 @@
 							</button>
 						</div>
 					</div>
-					<div class="text-xs space-y-1">
+					<div class="text-xs space-y-1.5">
 						{#if proposal.proposed_title}
 							<div>
 								<span class="text-gray-400">{$i18n.t('Title')}:</span>
-								<s class="text-gray-400">{proposal.previous_title || '—'}</s>
-								→ <span class="font-medium">{proposal.proposed_title}</span>
+								{#if proposal.previous_title && proposal.previous_title !== proposal.proposed_title}
+									<s class="text-gray-400 mr-1">{proposal.previous_title}</s>
+									<span class="text-gray-400 mr-1">→</span>
+								{/if}
+								<span class="font-medium">{proposal.proposed_title}</span>
 							</div>
 						{/if}
+
 						{#if proposal.proposed_description}
 							<div>
 								<span class="text-gray-400">{$i18n.t('Description')}:</span>
-								{proposal.proposed_description}
-							</div>
-						{/if}
-						{#if proposal.proposed_summary}
-							<div class="text-gray-500 dark:text-gray-400 line-clamp-2">
-								<span class="text-gray-400">{$i18n.t('Summary')}:</span>
-								{proposal.proposed_summary}
-							</div>
-						{/if}
-						{#if proposal.proposed_tags}
-							<div class="flex flex-wrap gap-1 pt-1">
-								{#each proposal.proposed_tags as tag (tag)}
-									<span class="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-[10px]"
-										>{tag}</span
+								{#if proposal.previous_description && proposal.previous_description !== proposal.proposed_description}
+									<button
+										type="button"
+										class="ml-1 underline text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+										on:click={() => toggleExpanded(proposal.id)}
 									>
+										{expandedProposals.has(proposal.id)
+											? $i18n.t('hide before')
+											: $i18n.t('show before')}
+									</button>
+								{/if}
+								{#if proposal.previous_description && proposal.previous_description !== proposal.proposed_description && expandedProposals.has(proposal.id)}
+									<s class="block text-gray-400 line-clamp-3 mt-0.5">{proposal
+										.previous_description}</s>
+								{/if}
+								<span class="block mt-0.5">{proposal.proposed_description}</span>
+							</div>
+						{/if}
+
+						{#if proposal.proposed_summary}
+							<div>
+								<span class="text-gray-400">{$i18n.t('Summary')}:</span>
+								{#if proposal.previous_summary && proposal.previous_summary !== proposal.proposed_summary}
+									<button
+										type="button"
+										class="ml-1 underline text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+										on:click={() => toggleExpanded(proposal.id)}
+									>
+										{expandedProposals.has(proposal.id)
+											? $i18n.t('hide before')
+											: $i18n.t('show before')}
+									</button>
+								{/if}
+								{#if proposal.previous_summary && proposal.previous_summary !== proposal.proposed_summary && expandedProposals.has(proposal.id)}
+									<s class="block text-gray-400 line-clamp-3 mt-0.5">{proposal
+										.previous_summary}</s>
+								{/if}
+								<span class="block mt-0.5 line-clamp-3">{proposal.proposed_summary}</span>
+							</div>
+						{/if}
+
+						{#if proposal.proposed_tags && !tagsEqual(proposal.proposed_tags, proposal.previous_tags)}
+							<div class="flex flex-wrap gap-1 pt-0.5">
+								{#each proposal.previous_tags ?? [] as tag (tag)}
+									{#if !proposal.proposed_tags.includes(tag)}
+										<span class="px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-950/40 text-red-600 dark:text-red-300 text-[10px] line-through">{tag}</span>
+										{/if}
+								{/each}
+								{#each proposal.proposed_tags as tag (tag)}
+									{#if (proposal.previous_tags ?? []).includes(tag)}
+										<span class="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-gray-500 dark:text-gray-400 text-[10px]">{tag}</span>
+									{:else}
+										<span class="px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-950/40 text-green-700 dark:text-green-300 text-[10px]">+{tag}</span>
+									{/if}
+								{/each}
+							</div>
+						{:else if proposal.proposed_tags}
+							<div class="flex flex-wrap gap-1 pt-0.5">
+								{#each proposal.proposed_tags as tag (tag)}
+									<span class="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-[10px]">{tag}</span>
 								{/each}
 							</div>
 						{/if}
