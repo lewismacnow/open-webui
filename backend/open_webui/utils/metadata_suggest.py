@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import re
+from types import SimpleNamespace
 import time
 from typing import Any, Optional
 
@@ -213,11 +214,17 @@ async def _suggest_one(request, user, model_id: str, file, attributes: list[str]
         'temperature': 0.2,
     }
     response = await generate_chat_completion(request, form_data=payload, user=user)
+    # Non-stream responses are dict-like (same parse as tool_generator).
     try:
         content = (((response or {}).get('choices') or [{}])[0].get('message', {}) or {}).get('content') or ''
-    except Exception:
-        return None
-    return _extract_json(content)
+    except Exception as e:
+        raise RuntimeError(f'unparseable model response ({type(response).__name__}): {e}')
+    if not content.strip():
+        raise RuntimeError('model returned an empty message')
+    parsed = _extract_json(content)
+    if parsed is None:
+        raise RuntimeError(f'model response contained no JSON object: {content[:120]!r}')
+    return parsed
 
 
 async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
@@ -225,7 +232,10 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
     failure is logged and counted, never aborts the scan."""
     from open_webui.models.users import Users
 
-    request = type('R', (), {'app': app})()  # generate_chat_completion reads request.app only
+    # generate_chat_completion writes request.state.bypass_filter /
+    # bypass_system_prompt and reads request.state.metadata + request.app.state.*,
+    # so the shim needs a mutable .state namespace alongside .app.
+    request = SimpleNamespace(app=app, state=SimpleNamespace())
     user = await Users.get_user_by_id(scan.user_id)
     if not user:
         await MetadataScans.finish_scan(scan.id, 'failed', ['Owning admin user not found'])

@@ -313,7 +313,7 @@
 </script>
 
 <AdminSettingSection title={$i18n.t('Run a Metadata Enrichment')}>
-	<div class="max-h-[calc(100vh-12rem)] overflow-y-auto pr-1">
+	<div class="max-h-[28rem] overflow-y-auto pr-1">
 	<div
 		class="flex items-start gap-2 p-3 mb-4 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50"
 	>
@@ -405,7 +405,7 @@
 							: $i18n.t('Select a knowledge base to load its files.')}
 					</div>
 				{:else}
-					<div class="max-h-64 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-850 divide-y divide-gray-100 dark:divide-gray-850">
+					<div class="max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-850 divide-y divide-gray-100 dark:divide-gray-850">
 						{#each filteredKbFiles as file (file.id)}
 							<button
 								type="button"
@@ -484,6 +484,16 @@
 					{$i18n.t('redacted')}
 				</span>
 			</div>
+			{#if latestScan.errors?.length}
+				<div class="mt-2 text-red-500 dark:text-red-400 space-y-0.5">
+					{#each latestScan.errors.slice(0, 5) as err}
+						<div class="truncate" title={err}>{err}</div>
+					{/each}
+					{#if latestScan.errors.length > 5}
+						<div class="text-gray-400">+{latestScan.errors.length - 5} more (see server log)</div>
+					{/if}
+				</div>
+			{/if}
 			<div class="h-1.5 rounded-full bg-gray-100 dark:bg-gray-850 overflow-hidden">
 				<div
 					class="h-full bg-black dark:bg-white transition-all"
