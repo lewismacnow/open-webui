@@ -82,7 +82,7 @@ class MetadataProposal(Base):
 
     redaction_count = Column(BigInteger, nullable=False, default=0)
     proposer_model_id = Column(Text, nullable=False)
-    status = Column(Text, nullable=False, default='pending')  # pending|applied|dismissed
+    status = Column(Text, nullable=False, default='pending')  # pending|no_change|auto_applied|applied|dismissed
     applied_at = Column(BigInteger, nullable=True)
     applied_by = Column(Text, nullable=True)
     created_at = Column(BigInteger, nullable=False)

@@ -320,34 +320,61 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                     proposal['proposed_tags'] = [redact_pii(t)[0] for t in tags]
 
             async with lock:
+                # 3-tier policy: auto-apply on empty fields, queue on populated,
+                # record 'no_change' when the model returned nothing or matched.
+                payload_status = 'pending'
                 if proposal:
-                    # Dedupe: dismiss older pending proposals for this file so
-                    # apply-all never stacks multiple rounds on one document.
-                    try:
-                        for older in await MetadataProposals.get_proposals(
-                            knowledge_id=scan.knowledge_id, status='pending', limit=10000
-                        ):
-                            if older.file_id == file.id:
-                                await MetadataProposals.set_status(older.id, 'dismissed')
-                    except Exception:
-                        pass
-                    await MetadataProposals.insert_proposal(
-                        {
-                            'scan_id': scan.id,
-                            'knowledge_id': scan.knowledge_id,
-                            'file_id': file.id,
-                            'user_id': scan.user_id,
-                            **proposal,
-                            'previous_title': current['title'] or None,
-                            'previous_description': current['description'] or None,
-                            'previous_summary': current['summary'] or None,
-                            'previous_tags': current['tags'] or None,
-                            'redaction_count': redaction_count,
-                            'proposer_model_id': scan.model_id,
-                        }
+                    non_empty_present = any(
+                        (current[k] or '').strip() for k in ('title', 'description', 'summary', 'tags')
                     )
+                    if not non_empty_present:
+                        try:
+                            from open_webui.models.files import Files as _Files
+                            cur_meta = dict(file.meta) if isinstance(file.meta, dict) else {}
+                            cur_meta['description'] = proposal.get('proposed_description', cur_meta.get('description'))
+                            cur_meta['summary'] = proposal.get('proposed_summary', cur_meta.get('summary'))
+                            cur_meta['tags'] = proposal.get('proposed_tags', cur_meta.get('tags') or [])
+                            cur_meta['metadata_improved_at'] = int(time.time())
+                            cur_meta['metadata_improved_by_model'] = scan.model_id
+                            cur_meta['metadata_improved_auto'] = True
+                            await _Files.update_file_metadata_by_id(file.id, cur_meta)
+                            new_title = proposal.get('proposed_title')
+                            if new_title and new_title != (file.filename or ''):
+                                await _Files.update_file_name_by_id(file.id, new_title)
+                            payload_status = 'auto_applied'
+                        except Exception as e:
+                            log.warning('Auto-apply failed for %s: %s', file.filename, e)
+                            payload_status = 'pending'
+                else:
+                    payload_status = 'no_change'
+                # Dedupe older pending + no_change for this file
+                try:
+                    for older in await MetadataProposals.get_proposals(
+                        knowledge_id=scan.knowledge_id, limit=10000
+                    ):
+                        if older.file_id == file.id and older.status in ('pending', 'no_change'):
+                            await MetadataProposals.set_status(older.id, 'dismissed')
+                except Exception:
+                    pass
+                payload_base = dict(proposal) if proposal else {
+                    'previous_title': current['title'] or None,
+                    'previous_description': current['description'] or None,
+                    'previous_summary': current['summary'] or None,
+                    'previous_tags': current['tags'] or None,
+                }
+                payload_base.update({
+                    'scan_id': scan.id,
+                    'knowledge_id': scan.knowledge_id,
+                    'file_id': file.id,
+                    'user_id': scan.user_id,
+                    'redaction_count': redaction_count,
+                    'proposer_model_id': scan.model_id,
+                    'status': payload_status,
+                })
+                await MetadataProposals.insert_proposal(payload_base)
+                if payload_status == 'pending':
                     proposals += 1
-                    redactions_total += redaction_count
+                redactions_total += redaction_count
                 await MetadataScans.update_progress(
                     scan.id,
                     processed=processed,

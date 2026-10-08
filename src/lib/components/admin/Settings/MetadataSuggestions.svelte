@@ -126,7 +126,7 @@
 			latestScan = scans[0] ?? null;
 			proposals = await getMetadataProposals(token, {
 				knowledgeId: scanKnowledgeId || null,
-				status: 'pending'
+				status: showNoChange ? null : 'pending'
 			});
 		} catch (e) {
 			console.error(e);
@@ -312,7 +312,8 @@
 	onDestroy(stopPolling);
 </script>
 
-<AdminSettingSection title={$i18n.t('Run a Metadata Scan')}>
+<AdminSettingSection title={$i18n.t('Run a Metadata Enrichment')}>
+	<div class="max-h-[calc(100vh-12rem)] overflow-y-auto pr-1">
 	<div
 		class="flex items-start gap-2 p-3 mb-4 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50"
 	>
@@ -458,7 +459,7 @@
 			disabled={busy}
 			on:click={runScan}
 		>
-			{$i18n.t('Start scan')}
+			{$i18n.t('Enrich selected files')}
 		</button>
 	</div>
 
@@ -505,12 +506,13 @@
 				{/if}
 		</div>
 	{/if}
-</AdminSettingSection>
 
-<AdminSettingSection title={$i18n.t('Pending Proposals')}>
+	</div></AdminSettingSection>
+
+<AdminSettingSection title={$i18n.t('Pending changes')}>
 	<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
 		{$i18n.t(
-			'Suggestions are inert until applied. PII and secrets found in suggestions are redacted to [pii-redacted] automatically — never rejected.'
+			'When the model finds a missing field, the value is applied directly. Existing fields are queued for review. PII/secrets in proposals are redacted to [pii-redacted] automatically.'
 		)}
 	</p>
 
@@ -637,6 +639,6 @@
 			{/each}
 		</div>
 	{:else}
-		<div class="text-xs text-gray-400">{$i18n.t('No pending proposals.')}</div>
+		<div class="text-xs text-gray-400">{$i18n.t('No pending changes. Run a scan to suggest enrichments.')}</div>
 	{/if}
 </AdminSettingSection>
