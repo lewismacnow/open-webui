@@ -368,7 +368,39 @@ export const getKnowledgeBases = async (token: string = '', page: number | null 
 	}
 
 	return res;
+}
+
+export type KnowledgeFileListItem = {
+	id: string;
+	filename: string;
+	meta?: Record<string, any>;
+	created_at?: number;
 };
+
+export const getKnowledgeFiles = async (
+	token: string = '',
+	knowledgeId: string,
+	query: string = '',
+	page: number = 1,
+	limit: number = 50
+): Promise<KnowledgeFileListItem[]> => {
+	let error = null;
+	const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+	if (query) params.set('query', query);
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/files?${params.toString()}`,
+		{
+			method: 'GET',
+			headers: {
+				Accept: 'application/json',
+				authorization: `Bearer ${token}`
+			}
+		}
+	);
+	if (!res.ok) throw await res.json();
+	return res.json();
+};
+;
 
 export const searchKnowledgeBases = async (
 	token: string = '',

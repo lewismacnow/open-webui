@@ -13,7 +13,9 @@
 		type MetadataProposal
 	} from '$lib/apis/metadataSuggestions';
 	import { getKnowledgeBases } from '$lib/apis/knowledge';
-	import { getAllModels, getBaseModels } from '$lib/apis/models';
+	import { getAllModels } from '$lib/apis/models';
+	import { getModels } from '$lib/apis';
+	import { getKnowledgeFiles } from '$lib/apis/knowledge';
 
 	import Switch from '$lib/components/common/Switch.svelte';
 	import AdminSettingField from './AdminSettingField.svelte';
@@ -33,6 +35,13 @@
 	let workspaceModels: any[] = [];
 	// Proposal ids whose long-field (description/summary) diff is expanded.
 	let expandedProposals = new Set<string>();
+	// Single-file mode picker state.
+	let kbFiles: any[] = [];
+	let kbFileFilter: string = '';
+	let selectedKbFileId: string = '';
+	let kbFilesLoading: boolean = false;
+	let kbFilesFetchToken = 0;
+	let prevKb = '';
 	let loaded = false;
 	let busy = false;
 
@@ -83,6 +92,15 @@
 
 	// Group 1: wrapper (workspace) models, alphabetical.
 	$: wrapperModels = [...workspaceModels].sort(byName);
+	// Mirror picker selection into the scan payload.
+	$: if (scanMode === 'file') scanFileId = selectedKbFileId;
+	$: filteredKbFiles = (() => {
+		const q = kbFileFilter.trim().toLowerCase();
+		if (!q) return kbFiles;
+		return kbFiles.filter(
+			(f) => (f?.filename ?? '').toLowerCase().includes(q) || (f?.id ?? '').toLowerCase().includes(q)
+		);
+	})();
 	// Groups 2..N: base models grouped by owned_by, groups + items alphabetical.
 	$: baseGroups = Object.entries(
 			baseModels.reduce((acc: Record<string, any[]>, m) => {
@@ -241,18 +259,47 @@
 		return parts.join(', ');
 	}
 
+	async function loadKbFiles(knowledgeId: string) {
+		if (!knowledgeId) {
+			kbFiles = [];
+			return;
+		}
+		kbFilesLoading = true;
+		const myToken = ++kbFilesFetchToken;
+		try {
+			const list = await getKnowledgeFiles(localStorage.token, knowledgeId, '', 1, 200);
+			if (myToken !== kbFilesFetchToken) return; // stale response
+			kbFiles = Array.isArray(list) ? list : (list?.items ?? []);
+		} catch (e) {
+			console.error('loadKbFiles failed:', e);
+			if (myToken === kbFilesFetchToken) kbFiles = [];
+		} finally {
+			if (myToken === kbFilesFetchToken) kbFilesLoading = false;
+		}
+	}
+
+	$: if (scanKnowledgeId !== prevKb) {
+		prevKb = scanKnowledgeId;
+		selectedKbFileId = '';
+		kbFileFilter = '';
+		if (scanMode === 'file' && scanKnowledgeId) loadKbFiles(scanKnowledgeId);
+	}
+	$: if (scanMode === 'file' && scanKnowledgeId && kbFiles.length === 0 && !kbFilesLoading) {
+		loadKbFiles(scanKnowledgeId);
+	}
+
 	onMount(async () => {
 		const token = localStorage.token;
 		try {
-			const [kbResponse, baseResponse, allResponse] = await Promise.all([
+			const [kbResponse, mergedResponse, allResponse] = await Promise.all([
 				getKnowledgeBases(token),
-				getBaseModels(token), // /models/base — connection models with owned_by
-				getAllModels(token) // /models/all — workspace (wrapper) model records
+				getModels(token, null, true), // merged BASE models from all connections (owned_by set)
+				getAllModels(token) // /models/all — workspace model records (My models)
 			]);
 			// /api/v1/knowledge/ returns a paginated envelope {items, total};
 			// fall back to a bare array for forward-compat.
 			knowledgeBases = Array.isArray(kbResponse) ? kbResponse : (kbResponse?.items ?? []);
-			baseModels = Array.isArray(baseResponse) ? baseResponse : (baseResponse?.items ?? []);
+			baseModels = mergedResponse ?? []; // getModels already unwraps .data
 			workspaceModels = Array.isArray(allResponse) ? allResponse : (allResponse?.items ?? []);
 		} catch (e) {
 			console.error(e);
@@ -296,7 +343,7 @@
 			>
 				<option value="">{$i18n.t('Select model…')}</option>
 				{#if wrapperModels.length}
-					<optgroup label={$i18n.t('Wrapper models')}>
+					<optgroup label={$i18n.t('My models')}>
 						{#each wrapperModels as model (model.id)}
 							<option value={model.id}>{model.name}</option>
 						{/each}
@@ -342,11 +389,45 @@
 				{/each}
 			</div>
 		{:else if scanMode === 'file'}
-			<input
-				class="w-full text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5 font-mono"
-				placeholder={$i18n.t('File ID (from the knowledge file list)')}
-				bind:value={scanFileId}
-			/>
+			<div class="space-y-2">
+				<input
+					class="w-full text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5"
+					placeholder={$i18n.t('Search files by name or ID…')}
+					bind:value={kbFileFilter}
+				/>
+				{#if kbFilesLoading}
+					<div class="text-xs text-gray-400 py-1">{$i18n.t('Loading files…')}</div>
+				{:else if filteredKbFiles.length === 0}
+					<div class="text-xs text-gray-400 py-1">
+						{scanKnowledgeId
+							? $i18n.t('No files match this filter in the selected knowledge base.')
+							: $i18n.t('Select a knowledge base to load its files.')}
+					</div>
+				{:else}
+					<div class="max-h-64 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-850 divide-y divide-gray-100 dark:divide-gray-850">
+						{#each filteredKbFiles as file (file.id)}
+							<button
+								type="button"
+								class="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-850 flex items-center justify-between gap-2 {selectedKbFileId === file.id ? 'bg-blue-50 dark:bg-blue-950/30' : ''}"
+								on:click={() => (selectedKbFileId = file.id)}
+							>
+								<span class="truncate flex-1">
+									<span class="font-medium">{file.filename || $i18n.t('(untitled)')}</span>
+									<span class="ml-2 text-gray-400 font-mono">{file.id.slice(0, 8)}…</span>
+								</span>
+								{#if selectedKbFileId === file.id}
+									<span class="text-blue-500">✓</span>
+								{/if}
+							</button>
+						{/each}
+					</div>
+				{/if}
+				{#if selectedKbFileId}
+					<div class="text-xs text-gray-400">
+						{$i18n.t('Selected')}: <span class="font-mono">{selectedKbFileId}</span>
+					</div>
+				{/if}
+			</div>
 		{/if}
 
 		<AdminSettingField
