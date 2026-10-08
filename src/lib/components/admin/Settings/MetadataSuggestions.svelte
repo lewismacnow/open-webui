@@ -35,6 +35,8 @@
 	let workspaceModels: any[] = [];
 	// Proposal ids whose long-field (description/summary) diff is expanded.
 	let expandedProposals = new Set<string>();
+	let showNoChange: boolean = false;
+	let fileDropdownOpen: boolean = false;
 	// Single-file mode picker state.
 	let kbFiles: any[] = [];
 	let kbFileFilter: string = '';
@@ -94,6 +96,7 @@
 	$: wrapperModels = [...workspaceModels].sort(byName);
 	// Mirror picker selection into the scan payload.
 	$: if (scanMode === 'file') scanFileId = selectedKbFileId;
+	$: selectedFileName = kbFiles.find((f) => f?.id === selectedKbFileId)?.filename ?? '';
 	$: filteredKbFiles = (() => {
 		const q = kbFileFilter.trim().toLowerCase();
 		if (!q) return kbFiles;
@@ -313,7 +316,6 @@
 </script>
 
 <AdminSettingSection title={$i18n.t('Run a Metadata Enrichment')}>
-	<div class="max-h-[28rem] overflow-y-auto pr-1">
 	<div
 		class="flex items-start gap-2 p-3 mb-4 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50"
 	>
@@ -390,45 +392,61 @@
 				{/each}
 			</div>
 		{:else if scanMode === 'file'}
-			<div class="space-y-2">
+			<div class="relative">
 				<input
-					class="w-full text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5"
-					placeholder={$i18n.t('Search files by name or ID…')}
+					class="w-full text-sm rounded-lg bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-850 p-2.5 pr-9"
+					placeholder={selectedKbFileId ? selectedFileName : $i18n.t('Search files by name or ID…')}
 					bind:value={kbFileFilter}
+					on:focus={() => (fileDropdownOpen = true)}
 				/>
-				{#if kbFilesLoading}
-					<div class="text-xs text-gray-400 py-1">{$i18n.t('Loading files…')}</div>
-				{:else if filteredKbFiles.length === 0}
-					<div class="text-xs text-gray-400 py-1">
-						{scanKnowledgeId
-							? $i18n.t('No files match this filter in the selected knowledge base.')
-							: $i18n.t('Select a knowledge base to load its files.')}
-					</div>
-				{:else}
-					<div class="max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-850 divide-y divide-gray-100 dark:divide-gray-850">
-						{#each filteredKbFiles as file (file.id)}
-							<button
-								type="button"
-								class="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-850 flex items-center justify-between gap-2 {selectedKbFileId === file.id ? 'bg-blue-50 dark:bg-blue-950/30' : ''}"
-								on:click={() => (selectedKbFileId = file.id)}
-							>
-								<span class="truncate flex-1">
-									<span class="font-medium">{file.filename || $i18n.t('(untitled)')}</span>
-									<span class="ml-2 text-gray-400 font-mono">{file.id.slice(0, 8)}…</span>
-								</span>
-								{#if selectedKbFileId === file.id}
-									<span class="text-blue-500">✓</span>
-								{/if}
-							</button>
-						{/each}
-					</div>
-				{/if}
-				{#if selectedKbFileId}
-					<div class="text-xs text-gray-400">
-						{$i18n.t('Selected')}: <span class="font-mono">{selectedKbFileId}</span>
+				<button
+					type="button"
+					class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+					on:click={() => (fileDropdownOpen = !fileDropdownOpen)}
+					aria-label={$i18n.t('Browse files')}
+				>
+					{#if fileDropdownOpen}▲{:else}▼{/if}
+				</button>
+				{#if fileDropdownOpen}
+					<div class="fixed inset-0 z-20" on:click={() => (fileDropdownOpen = false)}></div>
+					<div class="absolute left-0 right-0 top-full mt-1 z-30 max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-850 bg-white dark:bg-gray-950 shadow-lg divide-y divide-gray-100 dark:divide-gray-850">
+						{#if kbFilesLoading}
+							<div class="px-3 py-2 text-xs text-gray-400">{$i18n.t('Loading files…')}</div>
+						{:else if filteredKbFiles.length === 0}
+							<div class="px-3 py-2 text-xs text-gray-400">
+								{scanKnowledgeId
+									? $i18n.t('No files match this filter in the selected knowledge base.')
+									: $i18n.t('Select a knowledge base to load its files.')}
+							</div>
+						{:else}
+							{#each filteredKbFiles as file (file.id)}
+								<button
+									type="button"
+									class="w-full text-left px-3 py-2 text-xs bg-white dark:bg-gray-950 hover:bg-gray-50 dark:hover:bg-gray-850 flex items-center justify-between gap-2 {selectedKbFileId === file.id ? 'bg-blue-50 dark:bg-blue-950/30' : ''}"
+									on:click={() => {
+										selectedKbFileId = file.id;
+										fileDropdownOpen = false;
+									}}
+								>
+									<span class="truncate flex-1">
+										<span class="font-medium">{file.filename || $i18n.t('(untitled)')}</span>
+										<span class="ml-2 text-gray-400 font-mono">{file.id.slice(0, 8)}…</span>
+									</span>
+									{#if selectedKbFileId === file.id}
+										<span class="text-blue-500">✓</span>
+									{/if}
+								</button>
+							{/each}
+						{/if}
 					</div>
 				{/if}
 			</div>
+			{#if selectedKbFileId}
+				<div class="text-xs text-gray-400">
+					{$i18n.t('Selected')}: <span class="font-medium">{selectedFileName}</span>
+					<span class="ml-1 font-mono">({selectedKbFileId.slice(0, 8)}…)</span>
+				</div>
+			{/if}
 		{/if}
 
 		<AdminSettingField
@@ -461,7 +479,6 @@
 		>
 			{$i18n.t('Enrich selected files')}
 		</button>
-	</div>
 
 	{#if latestScan}
 		<div class="mt-4 p-3 rounded-xl border border-gray-100 dark:border-gray-850 text-xs">
@@ -520,6 +537,16 @@
 	</div></AdminSettingSection>
 
 <AdminSettingSection title={$i18n.t('Pending changes')}>
+	<div class="flex items-center gap-2 mb-3">
+		<label class="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer">
+			<input
+				type="checkbox"
+				bind:checked={showNoChange}
+				class="w-3.5 h-3.5 accent-blue-500"
+			/>
+			{$i18n.t('Include "looks complete" entries')}
+		</label>
+	</div>
 	<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
 		{$i18n.t(
 			'When the model finds a missing field, the value is applied directly. Existing fields are queued for review. PII/secrets in proposals are redacted to [pii-redacted] automatically.'
