@@ -333,6 +333,22 @@ async def _suggest_one(request, user, model_id: str, file, attributes: list[str]
             )
         if not (content or '').strip():
             content = msg.get('reasoning_content') or ''
+        if not (content or '').strip():
+            # Fallback: some wrappers/pipelines put the answer in a
+            # nonstandard field ('text', 'response', 'output', ...).
+            # Take the longest string value found anywhere in the
+            # message object as a best-effort recovery.
+            best = ''
+            stack = [msg]
+            while stack:
+                cur = stack.pop()
+                if isinstance(cur, dict):
+                    stack.extend(cur.values())
+                elif isinstance(cur, list):
+                    stack.extend(cur)
+                elif isinstance(cur, str) and len(cur) > len(best):
+                    best = cur
+            content = best
         return (content or '').strip()
 
     # Some providers intermittently return an empty first response
@@ -354,7 +370,29 @@ async def _suggest_one(request, user, model_id: str, file, attributes: list[str]
         if not content:
             last_err = f'model {model_id!r} returned an empty message (attempt {attempt + 1}/2)'
             last_diag = diag
-            log.warning('metadata_suggest: model %r attempt %d - empty content | %s', model_id, attempt + 1, diag)
+            log.warning(
+                'metadata_suggest: model %r attempt %d - empty content | %s | full response: %.600s',
+                model_id,
+                attempt + 1,
+                diag,
+                response,
+            )
+            # Wrapper/workspace models can carry saved advanced params
+            # (stop sequences, templates) that silently blank the output;
+            # include them once so the cause is visible.
+            try:
+                from open_webui.models.models import Models
+
+                mi = await Models.get_model_by_id(model_id)
+                if mi is not None:
+                    log.warning(
+                        'metadata_suggest: %r is a workspace model; base=%r params=%s',
+                        model_id,
+                        mi.base_model_id,
+                        mi.params.model_dump() if mi.params else None,
+                    )
+            except Exception:
+                pass
             continue
         parsed = _extract_json(content)
         if parsed is None:

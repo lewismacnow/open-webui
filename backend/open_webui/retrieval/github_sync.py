@@ -362,7 +362,14 @@ class GithubSyncClient:
             return None
         sub_body = sub_resp.json()
         if not sub_body.get('truncated'):
-            return sub_body.get('tree') or []
+            # Paths in a subtree response are RELATIVE to that subtree
+            # (e.g. 'csm/file.md', not 'markdown/csm/file.md'). Re-prefix
+            # so the caller's path_is_safe(directory) filter matches.
+            return [
+                {**entry, 'path': f"{prefix}/{entry['path']}"}
+                for entry in (sub_body.get('tree') or [])
+                if entry.get('path')
+            ]
 
         log.info('Prefix subtree %r also truncated - walking its subtrees', prefix)
 
