@@ -530,7 +530,7 @@
 		<div class="mt-4 p-3 rounded-xl border border-gray-100 dark:border-gray-850 text-xs">
 			<div class="flex items-center justify-between mb-2">
 				<span class="font-medium">
-					{modeLabels[latestScan.mode] || latestScan.mode}
+					{latestScan.test_run ? 'Test run (1 file) · ' : ''}{modeLabels[latestScan.mode] || latestScan.mode}
 					{#if latestScan.status === 'running'}
 						<span class="text-blue-500">· {$i18n.t('running')}</span>
 					{:else if latestScan.status === 'completed'}

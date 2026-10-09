@@ -1,6 +1,6 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
-// --- LLM Metadata Suggestions ---
+// --- LLM Metadata Enrichment ---
 
 export type MetadataScan = {
 	id: string;
