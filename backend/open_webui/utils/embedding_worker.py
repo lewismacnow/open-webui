@@ -122,9 +122,22 @@ async def _embed_one(app, link) -> None:
         return
 
     try:
-        # process_file forwards `db` to its model calls, so it must receive a
-        # real session (its default is a FastAPI Depends sentinel).
+        # Link-first ingestion (GitHub sync, durable upload path): a linked
+        # file may not have gone through extraction yet. The KB-copy branch
+        # of process_file reuses file-{id} chunks and raises
+        # EMPTY_CONTENT when neither chunks nor stored data.content exist -
+        # so run the extraction pass first whenever the file is not marked
+        # completed, then do the KB copy.
         async with get_async_db() as db:
+            if (file.data or {}).get('status') != 'completed':
+                await process_file(
+                    request,
+                    ProcessFileForm(file_id=link.file_id),
+                    user=user,
+                    db=db,
+                )
+            # process_file forwards `db` to its model calls, so it must receive a
+            # real session (its default is a FastAPI Depends sentinel).
             await process_file(
                 request,
                 ProcessFileForm(file_id=link.file_id, collection_name=link.knowledge_id),

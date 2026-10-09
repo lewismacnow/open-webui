@@ -149,7 +149,7 @@
 			return;
 		try {
 			const res = await pruneFailedFiles(localStorage.token, source.knowledge_id);
-			toast.success($i18n.t('Removed {n} failed file(s)', { n: res.removed }));
+			toast.success(`Removed ${res.removed} failed file(s)`);
 			if (res.details?.length) console.info('prune details:', res.details);
 			await refresh();
 		} catch (e) {
@@ -158,7 +158,7 @@
 	}
 
 	async function syncNow(source: GithubSyncSource) {
-		toast.info($i18n.t('Syncing {repo}…', { repo: source.repo_full_name }));
+		toast.info(`Syncing ${source.repo_full_name}…`);
 		try {
 			const result = await syncGithubSyncSourceNow(localStorage.token, source.id);
 			const r = result || {};
@@ -197,9 +197,9 @@
 
 	function formatInterval(seconds: number | null): string {
 		if (!seconds) return $i18n.t('Manual only');
-		if (seconds % 86400 === 0) return $i18n.t('Every {n}d', { n: seconds / 86400 });
-		if (seconds % 3600 === 0) return $i18n.t('Every {n}h', { n: seconds / 3600 });
-		return $i18n.t('Every {n}m', { n: Math.round(seconds / 60) });
+		if (seconds % 86400 === 0) return `Every ${seconds / 86400}d`;
+		if (seconds % 3600 === 0) return `Every ${seconds / 3600}h`;
+		return `Every ${Math.round(seconds / 60)}m`;
 	}
 
 	onMount(async () => {

@@ -29,18 +29,17 @@ so unchanged files are never re-downloaded or re-embedded.
 import asyncio
 import io
 import logging
+import os
 import uuid
 import re
 import time
 from fnmatch import fnmatch
-from types import SimpleNamespace
 from typing import Any, Optional
 import httpx
 
 from open_webui.internal.db import get_async_db_context
 from open_webui.models.files import Files, FileForm
 from open_webui.models.knowledge import Knowledges
-from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.models.users import Users
 from open_webui.models.knowledge_github_source import KnowledgeGithubSourceModel
 from open_webui.storage.provider import Storage
@@ -51,6 +50,10 @@ API_BASE = 'https://api.github.com'
 RAW_BASE = 'https://raw.githubusercontent.com'
 REQUEST_TIMEOUT = 30.0
 CONCURRENT_FETCHES = 8
+
+# Minimum age (seconds) before an orphaned 'processing' file can be swept.
+# Must exceed the longest realistic extraction so a live claim is never deleted.
+SWEEP_MIN_AGE = int(os.getenv('GITHUB_SYNC_SWEEP_MIN_AGE', '900'))
 
 # Documentation/text formats safe to ingest by default. Admins broaden the
 # surface with include_globs, never with extensions.
@@ -436,17 +439,34 @@ def _get_source_lock(source_id: str) -> asyncio.Lock:
 async def _sweep_stale_processing_files(source_id: str) -> int:
     """Delete files left status='processing' with no KB link by a previous
     sync that died mid-extraction (process restart, cancellation). Without
-    this they linger as invisible orphans in the file table forever."""
-    from sqlalchemy import delete as sa_delete
+    this they linger as invisible orphans in the file table forever.
+
+    Guards against the two ways this sweep previously destroyed live work:
+    - LINKED files are never touched (the durable embedding worker owns
+      them; it re-drives extraction and embeds them). The original sweep
+      deleted any 'processing' file for the source - including ones the
+      worker's recovery had just linked and was actively extracting,
+      which made synced files appear (spinner) then silently vanish.
+    - Only files UNTOUCHED for SWEEP_MIN_AGE seconds are swept, so a
+      file claimed moments ago by a concurrent recovery is safe."""
+    import time as _time
+
+    from sqlalchemy import delete as sa_delete, exists, select
 
     from open_webui.internal.db import get_async_db_context
     from open_webui.models.files import File
+    from open_webui.models.knowledge import KnowledgeFile
 
+    cutoff = int(_time.time()) - SWEEP_MIN_AGE
     async with get_async_db_context() as db:
         result = await db.execute(
             sa_delete(File).where(
                 File.data['status'].as_string() == 'processing',
                 File.meta['data']['github_source_id'].as_string() == source_id,
+                File.updated_at < cutoff,
+                ~exists(
+                    select(KnowledgeFile.id).where(KnowledgeFile.file_id == File.id)
+                ),
             )
         )
         await db.commit()
@@ -720,12 +740,14 @@ async def _sync_github_source_inner(app, source: KnowledgeGithubSourceModel) -> 
                         {'OpenWebUI-GitHub-Source': source.id},
                     )
 
-                    # Insert with status 'processing' — extraction runs BELOW
-                    # before the KB link exists. The durable worker's KB-link
-                    # path requires either stored data.content or existing
-                    # file-{id} vector chunks (it reuses them); linking a file
-                    # that never went through extraction is what produced the
-                    # previous "The content provided is empty" failures.
+                    # Insert + link IMMEDIATELY (link-first): the file shows
+                    # up in the knowledge file list right away with a
+                    # 'Queued' embedding badge. Extraction + embedding are
+                    # owned by the durable embedding worker, which now
+                    # runs extraction itself when a file has no chunks yet
+                    # (see _embed_one). This keeps the sync fast (fetch +
+                    # store only) and makes progress visible per file:
+                    # Queued -> Embedding -> Embedded / Failed.
                     await Files.insert_new_file(
                         user.id,
                         FileForm(
@@ -749,32 +771,12 @@ async def _sync_github_source_inner(app, source: KnowledgeGithubSourceModel) -> 
                         ),
                     )
 
-                    # Extraction pass (same as the upload flow): loader reads
-                    # the stored bytes, embeds into the per-file collection and
-                    # caches data.content. One failure marks the file failed
-                    # and never creates the KB link.
-                    request_shim = SimpleNamespace(app=app)
-                    try:
-                        async with get_async_db() as db:
-                            await process_file(
-                                request_shim,
-                                ProcessFileForm(file_id=file_id),
-                                user=user,
-                                db=db,
-                            )
-                    except Exception as exc:
-                        await Files.update_file_data_by_id(
-                            file_id, {'status': 'failed', 'error': str(exc)}
-                        )
-                        result['errors'].append(f'{path}: extraction failed: {exc}')
-                        return
-
                     await Knowledges.add_file_to_knowledge_by_id(
                         knowledge_id=source.knowledge_id,
                         file_id=file_id,
                         user_id=user.id,
                         directory_id=directory_id,
-                        status='pending',  # durable embedding worker reuses the extracted chunks
+                        status='pending',  # durable embedding worker: extract (if needed) + embed
                     )
                     result['updated' if existing else 'added'] += 1
                 except Exception as e:  # one bad file never aborts the sync
