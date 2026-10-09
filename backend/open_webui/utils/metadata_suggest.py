@@ -100,6 +100,60 @@ def normalize_text(raw: Any, max_len: int) -> Optional[str]:
     return t[:max_len]
 
 
+DOC_TYPES = ('reference', 'how-to', 'troubleshooting', 'concept', 'release-notes', 'api', 'overview')
+AUDIENCES = ('admin', 'developer', 'itom', 'end-user', 'all')
+
+
+def normalize_keywords(raw):
+    """Fine-grained search terms (product names, error codes, feature ids).
+    Higher ceiling than tags because these feed BM25 retrieval."""
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        slug = re.sub(r'[^a-z0-9\-]+', '-', item.lower()).strip('-')
+        if 2 <= len(slug) <= 48 and slug not in out:
+            out.append(slug)
+        if len(out) >= 15:
+            break
+    return out or None
+
+
+def normalize_category(raw):
+    """Short hierarchical path, e.g. 'platform/mid-server/discovery'."""
+    if not isinstance(raw, str):
+        return None
+    parts = [re.sub(r'[^a-z0-9\-]+', '-', seg.lower()).strip('-') for seg in raw.split('/')]
+    parts = [p for p in parts if p][:4]
+    return '/'.join(parts)[:96] if parts else None
+
+
+def normalize_doc_type(raw):
+    if not isinstance(raw, str):
+        return None
+    t = raw.lower().strip().replace(' ', '-')
+    for known in DOC_TYPES:
+        if t == known or t.startswith(known):
+            return known
+    if 'trouble' in t or 'issue' in t:
+        return 'troubleshooting'
+    if 'how' in t or 'install' in t or 'config' in t:
+        return 'how-to'
+    return 'reference'
+
+
+def normalize_audience(raw):
+    if not isinstance(raw, str):
+        return None
+    a = raw.lower().strip().replace(' ', '-')
+    for known in AUDIENCES:
+        if a == known or a.startswith(known):
+            return known
+    return 'all'
+
+
 def normalize_tags(raw: Any) -> Optional[list[str]]:
     if not isinstance(raw, list):
         return None
@@ -121,11 +175,15 @@ Given a document excerpt and its current metadata, propose IMPROVED metadata.
 
 Rules:
 - Respond with ONLY a JSON object, no prose, no code fences.
-- Keys: "title", "description", "summary", "tags". Use null for any field you cannot improve.
+- Keys: "title", "description", "summary", "tags", "keywords", "category", "doc_type", "audience". Use null for any field you cannot improve.
 - title: 5-80 chars, human-readable, no file extension, no leading numbers.
 - description: one sentence, max 280 chars, states what the document covers.
 - summary: max 600 chars, the key points a searcher needs.
 - tags: 1-8 short lowercase slug tags (e.g. "mid-server", "discovery").
+- keywords: 5-15 lowercase search terms someone would type to find this doc - include product names, feature names, error codes, table/property names where present.
+- category: short hierarchical path, e.g. "platform/mid-server/discovery" or "itom/agent-guide".
+- doc_type: exactly one of "reference", "how-to", "troubleshooting", "concept", "release-notes", "api", "overview".
+- audience: exactly one of "admin", "developer", "itom", "end-user", "all".
 - Never invent facts not present in the excerpt. Never include emails, keys, tokens or personal data.
 """
 
@@ -151,6 +209,10 @@ def _current_metadata(file) -> dict:
         'description': meta.get('description') or '',
         'summary': meta.get('summary') or '',
         'tags': meta.get('tags') or [],
+        'keywords': meta.get('keywords') or [],
+        'category': meta.get('category') or '',
+        'doc_type': meta.get('doc_type') or '',
+        'audience': meta.get('audience') or '',
     }
 
 
@@ -232,10 +294,25 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
     failure is logged and counted, never aborts the scan."""
     from open_webui.models.users import Users
 
-    # generate_chat_completion writes request.state.bypass_filter /
-    # bypass_system_prompt and reads request.state.metadata + request.app.state.*,
-    # so the shim needs a mutable .state namespace alongside .app.
-    request = SimpleNamespace(app=app, state=SimpleNamespace())
+    class _ScanRequestShim:
+        """Minimal Request stand-in for generate_chat_completion outside an
+        HTTP context. Covers every attribute the completion path touches:
+        .app.state.*, .state (bypass flags / metadata), .headers.get
+        (X-Skip-Provider-URLs in the openai router), .cookies.get (oauth),
+        .method/.url.query (passthrough helpers), and `await .body()`."""
+
+        def __init__(self, app):
+            self.app = app
+            self.state = SimpleNamespace()
+            self.headers = {}
+            self.cookies = {}
+            self.method = 'POST'
+            self.url = SimpleNamespace(query='', path='/api/v1/chat/completions')
+
+        async def body(self):
+            return b''
+
+    request = _ScanRequestShim(app)
     user = await Users.get_user_by_id(scan.user_id)
     if not user:
         await MetadataScans.finish_scan(scan.id, 'failed', ['Owning admin user not found'])
@@ -328,6 +405,25 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                 tags = normalize_tags(raw.get('tags'))
                 if tags and sorted(tags) != sorted(current['tags'] or []):
                     proposal['proposed_tags'] = [redact_pii(t)[0] for t in tags]
+            if 'keywords' in attributes:
+                kws = normalize_keywords(raw.get('keywords'))
+                if kws and kws != (current['keywords'] or []):
+                    proposal['proposed_keywords'] = [redact_pii(k)[0] for k in kws]
+            extra: dict = {}
+            if 'category' in attributes:
+                cat = normalize_category(raw.get('category'))
+                if cat and cat != current['category']:
+                    extra['category'] = cat
+            if 'doc_type' in attributes:
+                dt = normalize_doc_type(raw.get('doc_type'))
+                if dt and dt != current['doc_type']:
+                    extra['doc_type'] = dt
+            if 'audience' in attributes:
+                aud = normalize_audience(raw.get('audience'))
+                if aud and aud != current['audience']:
+                    extra['audience'] = aud
+            if extra:
+                proposal['proposed_extra'] = extra
 
             async with lock:
                 # 3-tier policy: auto-apply on empty fields, queue on populated,
@@ -344,6 +440,9 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                             cur_meta['description'] = proposal.get('proposed_description', cur_meta.get('description'))
                             cur_meta['summary'] = proposal.get('proposed_summary', cur_meta.get('summary'))
                             cur_meta['tags'] = proposal.get('proposed_tags', cur_meta.get('tags') or [])
+                            cur_meta['keywords'] = proposal.get('proposed_keywords', cur_meta.get('keywords') or [])
+                            for k, v in (proposal.get('proposed_extra') or {}).items():
+                                cur_meta[k] = v
                             cur_meta['metadata_improved_at'] = int(time.time())
                             cur_meta['metadata_improved_by_model'] = scan.model_id
                             cur_meta['metadata_improved_auto'] = True
@@ -366,12 +465,20 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                             await MetadataProposals.set_status(older.id, 'dismissed')
                 except Exception:
                     pass
-                payload_base = dict(proposal) if proposal else {
-                    'previous_title': current['title'] or None,
-                    'previous_description': current['description'] or None,
-                    'previous_summary': current['summary'] or None,
-                    'previous_tags': current['tags'] or None,
-                }
+                payload_base = dict(proposal) if proposal else {}
+                if not proposal:
+                    payload_base.update({
+                        'previous_title': current['title'] or None,
+                        'previous_description': current['description'] or None,
+                        'previous_summary': current['summary'] or None,
+                        'previous_tags': current['tags'] or None,
+                        'previous_keywords': current['keywords'] or None,
+                    })
+                payload_base.setdefault('previous_title', current['title'] or None)
+                payload_base.setdefault('previous_description', current['description'] or None)
+                payload_base.setdefault('previous_summary', current['summary'] or None)
+                payload_base.setdefault('previous_tags', current['tags'] or None)
+                payload_base.setdefault('previous_keywords', current['keywords'] or None)
                 payload_base.update({
                     'scan_id': scan.id,
                     'knowledge_id': scan.knowledge_id,
@@ -426,6 +533,12 @@ async def apply_proposal(proposal) -> None:
         changed = True
     if proposal.proposed_tags is not None:
         meta['tags'] = proposal.proposed_tags
+        changed = True
+    if proposal.proposed_keywords is not None:
+        meta['keywords'] = proposal.proposed_keywords
+        changed = True
+    for k, v in (proposal.proposed_extra or {}).items():
+        meta[k] = v
         changed = True
     if changed:
         meta['metadata_improved_at'] = int(time.time())

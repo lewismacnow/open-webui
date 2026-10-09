@@ -25,7 +25,7 @@ from open_webui.internal.db import Base, get_async_db_context
 log = logging.getLogger(__name__)
 
 # Attribute universe the LLM may propose values for.
-METADATA_ATTRIBUTES = ('title', 'description', 'summary', 'tags')
+METADATA_ATTRIBUTES = ('title', 'description', 'summary', 'tags', 'keywords', 'category', 'doc_type', 'audience')
 
 SCAN_MODES = ('all', 'missing', 'attributes', 'file')
 
@@ -73,6 +73,10 @@ class MetadataProposal(Base):
     proposed_description = Column(Text, nullable=True)
     proposed_summary = Column(Text, nullable=True)
     proposed_tags = Column(JSON, nullable=True)  # list[str]
+    proposed_keywords = Column(JSON, nullable=True)  # list[str]
+    proposed_extra = Column(JSON, nullable=True)  # {category, doc_type, audience}
+    previous_keywords = Column(JSON, nullable=True)
+    previous_extra = Column(JSON, nullable=True)
 
     # Previous values for the diff view + undo semantics.
     previous_title = Column(Text, nullable=True)
@@ -128,10 +132,14 @@ class MetadataProposalModel(BaseModel):
     proposed_description: Optional[str] = None
     proposed_summary: Optional[str] = None
     proposed_tags: Optional[list[str]] = None
+    proposed_keywords: Optional[list[str]] = None
+    proposed_extra: Optional[dict] = None
     previous_title: Optional[str] = None
     previous_description: Optional[str] = None
     previous_summary: Optional[str] = None
     previous_tags: Optional[list[str]] = None
+    previous_keywords: Optional[list[str]] = None
+    previous_extra: Optional[dict] = None
     redaction_count: int = 0
     proposer_model_id: str
     status: str = 'pending'

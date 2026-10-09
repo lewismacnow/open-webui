@@ -30,10 +30,14 @@ export type MetadataProposal = {
 	proposed_description: string | null;
 	proposed_summary: string | null;
 	proposed_tags: string[] | null;
+	proposed_keywords: string[] | null;
+	proposed_extra: Record<string, string> | null;
 	previous_title: string | null;
 	previous_description: string | null;
 	previous_summary: string | null;
 	previous_tags: string[] | null;
+	previous_keywords: string[] | null;
+	previous_extra: Record<string, string> | null;
 	redaction_count: number;
 	proposer_model_id: string;
 	status: 'pending' | 'applied' | 'dismissed';

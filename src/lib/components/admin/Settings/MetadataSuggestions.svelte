@@ -27,7 +27,11 @@
 		{ id: 'title', label: 'Title' },
 		{ id: 'description', label: 'Description' },
 		{ id: 'summary', label: 'Summary' },
-		{ id: 'tags', label: 'Tags' }
+		{ id: 'tags', label: 'Tags' },
+		{ id: 'keywords', label: 'Keywords' },
+		{ id: 'category', label: 'Category' },
+		{ id: 'doc_type', label: 'Doc type' },
+		{ id: 'audience', label: 'Audience' }
 	];
 
 	let knowledgeBases: any[] = [];
@@ -259,6 +263,8 @@
 		if (p.proposed_description) parts.push('description');
 		if (p.proposed_summary) parts.push('summary');
 		if (p.proposed_tags) parts.push('tags');
+		if (p.proposed_keywords) parts.push('keywords');
+		if (p.proposed_extra) parts.push(...Object.keys(p.proposed_extra));
 		return parts.join(', ');
 	}
 
@@ -668,6 +674,20 @@
 							<div class="flex flex-wrap gap-1 pt-0.5">
 								{#each proposal.proposed_tags as tag (tag)}
 									<span class="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-[10px]">{tag}</span>
+								{/each}
+							</div>
+						{/if}
+						{#if proposal.proposed_keywords}
+							<div class="flex flex-wrap gap-1 pt-0.5">
+								{#each proposal.proposed_keywords as kw (kw)}
+									<span class="px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 text-[10px] font-mono">{kw}</span>
+								{/each}
+							</div>
+						{/if}
+						{#if proposal.proposed_extra}
+							<div class="flex flex-wrap gap-x-4 gap-y-0.5 pt-0.5 text-gray-500 dark:text-gray-400">
+								{#each Object.entries(proposal.proposed_extra) as [k, v] (k)}
+									<span>{k.replace('_', ' ')}: <span class="font-medium text-gray-700 dark:text-gray-200">{v}</span></span>
 								{/each}
 							</div>
 						{/if}
