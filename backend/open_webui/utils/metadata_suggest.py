@@ -275,6 +275,14 @@ async def _suggest_one(request, user, model_id: str, file, attributes: list[str]
         ],
         'stream': False,
         'temperature': 0.2,
+        # Disable tool calling for this request. The scan worker uses a
+        # minimal request shim that does not run the tool-calling loop,
+        # so a model that returns tool_calls (e.g. a function-model
+        # with knowledge attached that wants to search before answering)
+        # would leave us with content=null and finish_reason='tool_calls'.
+        # Server-side auto-RAG (knowledge context injection) still runs
+        # because it is independent of the model's tool choice.
+        'tool_choice': 'none',
     }
     def _diagnose(resp) -> str:
         """One-line description of a response's shape - used in logs
