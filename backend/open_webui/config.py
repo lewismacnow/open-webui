@@ -1068,6 +1068,11 @@ BYPASS_EMBEDDING_AND_RETRIEVAL = os.getenv('BYPASS_EMBEDDING_AND_RETRIEVAL', 'Fa
 
 
 RAG_TOP_K = int(os.getenv('RAG_TOP_K', '3'))
+
+# Fork: content+metadata embeddings - prepend a compact metadata header to
+# the EMBED input (stored chunk text stays content-only). Admin-updatable
+# at runtime; default on. Env: RAG_EMBED_METADATA_HEADER=false to disable.
+RAG_EMBED_METADATA_HEADER = os.getenv('RAG_EMBED_METADATA_HEADER', 'True').lower() == 'true'
 RAG_TOP_K_RERANKER = int(os.getenv('RAG_TOP_K_RERANKER', '3'))
 RAG_RELEVANCE_THRESHOLD = float(os.getenv('RAG_RELEVANCE_THRESHOLD', '0.0'))
 RAG_HYBRID_BM25_WEIGHT = float(os.getenv('RAG_HYBRID_BM25_WEIGHT', '0.5'))

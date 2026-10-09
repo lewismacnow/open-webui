@@ -42,6 +42,9 @@ class MetadataScan(Base):
     attributes = Column(JSON, nullable=True)  # for mode='attributes'
     file_id = Column(Text, nullable=True)  # for mode='file'
     max_parallel = Column(BigInteger, nullable=False, default=1)
+    test_run = Column(BigInteger, nullable=False, default=0)
+    test_preview = Column(JSON, nullable=True)
+    reembedded = Column(BigInteger, nullable=False, default=0)
 
     status = Column(Text, nullable=False, default='running')  # running|completed|failed|cancelled
     total_files = Column(BigInteger, nullable=False, default=0)
@@ -110,6 +113,9 @@ class MetadataScanModel(BaseModel):
     attributes: Optional[list[str]] = None
     file_id: Optional[str] = None
     max_parallel: int = 1
+    test_run: bool = False
+    test_preview: Optional[dict] = None
+    reembedded: int = 0
     status: str = 'running'
     total_files: int = 0
     processed_files: int = 0
@@ -155,6 +161,7 @@ class MetadataScanForm(BaseModel):
     attributes: Optional[list[str]] = None
     file_id: Optional[str] = None
     max_parallel: int = 1
+    test_run: bool = False
 
 
 class MetadataScansTable:
@@ -174,6 +181,8 @@ class MetadataScansTable:
                     attributes=attrs or None,
                     file_id=form_data.file_id,
                     max_parallel=max(1, min(int(form_data.max_parallel), 8)),
+                    test_run=1 if form_data.test_run else 0,
+                    reembedded=0,
                     total_files=0,
                     processed_files=0,
                     proposals_created=0,
@@ -222,6 +231,7 @@ class MetadataScansTable:
         processed: Optional[int] = None,
         proposals: Optional[int] = None,
         redactions: Optional[int] = None,
+        reembedded: Optional[int] = None,
     ) -> None:
         from sqlalchemy import update
 
@@ -234,10 +244,21 @@ class MetadataScansTable:
             values['proposals_created'] = int(proposals)
         if redactions is not None:
             values['redactions'] = int(redactions)
+        if reembedded is not None:
+            values['reembedded'] = int(reembedded)
         if not values:
             return
         async with get_async_db_context() as db:
             await db.execute(update(MetadataScan).where(MetadataScan.id == id).values(**values))
+            await db.commit()
+
+    async def set_test_preview(self, id: str, preview: dict) -> None:
+        from sqlalchemy import update
+
+        async with get_async_db_context() as db:
+            await db.execute(
+                update(MetadataScan).where(MetadataScan.id == id).values(test_preview=preview)
+            )
             await db.commit()
 
     async def finish_scan(self, id: str, status: str, errors: Optional[list[str]] = None) -> None:

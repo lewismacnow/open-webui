@@ -29,6 +29,7 @@ from open_webui.models.metadata_proposal import (
     MetadataScanModel,
 )
 from open_webui.utils.chat import generate_chat_completion
+from open_webui.retrieval.utils import build_metadata_header
 
 log = logging.getLogger(__name__)
 
@@ -289,6 +290,51 @@ async def _suggest_one(request, user, model_id: str, file, attributes: list[str]
     return parsed
 
 
+async def reembed_file(app, file, knowledge_id: str) -> bool:
+    """Re-chunk + re-embed ONE file so its enriched metadata flows into the
+    embeddings (content+metadata header). Deletes the per-file collection and
+    the file's chunks inside the KB collection, then re-runs process_file —
+    the same force-reembed path the /knowledge/reindex loop uses."""
+    from open_webui.internal.db import get_async_db
+    from open_webui.retrieval.vector import ASYNC_VECTOR_DB_CLIENT
+    from open_webui.routers.retrieval import ProcessFileForm, process_file
+
+    class _R:
+        def __init__(self, app):
+            self.app = app
+            self.state = SimpleNamespace()
+            self.headers = {}
+            self.cookies = {}
+            self.method = 'POST'
+            self.url = SimpleNamespace(query='', path='/x')
+
+        async def body(self):
+            return b''
+
+    try:
+        file_collection = f'file-{file.id}'
+        if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
+            await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+        # Remove this file's stale chunks from the KB collection only.
+        await ASYNC_VECTOR_DB_CLIENT.delete(
+            collection_name=knowledge_id, filter={'file_id': file.id}
+        )
+        from open_webui.models.users import Users as _Users
+
+        user = await _Users.get_user_by_id(file.user_id)
+        async with get_async_db() as db:
+            await process_file(
+                _R(app),
+                ProcessFileForm(file_id=file.id, collection_name=knowledge_id),
+                user=user,
+                db=db,
+            )
+        return True
+    except Exception as e:
+        log.warning('reembed_file failed for %s: %s', getattr(file, 'filename', file.id), e)
+        return False
+
+
 async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
     """Background task body. Bounded parallelism, per-file isolation — one
     failure is logged and counted, never aborts the scan."""
@@ -337,6 +383,50 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
         await MetadataScans.finish_scan(scan.id, 'completed', ['No matching files'])
         return
 
+    if scan.test_run:
+        # Test run: exactly one file, propose ONLY (never applied, never
+        # re-embedded). Preview shows what would change on the file record
+        # AND in the embedding header.
+        file = files[0]
+        current = _current_metadata(file)
+        header_before = build_metadata_header(
+            {'title': current['title'], 'description': current['description'], **current}
+        )
+        try:
+            raw = await _suggest_one(request, user, scan.model_id, file, list(METADATA_ATTRIBUTES))
+        except Exception as e:
+            await MetadataScans.finish_scan(scan.id, 'failed', [f'{file.filename}: {e}'])
+            return
+        preview_fields = {
+            'title': raw.get('title') if isinstance(raw, dict) else None,
+            'description': raw.get('description') if isinstance(raw, dict) else None,
+            'summary': raw.get('summary') if isinstance(raw, dict) else None,
+            'tags': raw.get('tags') if isinstance(raw, dict) else None,
+            'keywords': raw.get('keywords') if isinstance(raw, dict) else None,
+            'category': raw.get('category') if isinstance(raw, dict) else None,
+            'doc_type': raw.get('doc_type') if isinstance(raw, dict) else None,
+            'audience': raw.get('audience') if isinstance(raw, dict) else None,
+        }
+        after = dict(current)
+        for k, v in preview_fields.items():
+            if v:
+                after[k] = v
+        header_after = build_metadata_header(after)
+        await MetadataScans.set_test_preview(
+            scan.id,
+            {
+                'file_id': file.id,
+                'filename': file.filename,
+                'current': current,
+                'proposed': preview_fields,
+                'header_before': header_before or '(none - content-only embedding)',
+                'header_after': header_after or '(none)',
+            },
+        )
+        await MetadataScans.update_progress(scan.id, processed=1)
+        await MetadataScans.finish_scan(scan.id, 'completed', None)
+        return
+
     # Server-side parallelism ceiling (admin config); scan value is the
     # user's request, clamped by the ceiling. Default 1.
     from open_webui.models.config import Config
@@ -351,11 +441,12 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
     processed = 0
     proposals = 0
     redactions_total = 0
+    reembedded_total = 0
     errors: list[str] = []
     lock = asyncio.Lock()
 
     async def handle_file(file):
-        nonlocal processed, proposals, redactions_total
+        nonlocal processed, proposals, redactions_total, reembedded_total
 
         # Cancellation checkpoint: the cancel endpoint flips status to
         # 'cancelled'; stop picking up new files (in-flight ones finish).
@@ -451,6 +542,10 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                             if new_title and new_title != (file.filename or ''):
                                 await _Files.update_file_name_by_id(file.id, new_title)
                             payload_status = 'auto_applied'
+                            # Pipeline: enrich -> re-embed, bounded by the
+                            # same semaphore the model calls use.
+                            if await reembed_file(app, file, scan.knowledge_id):
+                                reembedded_total += 1
                         except Exception as e:
                             log.warning('Auto-apply failed for %s: %s', file.filename, e)
                             payload_status = 'pending'
@@ -497,6 +592,7 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                     processed=processed,
                     proposals=proposals,
                     redactions=redactions_total,
+                    reembedded=reembedded_total,
                 )
 
     await asyncio.gather(*(handle_file(f) for f in files))

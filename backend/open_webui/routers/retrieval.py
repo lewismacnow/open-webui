@@ -69,6 +69,7 @@ from open_webui.models.config import Config
 # Document loaders
 from open_webui.retrieval.loaders.youtube import YoutubeLoader, YoutubeTranscriptError
 from open_webui.retrieval.utils import (
+    build_metadata_header,
     build_loader_from_config,
     get_loader_config,
     filter_accessible_collections,
@@ -1823,8 +1824,19 @@ def save_docs_to_vector_db(
         raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
 
     texts = [sanitize_text_for_db(doc.page_content) for doc in docs]
-    metadatas = [
-        {
+
+    # Fork: content+metadata embeddings. A compact header built from the
+    # chunk's merged metadata (which carries the file's enriched fields via
+    # filter_file_metadata) is prepended to the EMBED input only - the stored
+    # chunk text stays content-only, so reranking/citations are unchanged.
+    # Backwards compatible: rag.embed.metadata_header (default on); files
+    # embedded before this change simply carry no embed_mode (=content_only).
+    # Sync-readable PersistentConfig (this function runs in a threadpool).
+    _embed_headers_enabled = bool(getattr(config, 'RAG_EMBED_METADATA_HEADER', True))
+    metadatas = []
+    embed_texts = []
+    for doc in docs:
+        meta = {
             **doc.metadata,
             **(metadata if metadata else {}),
             'embedding_config': {
@@ -1832,8 +1844,18 @@ def save_docs_to_vector_db(
                 'model': config.RAG_EMBEDDING_MODEL,
             },
         }
-        for doc in docs
-    ]
+        if _embed_headers_enabled:
+            header = build_metadata_header(meta)
+            if header:
+                meta['embed_mode'] = 'content_plus_metadata'
+                embed_texts.append(f'{header}\n{texts[len(metadatas)]}')
+            else:
+                meta['embed_mode'] = 'content_only'
+                embed_texts.append(texts[len(metadatas)])
+        else:
+            meta['embed_mode'] = 'content_only'
+            embed_texts.append(texts[len(metadatas)])
+        metadatas.append(meta)
 
     try:
         if get_vector_db_client().has_collection(collection_name=collection_name):
@@ -1883,7 +1905,7 @@ def save_docs_to_vector_db(
 
         future = asyncio.run_coroutine_threadsafe(
             embedding_function(
-                list(map(lambda x: x.replace('\n', ' '), texts)),
+                list(map(lambda x: x.replace('\n', ' '), embed_texts)),
                 prefix=RAG_EMBEDDING_CONTENT_PREFIX,
                 user=user,
             ),

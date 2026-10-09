@@ -165,6 +165,33 @@
 		}
 	}
 
+	async function runTest() {
+		if (!scanKnowledgeId || !scanModelId) {
+			toast.error($i18n.t('Select a knowledge base and a model'));
+			return;
+		}
+		if (!acknowledgedCost) {
+			toast.error($i18n.t('Acknowledge the LLM cost warning first'));
+			return;
+		}
+		busy = true;
+		try {
+			latestScan = await startMetadataScan(localStorage.token, {
+				knowledge_id: scanKnowledgeId,
+				model_id: scanModelId,
+				mode: 'all',
+				test_run: true,
+				max_parallel: 1
+			});
+			toast.info($i18n.t('Test run started - 1 file, preview only'));
+			startPolling();
+		} catch (e) {
+			toast.error(String(e));
+		} finally {
+			busy = false;
+		}
+	}
+
 	async function runScan() {
 		if (!scanKnowledgeId || !scanModelId) {
 			toast.error($i18n.t('Select a knowledge base and a model'));
@@ -485,6 +512,19 @@
 		>
 			{$i18n.t('Enrich selected files')}
 		</button>
+		<button
+			type="button"
+			class="px-3.5 py-1.5 text-sm font-medium rounded-lg border border-gray-200 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-850 disabled:opacity-50"
+			disabled={busy}
+			on:click={runTest}
+		>
+			{$i18n.t('Test run (1 file)')}
+		</button>
+		<p class="text-xs text-gray-400 mt-2">
+			{$i18n.t(
+				'Enrichment updates each file and re-embeds it (like re-indexing) so knowledge queries match on the new metadata. This takes time per file but makes retrieval more precise.'
+			)}
+		</p>
 
 	{#if latestScan}
 		<div class="mt-4 p-3 rounded-xl border border-gray-100 dark:border-gray-850 text-xs">
@@ -505,6 +545,8 @@
 					{$i18n.t('proposals')}
 					· {latestScan.redactions}
 					{$i18n.t('redacted')}
+						· {latestScan.reembedded}
+						{$i18n.t('re-embedded')}
 				</span>
 			</div>
 			{#if latestScan.errors?.length}
@@ -540,7 +582,27 @@
 		</div>
 	{/if}
 
-	</div></AdminSettingSection>
+	</div>	{#if latestScan?.test_preview}
+		<div class="mt-3 p-3 rounded-xl border border-blue-200 dark:border-blue-900/50 bg-blue-50/50 dark:bg-blue-950/20 text-xs space-y-2">
+			<div class="font-medium">
+				{$i18n.t('Test run preview')} · {latestScan.test_preview.filename}
+			</div>
+			<div class="grid gap-1">
+				{#each Object.entries(latestScan.test_preview.proposed ?? {}) as [k, v] (k)}
+					{#if v}
+						<div><span class="text-gray-400">{k}:</span> {v}</div>
+					{/if}
+				{/each}
+			</div>
+			<div class="pt-1 border-t border-blue-200 dark:border-blue-900/50">
+				<div class="text-gray-400 mb-0.5">{$i18n.t('Embedding header - before')}:</div>
+				<div class="font-mono text-[10px] break-all">{latestScan.test_preview.header_before}</div>
+				<div class="text-gray-400 mt-1.5 mb-0.5">{$i18n.t('Embedding header - after')}:</div>
+				<div class="font-mono text-[10px] break-all">{latestScan.test_preview.header_after}</div>
+			</div>
+		</div>
+	{/if}
+</AdminSettingSection>
 
 <AdminSettingSection title={$i18n.t('Pending changes')}>
 	<div class="flex items-center gap-2 mb-3">

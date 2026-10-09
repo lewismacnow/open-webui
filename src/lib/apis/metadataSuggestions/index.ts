@@ -11,6 +11,9 @@ export type MetadataScan = {
 	attributes: string[] | null;
 	file_id: string | null;
 	max_parallel: number;
+	test_run: boolean;
+	test_preview: Record<string, any> | null;
+	reembedded: number;
 	status: 'running' | 'completed' | 'failed' | 'cancelled';
 	total_files: number;
 	processed_files: number;
@@ -51,6 +54,7 @@ export type StartScanInput = {
 	attributes?: string[] | null;
 	file_id?: string | null;
 	max_parallel?: number;
+	test_run?: boolean;
 };
 
 const base = `${WEBUI_API_BASE_URL}/metadata-suggestions`;
