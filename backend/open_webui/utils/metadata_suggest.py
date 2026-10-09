@@ -275,7 +275,47 @@ async def _suggest_one(request, user, model_id: str, file, attributes: list[str]
         ],
         'stream': False,
         'temperature': 0.2,
+        # Disable tool calling for this request. The scan worker uses a
+        # minimal request shim that does not run the tool-calling loop,
+        # so a model that returns tool_calls (e.g. a function-model
+        # with knowledge attached that wants to search before answering)
+        # would leave us with content=null and finish_reason='tool_calls'.
+        # Server-side auto-RAG (knowledge context injection) still runs
+        # because it is independent of the model's tool choice.
+        'tool_choice': 'none',
     }
+    def _diagnose(resp) -> str:
+        """One-line description of a response's shape - used in logs
+        and in the user-facing error so admins can see why a model
+        returned empty content without dumping the whole payload."""
+        if resp is None:
+            return 'response is None'
+        if not isinstance(resp, dict):
+            return f'response is {type(resp).__name__} (not a dict): {str(resp)[:120]!r}'
+        if 'error' in resp:
+            return f'response has error field: {str(resp["error"])[:200]!r}'
+        choices = resp.get('choices') or []
+        if not choices:
+            return f'response has no choices; keys={list(resp.keys())}'
+        ch0 = choices[0] or {}
+        msg = ch0.get('message') or {}
+        finish = ch0.get('finish_reason')
+        if not msg:
+            return f'choices[0] has no message; finish_reason={finish!r}; keys={list(ch0.keys())}'
+        c = msg.get('content')
+        rc = msg.get('reasoning_content')
+        tc = msg.get('tool_calls')
+        refusal = msg.get('refusal')
+        bits = [
+            f'content_type={type(c).__name__}',
+            f'content_len={len(c) if isinstance(c, (str, list)) else "n/a"}',
+            f'has_reasoning={bool(rc)}',
+            f'has_tool_calls={bool(tc)}',
+            f'refusal={refusal!r}' if refusal else None,
+            f'finish_reason={finish!r}',
+        ]
+        return ' '.join(b for b in bits if b)
+
     def _extract_content(resp) -> str:
         """Pull text out of a non-stream completion response.
 
@@ -298,24 +338,37 @@ async def _suggest_one(request, user, model_id: str, file, attributes: list[str]
     # Some providers intermittently return an empty first response
     # (reasoning models, rate-limit soft-fails). One retry before failing.
     last_err = None
+    last_diag = None
     for attempt in range(2):
         if attempt:
             await asyncio.sleep(1.5)
         response = await generate_chat_completion(request, form_data=payload, user=user)
+        diag = _diagnose(response)
         try:
             content = _extract_content(response)
         except RuntimeError as e:
             last_err = str(e)
+            last_diag = diag
+            log.warning('metadata_suggest: model %r attempt %d - %s | %s', model_id, attempt + 1, e, diag)
             continue
         if not content:
             last_err = f'model {model_id!r} returned an empty message (attempt {attempt + 1}/2)'
+            last_diag = diag
+            log.warning('metadata_suggest: model %r attempt %d - empty content | %s', model_id, attempt + 1, diag)
             continue
         parsed = _extract_json(content)
         if parsed is None:
             last_err = f'model response contained no JSON object: {content[:120]!r}'
+            last_diag = diag
+            log.warning('metadata_suggest: model %r attempt %d - no JSON | %s', model_id, attempt + 1, diag)
             continue
         return parsed
-    raise RuntimeError(last_err or 'model returned an empty message')
+    # Surface the diagnostic in the user-facing error so admins see why
+    # without grepping the server log.
+    msg = last_err or 'model returned an empty message'
+    if last_diag:
+        msg = f'{msg} | {last_diag}'
+    raise RuntimeError(msg)
 
 
 async def reembed_file(app, file, knowledge_id: str) -> bool:
