@@ -294,17 +294,54 @@ class GithubSyncClient:
             return None
         return (resp.json().get('commit') or {}).get('sha')
 
-    async def get_tree(self, owner: str, repo: str, tree_sha: str) -> Optional[list[dict]]:
-        """Recursive tree; returns the truncated flag shrunk away - when a
-        repo exceeds the tree limit we surface it as a sync error rather
-        than silently syncing a partial tree."""
+    async def get_tree(
+        self, owner: str, repo: str, tree_sha: str, directory: str = ''
+    ) -> Optional[list[dict]]:
+        """Recursive tree. When GitHub truncates the recursive response
+        (repos over the tree-entry limit), fall back to a non-recursive
+        walk pruned to the configured directory prefix - bounded API
+        calls, only the subtrees we actually need. A whole-repo sync of
+        an oversized repo still errors (set a directory path)."""
+
+        async def _node(sha: str) -> Optional[dict]:
+            resp = await self._get(f'/repos/{owner}/{repo}/git/trees/{sha}')
+            if resp.status_code != 200:
+                return None
+            return resp.json()
+
         resp = await self._get(f'/repos/{owner}/{repo}/git/trees/{tree_sha}', params={'recursive': '1'})
         if resp.status_code != 200:
             return None
         body = resp.json()
-        if body.get('truncated'):
-            raise RuntimeError('Repository tree truncated by GitHub API - narrow the directory path')
-        return body.get('tree') or []
+        if not body.get('truncated'):
+            return body.get('tree') or []
+
+        log.info('Recursive tree truncated for %s/%s - walking subtree(s) under %r', owner, repo, directory or '/')
+        prefix = directory.strip('/') if directory else ''
+        wanted = frozenset(prefix.split('/')) if prefix else None
+
+        out: list[dict] = []
+        queue = [(tree_sha, '')]  # (sha, path-so-far)
+        while queue:
+            sha, base = queue.pop(0)
+            node = await _node(sha)
+            if node is None:
+                raise RuntimeError(f'Failed to fetch git tree node at {base or "/"} (HTTP error)')
+            if node.get('truncated'):
+                raise RuntimeError(
+                    f'Directory {base or "/"} has too many entries for the GitHub tree API - narrow the directory path'
+                )
+            for entry in node.get('tree') or []:
+                path = f"{base}/{entry['path']}" if base else entry['path']
+                if entry.get('type') == 'tree':
+                    # Descend into this subtree only if it is an ancestor
+                    # of the configured directory, the directory itself,
+                    # or lies inside it (or everywhere if no directory).
+                    if wanted is None or prefix.startswith(path) or path == prefix or path.startswith(prefix + '/'):
+                        queue.append((entry['sha'], path))
+                elif wanted is None or path.startswith(prefix + '/'):
+                    out.append({**entry, 'path': path})
+        return out
 
     async def fetch_raw(self, owner: str, repo: str, branch: str, repo_path: str) -> httpx.Response:
         # Pacing is serialised across in-flight fetches (lock) so the budget
@@ -464,7 +501,7 @@ async def _sync_github_source_inner(app, source: KnowledgeGithubSourceModel) -> 
 
         # ── Tree ──────────────────────────────────────────────────────
         try:
-            tree = await client.get_tree(owner, repo, head_sha)
+            tree = await client.get_tree(owner, repo, head_sha, directory=directory)
         except httpx.HTTPStatusError as exc:
             status = getattr(exc.response, 'status_code', None)
             resp_headers = getattr(exc.response, 'headers', {}) if getattr(exc, 'response', None) else {}
