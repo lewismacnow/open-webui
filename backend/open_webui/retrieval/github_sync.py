@@ -316,17 +316,68 @@ class GithubSyncClient:
         if not body.get('truncated'):
             return body.get('tree') or []
 
-        log.info('Recursive tree truncated for %s/%s - walking subtree(s) under %r', owner, repo, directory or '/')
         prefix = directory.strip('/') if directory else ''
-        wanted = frozenset(prefix.split('/')) if prefix else None
+        if not prefix:
+            # Whole-repo recursive response truncated and no directory
+            # binding to target - we cannot enumerate the repo in one
+            # call. Tell the admin to bind a directory.
+            raise RuntimeError(
+                'Repository tree truncated by GitHub API - narrow the directory path'
+            )
 
+        log.info('Recursive tree truncated for %s/%s - targeting subtree %r', owner, repo, prefix)
+
+        # Phase 1: walk DOWN the prefix path to find its tree SHA.
+        # len(segments) API calls, one per directory on the way to the
+        # bound directory.
+        current_sha = tree_sha
+        current_path = ''
+        for seg in prefix.split('/'):
+            node = await _node(current_sha)
+            if node is None:
+                raise RuntimeError(
+                    f'Failed to fetch git tree node at {current_path or "/"} (HTTP error)'
+                )
+            child = next(
+                (
+                    e
+                    for e in (node.get('tree') or [])
+                    if e.get('path') == seg and e.get('type') == 'tree'
+                ),
+                None,
+            )
+            if child is None:
+                # Directory binding does not exist on this branch
+                return []
+            current_sha = child['sha']
+            current_path = f'{current_path}/{seg}' if current_path else seg
+
+        # Phase 2: try a recursive fetch on the prefix subtree.
+        # Almost always succeeds - one call returns every blob under
+        # the bound directory.
+        sub_resp = await self._get(
+            f'/repos/{owner}/{repo}/git/trees/{current_sha}', params={'recursive': '1'}
+        )
+        if sub_resp.status_code != 200:
+            return None
+        sub_body = sub_resp.json()
+        if not sub_body.get('truncated'):
+            return sub_body.get('tree') or []
+
+        log.info('Prefix subtree %r also truncated - walking its subtrees', prefix)
+
+        # Phase 3: the prefix subtree itself exceeds the entry limit
+        # (rare; >100k files inside markdown/). Fall back to BFS inside
+        # the prefix subtree only - one call per directory.
         out: list[dict] = []
-        queue = [(tree_sha, '')]  # (sha, path-so-far)
+        queue = [(current_sha, current_path)]
         while queue:
             sha, base = queue.pop(0)
             node = await _node(sha)
             if node is None:
-                raise RuntimeError(f'Failed to fetch git tree node at {base or "/"} (HTTP error)')
+                raise RuntimeError(
+                    f'Failed to fetch git tree node at {base or "/"} (HTTP error)'
+                )
             if node.get('truncated'):
                 raise RuntimeError(
                     f'Directory {base or "/"} has too many entries for the GitHub tree API - narrow the directory path'
@@ -334,12 +385,8 @@ class GithubSyncClient:
             for entry in node.get('tree') or []:
                 path = f"{base}/{entry['path']}" if base else entry['path']
                 if entry.get('type') == 'tree':
-                    # Descend into this subtree only if it is an ancestor
-                    # of the configured directory, the directory itself,
-                    # or lies inside it (or everywhere if no directory).
-                    if wanted is None or prefix.startswith(path) or path == prefix or path.startswith(prefix + '/'):
-                        queue.append((entry['sha'], path))
-                elif wanted is None or path.startswith(prefix + '/'):
+                    queue.append((entry['sha'], path))
+                else:
                     out.append({**entry, 'path': path})
         return out
 
@@ -539,11 +586,6 @@ async def _sync_github_source_inner(app, source: KnowledgeGithubSourceModel) -> 
             if source.include_globs and not matches_any(path, list(source.include_globs)):
                 continue
             if not extension_allowed(path, allowed_exts):
-                result['skipped_ext'] += 1
-                continue
-            if source.include_globs and not matches_any(path, list(source.include_globs)):
-                continue
-            if not extension_allowed(path):
                 result['skipped_ext'] += 1
                 continue
             size = int(entry.get('size') or 0)
