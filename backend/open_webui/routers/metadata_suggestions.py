@@ -96,7 +96,7 @@ async def list_proposals(
 
 
 @router.post('/proposals/{id}/apply')
-async def apply_proposal_by_id(id: str, user=Depends(get_admin_user)):
+async def apply_proposal_by_id(id: str, request: Request, user=Depends(get_admin_user)):
     proposal = await MetadataProposals.get_proposal(id)
     if not proposal:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail='Proposal not found')
@@ -107,6 +107,13 @@ async def apply_proposal_by_id(id: str, user=Depends(get_admin_user)):
     except ValueError as e:
         raise HTTPException(status.HTTP_410_GONE, detail=str(e))
     await MetadataProposals.set_status(id, 'applied', applied_by=user.id)
+    # Fire-and-forget re-embed so the applied metadata reaches the vectors.
+    from open_webui.models.files import Files as _Files
+    from open_webui.utils.metadata_suggest import reembed_file
+
+    file = await _Files.get_file_by_id(proposal.file_id)
+    if file:
+        asyncio.create_task(reembed_file(request.app, file, proposal.knowledge_id))
     return {'status': True}
 
 
@@ -122,18 +129,28 @@ async def dismiss_proposal_by_id(id: str, user=Depends(get_admin_user)):
 
 
 @router.post('/proposals/apply-all')
-async def apply_all_proposals(knowledge_id: str, scan_id: Optional[str] = None, user=Depends(get_admin_user)):
+async def apply_all_proposals(knowledge_id: str,
+    request: Request, scan_id: Optional[str] = None, user=Depends(get_admin_user)):
     """Bulk-apply every pending proposal in a KB (optionally one scan)."""
     pending = await MetadataProposals.get_proposals(
         knowledge_id=knowledge_id, scan_id=scan_id, status='pending', limit=10000
     )
+    from open_webui.models.files import Files as _Files
+    from open_webui.utils.metadata_suggest import reembed_file
+
     applied, skipped = 0, []
+    reembed_tasks = []
     for proposal in pending:
         try:
             await apply_proposal(proposal)
             await MetadataProposals.set_status(proposal.id, 'applied', applied_by=user.id)
+            file = await _Files.get_file_by_id(proposal.file_id)
+            if file:
+                reembed_tasks.append(reembed_file(request.app, file, proposal.knowledge_id))
             applied += 1
         except ValueError as e:
             skipped.append(f'{proposal.id}: {e}')
             await MetadataProposals.set_status(proposal.id, 'dismissed')
+    if reembed_tasks:
+        asyncio.gather(*reembed_tasks)  # fire-and-forget batch re-embed
     return {'status': True, 'applied': applied, 'skipped': skipped}

@@ -11,6 +11,9 @@ export type MetadataScan = {
 	attributes: string[] | null;
 	file_id: string | null;
 	max_parallel: number;
+	test_run: boolean;
+	test_preview: Record<string, any> | null;
+	reembedded: number;
 	status: 'running' | 'completed' | 'failed' | 'cancelled';
 	total_files: number;
 	processed_files: number;
@@ -30,10 +33,14 @@ export type MetadataProposal = {
 	proposed_description: string | null;
 	proposed_summary: string | null;
 	proposed_tags: string[] | null;
+	proposed_keywords: string[] | null;
+	proposed_extra: Record<string, string> | null;
 	previous_title: string | null;
 	previous_description: string | null;
 	previous_summary: string | null;
 	previous_tags: string[] | null;
+	previous_keywords: string[] | null;
+	previous_extra: Record<string, string> | null;
 	redaction_count: number;
 	proposer_model_id: string;
 	status: 'pending' | 'applied' | 'dismissed';
@@ -47,6 +54,7 @@ export type StartScanInput = {
 	attributes?: string[] | null;
 	file_id?: string | null;
 	max_parallel?: number;
+	test_run?: boolean;
 };
 
 const base = `${WEBUI_API_BASE_URL}/metadata-suggestions`;

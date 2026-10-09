@@ -29,6 +29,7 @@ from open_webui.models.metadata_proposal import (
     MetadataScanModel,
 )
 from open_webui.utils.chat import generate_chat_completion
+from open_webui.retrieval.utils import build_metadata_header
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +101,60 @@ def normalize_text(raw: Any, max_len: int) -> Optional[str]:
     return t[:max_len]
 
 
+DOC_TYPES = ('reference', 'how-to', 'troubleshooting', 'concept', 'release-notes', 'api', 'overview')
+AUDIENCES = ('admin', 'developer', 'itom', 'end-user', 'all')
+
+
+def normalize_keywords(raw):
+    """Fine-grained search terms (product names, error codes, feature ids).
+    Higher ceiling than tags because these feed BM25 retrieval."""
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        slug = re.sub(r'[^a-z0-9\-]+', '-', item.lower()).strip('-')
+        if 2 <= len(slug) <= 48 and slug not in out:
+            out.append(slug)
+        if len(out) >= 15:
+            break
+    return out or None
+
+
+def normalize_category(raw):
+    """Short hierarchical path, e.g. 'platform/mid-server/discovery'."""
+    if not isinstance(raw, str):
+        return None
+    parts = [re.sub(r'[^a-z0-9\-]+', '-', seg.lower()).strip('-') for seg in raw.split('/')]
+    parts = [p for p in parts if p][:4]
+    return '/'.join(parts)[:96] if parts else None
+
+
+def normalize_doc_type(raw):
+    if not isinstance(raw, str):
+        return None
+    t = raw.lower().strip().replace(' ', '-')
+    for known in DOC_TYPES:
+        if t == known or t.startswith(known):
+            return known
+    if 'trouble' in t or 'issue' in t:
+        return 'troubleshooting'
+    if 'how' in t or 'install' in t or 'config' in t:
+        return 'how-to'
+    return 'reference'
+
+
+def normalize_audience(raw):
+    if not isinstance(raw, str):
+        return None
+    a = raw.lower().strip().replace(' ', '-')
+    for known in AUDIENCES:
+        if known in a:  # containment: 'system-administrators' -> 'admin'
+            return known
+    return 'all'
+
+
 def normalize_tags(raw: Any) -> Optional[list[str]]:
     if not isinstance(raw, list):
         return None
@@ -121,11 +176,15 @@ Given a document excerpt and its current metadata, propose IMPROVED metadata.
 
 Rules:
 - Respond with ONLY a JSON object, no prose, no code fences.
-- Keys: "title", "description", "summary", "tags". Use null for any field you cannot improve.
+- Keys: "title", "description", "summary", "tags", "keywords", "category", "doc_type", "audience". Use null for any field you cannot improve.
 - title: 5-80 chars, human-readable, no file extension, no leading numbers.
 - description: one sentence, max 280 chars, states what the document covers.
 - summary: max 600 chars, the key points a searcher needs.
 - tags: 1-8 short lowercase slug tags (e.g. "mid-server", "discovery").
+- keywords: 5-15 lowercase search terms someone would type to find this doc - include product names, feature names, error codes, table/property names where present.
+- category: short hierarchical path, e.g. "platform/mid-server/discovery" or "itom/agent-guide".
+- doc_type: exactly one of "reference", "how-to", "troubleshooting", "concept", "release-notes", "api", "overview".
+- audience: exactly one of "admin", "developer", "itom", "end-user", "all".
 - Never invent facts not present in the excerpt. Never include emails, keys, tokens or personal data.
 """
 
@@ -151,6 +210,10 @@ def _current_metadata(file) -> dict:
         'description': meta.get('description') or '',
         'summary': meta.get('summary') or '',
         'tags': meta.get('tags') or [],
+        'keywords': meta.get('keywords') or [],
+        'category': meta.get('category') or '',
+        'doc_type': meta.get('doc_type') or '',
+        'audience': meta.get('audience') or '',
     }
 
 
@@ -227,15 +290,75 @@ async def _suggest_one(request, user, model_id: str, file, attributes: list[str]
     return parsed
 
 
+async def reembed_file(app, file, knowledge_id: str) -> bool:
+    """Re-chunk + re-embed ONE file so its enriched metadata flows into the
+    embeddings (content+metadata header). Deletes the per-file collection and
+    the file's chunks inside the KB collection, then re-runs process_file —
+    the same force-reembed path the /knowledge/reindex loop uses."""
+    from open_webui.internal.db import get_async_db
+    from open_webui.retrieval.vector import ASYNC_VECTOR_DB_CLIENT
+    from open_webui.routers.retrieval import ProcessFileForm, process_file
+
+    class _R:
+        def __init__(self, app):
+            self.app = app
+            self.state = SimpleNamespace()
+            self.headers = {}
+            self.cookies = {}
+            self.method = 'POST'
+            self.url = SimpleNamespace(query='', path='/x')
+
+        async def body(self):
+            return b''
+
+    try:
+        file_collection = f'file-{file.id}'
+        if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
+            await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+        # Remove this file's stale chunks from the KB collection only.
+        await ASYNC_VECTOR_DB_CLIENT.delete(
+            collection_name=knowledge_id, filter={'file_id': file.id}
+        )
+        from open_webui.models.users import Users as _Users
+
+        user = await _Users.get_user_by_id(file.user_id)
+        async with get_async_db() as db:
+            await process_file(
+                _R(app),
+                ProcessFileForm(file_id=file.id, collection_name=knowledge_id),
+                user=user,
+                db=db,
+            )
+        return True
+    except Exception as e:
+        log.warning('reembed_file failed for %s: %s', getattr(file, 'filename', file.id), e)
+        return False
+
+
 async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
     """Background task body. Bounded parallelism, per-file isolation — one
     failure is logged and counted, never aborts the scan."""
     from open_webui.models.users import Users
 
-    # generate_chat_completion writes request.state.bypass_filter /
-    # bypass_system_prompt and reads request.state.metadata + request.app.state.*,
-    # so the shim needs a mutable .state namespace alongside .app.
-    request = SimpleNamespace(app=app, state=SimpleNamespace())
+    class _ScanRequestShim:
+        """Minimal Request stand-in for generate_chat_completion outside an
+        HTTP context. Covers every attribute the completion path touches:
+        .app.state.*, .state (bypass flags / metadata), .headers.get
+        (X-Skip-Provider-URLs in the openai router), .cookies.get (oauth),
+        .method/.url.query (passthrough helpers), and `await .body()`."""
+
+        def __init__(self, app):
+            self.app = app
+            self.state = SimpleNamespace()
+            self.headers = {}
+            self.cookies = {}
+            self.method = 'POST'
+            self.url = SimpleNamespace(query='', path='/api/v1/chat/completions')
+
+        async def body(self):
+            return b''
+
+    request = _ScanRequestShim(app)
     user = await Users.get_user_by_id(scan.user_id)
     if not user:
         await MetadataScans.finish_scan(scan.id, 'failed', ['Owning admin user not found'])
@@ -260,6 +383,50 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
         await MetadataScans.finish_scan(scan.id, 'completed', ['No matching files'])
         return
 
+    if scan.test_run:
+        # Test run: exactly one file, propose ONLY (never applied, never
+        # re-embedded). Preview shows what would change on the file record
+        # AND in the embedding header.
+        file = files[0]
+        current = _current_metadata(file)
+        header_before = build_metadata_header(
+            {'title': current['title'], 'description': current['description'], **current}
+        )
+        try:
+            raw = await _suggest_one(request, user, scan.model_id, file, list(METADATA_ATTRIBUTES))
+        except Exception as e:
+            await MetadataScans.finish_scan(scan.id, 'failed', [f'{file.filename}: {e}'])
+            return
+        preview_fields = {
+            'title': raw.get('title') if isinstance(raw, dict) else None,
+            'description': raw.get('description') if isinstance(raw, dict) else None,
+            'summary': raw.get('summary') if isinstance(raw, dict) else None,
+            'tags': raw.get('tags') if isinstance(raw, dict) else None,
+            'keywords': raw.get('keywords') if isinstance(raw, dict) else None,
+            'category': raw.get('category') if isinstance(raw, dict) else None,
+            'doc_type': raw.get('doc_type') if isinstance(raw, dict) else None,
+            'audience': raw.get('audience') if isinstance(raw, dict) else None,
+        }
+        after = dict(current)
+        for k, v in preview_fields.items():
+            if v:
+                after[k] = v
+        header_after = build_metadata_header(after)
+        await MetadataScans.set_test_preview(
+            scan.id,
+            {
+                'file_id': file.id,
+                'filename': file.filename,
+                'current': current,
+                'proposed': preview_fields,
+                'header_before': header_before or '(none - content-only embedding)',
+                'header_after': header_after or '(none)',
+            },
+        )
+        await MetadataScans.update_progress(scan.id, processed=1)
+        await MetadataScans.finish_scan(scan.id, 'completed', None)
+        return
+
     # Server-side parallelism ceiling (admin config); scan value is the
     # user's request, clamped by the ceiling. Default 1.
     from open_webui.models.config import Config
@@ -274,11 +441,12 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
     processed = 0
     proposals = 0
     redactions_total = 0
+    reembedded_total = 0
     errors: list[str] = []
     lock = asyncio.Lock()
 
     async def handle_file(file):
-        nonlocal processed, proposals, redactions_total
+        nonlocal processed, proposals, redactions_total, reembedded_total
 
         # Cancellation checkpoint: the cancel endpoint flips status to
         # 'cancelled'; stop picking up new files (in-flight ones finish).
@@ -328,6 +496,25 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                 tags = normalize_tags(raw.get('tags'))
                 if tags and sorted(tags) != sorted(current['tags'] or []):
                     proposal['proposed_tags'] = [redact_pii(t)[0] for t in tags]
+            if 'keywords' in attributes:
+                kws = normalize_keywords(raw.get('keywords'))
+                if kws and kws != (current['keywords'] or []):
+                    proposal['proposed_keywords'] = [redact_pii(k)[0] for k in kws]
+            extra: dict = {}
+            if 'category' in attributes:
+                cat = normalize_category(raw.get('category'))
+                if cat and cat != current['category']:
+                    extra['category'] = cat
+            if 'doc_type' in attributes:
+                dt = normalize_doc_type(raw.get('doc_type'))
+                if dt and dt != current['doc_type']:
+                    extra['doc_type'] = dt
+            if 'audience' in attributes:
+                aud = normalize_audience(raw.get('audience'))
+                if aud and aud != current['audience']:
+                    extra['audience'] = aud
+            if extra:
+                proposal['proposed_extra'] = extra
 
             async with lock:
                 # 3-tier policy: auto-apply on empty fields, queue on populated,
@@ -344,6 +531,9 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                             cur_meta['description'] = proposal.get('proposed_description', cur_meta.get('description'))
                             cur_meta['summary'] = proposal.get('proposed_summary', cur_meta.get('summary'))
                             cur_meta['tags'] = proposal.get('proposed_tags', cur_meta.get('tags') or [])
+                            cur_meta['keywords'] = proposal.get('proposed_keywords', cur_meta.get('keywords') or [])
+                            for k, v in (proposal.get('proposed_extra') or {}).items():
+                                cur_meta[k] = v
                             cur_meta['metadata_improved_at'] = int(time.time())
                             cur_meta['metadata_improved_by_model'] = scan.model_id
                             cur_meta['metadata_improved_auto'] = True
@@ -352,6 +542,10 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                             if new_title and new_title != (file.filename or ''):
                                 await _Files.update_file_name_by_id(file.id, new_title)
                             payload_status = 'auto_applied'
+                            # Pipeline: enrich -> re-embed, bounded by the
+                            # same semaphore the model calls use.
+                            if await reembed_file(app, file, scan.knowledge_id):
+                                reembedded_total += 1
                         except Exception as e:
                             log.warning('Auto-apply failed for %s: %s', file.filename, e)
                             payload_status = 'pending'
@@ -366,12 +560,20 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                             await MetadataProposals.set_status(older.id, 'dismissed')
                 except Exception:
                     pass
-                payload_base = dict(proposal) if proposal else {
-                    'previous_title': current['title'] or None,
-                    'previous_description': current['description'] or None,
-                    'previous_summary': current['summary'] or None,
-                    'previous_tags': current['tags'] or None,
-                }
+                payload_base = dict(proposal) if proposal else {}
+                if not proposal:
+                    payload_base.update({
+                        'previous_title': current['title'] or None,
+                        'previous_description': current['description'] or None,
+                        'previous_summary': current['summary'] or None,
+                        'previous_tags': current['tags'] or None,
+                        'previous_keywords': current['keywords'] or None,
+                    })
+                payload_base.setdefault('previous_title', current['title'] or None)
+                payload_base.setdefault('previous_description', current['description'] or None)
+                payload_base.setdefault('previous_summary', current['summary'] or None)
+                payload_base.setdefault('previous_tags', current['tags'] or None)
+                payload_base.setdefault('previous_keywords', current['keywords'] or None)
                 payload_base.update({
                     'scan_id': scan.id,
                     'knowledge_id': scan.knowledge_id,
@@ -390,6 +592,7 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
                     processed=processed,
                     proposals=proposals,
                     redactions=redactions_total,
+                    reembedded=reembedded_total,
                 )
 
     await asyncio.gather(*(handle_file(f) for f in files))
@@ -426,6 +629,12 @@ async def apply_proposal(proposal) -> None:
         changed = True
     if proposal.proposed_tags is not None:
         meta['tags'] = proposal.proposed_tags
+        changed = True
+    if proposal.proposed_keywords is not None:
+        meta['keywords'] = proposal.proposed_keywords
+        changed = True
+    for k, v in (proposal.proposed_extra or {}).items():
+        meta[k] = v
         changed = True
     if changed:
         meta['metadata_improved_at'] = int(time.time())

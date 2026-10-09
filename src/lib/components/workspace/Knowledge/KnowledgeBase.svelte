@@ -111,6 +111,7 @@
 	let selectedFileId = null;
 	let selectedFile = null;
 	let selectedFileContent = '';
+	let showFileDetails = false;
 	let loadingFileContent = false;
 
 	let inputFiles = null;
@@ -1658,6 +1659,15 @@
 													{selectedFile?.meta?.name}
 												</a>
 											</div>
+											<div class="shrink-0">
+												<button
+													type="button"
+													class="flex self-center w-fit text-xs py-1 px-2.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg"
+													on:click={() => (showFileDetails = !showFileDetails)}
+												>
+													{showFileDetails ? $i18n.t('Hide details') : $i18n.t('Details')}
+												</button>
+											</div>
 
 											{#if knowledge?.write_access}
 												<div>
@@ -1679,7 +1689,38 @@
 											{/if}
 										</div>
 
-										{#key selectedFile?.id}
+										{#if showFileDetails}
+									<div class="px-3 py-2 text-xs border-b border-gray-100 dark:border-gray-850 space-y-1.5 max-h-56 overflow-y-auto">
+										<div class="grid grid-cols-2 gap-x-4 gap-y-1">
+											{#each [['id', selectedFile?.id], ['embed_mode', selectedFile?.meta?.embed_mode ?? 'content_only (default)'], ['doc_type', selectedFile?.meta?.doc_type], ['category', selectedFile?.meta?.category], ['audience', selectedFile?.meta?.audience], ['content_type', selectedFile?.meta?.content_type], ['size', selectedFile?.meta?.size]] as [label, value] (label)}
+												{#if value}
+													<div><span class="text-gray-400">{label}:</span> {value}</div>
+												{/if}
+											{/each}
+										</div>
+										{#if selectedFile?.meta?.description}
+											<div><span class="text-gray-400">description:</span> {selectedFile.meta.description}</div>
+										{/if}
+										{#if selectedFile?.meta?.summary}
+											<div class="text-gray-500 dark:text-gray-400 line-clamp-3"><span class="text-gray-400">summary:</span> {selectedFile.meta.summary}</div>
+										{/if}
+										{#if selectedFile?.meta?.tags?.length}
+											<div class="flex flex-wrap gap-1">
+												{#each selectedFile.meta.tags as tag (tag)}
+													<span class="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-[10px]">{tag}</span>
+												{/each}
+											</div>
+										{/if}
+										{#if selectedFile?.meta?.keywords?.length}
+											<div class="flex flex-wrap gap-1">
+												{#each selectedFile.meta.keywords as kw (kw)}
+													<span class="px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 text-[10px] font-mono">{kw}</span>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/if}
+								{#key selectedFile?.id}
 											<textarea
 												class="w-full h-full text-xs outline-none resize-none px-3 py-2"
 												bind:value={selectedFileContent}

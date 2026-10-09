@@ -25,7 +25,7 @@ from open_webui.internal.db import Base, get_async_db_context
 log = logging.getLogger(__name__)
 
 # Attribute universe the LLM may propose values for.
-METADATA_ATTRIBUTES = ('title', 'description', 'summary', 'tags')
+METADATA_ATTRIBUTES = ('title', 'description', 'summary', 'tags', 'keywords', 'category', 'doc_type', 'audience')
 
 SCAN_MODES = ('all', 'missing', 'attributes', 'file')
 
@@ -42,6 +42,9 @@ class MetadataScan(Base):
     attributes = Column(JSON, nullable=True)  # for mode='attributes'
     file_id = Column(Text, nullable=True)  # for mode='file'
     max_parallel = Column(BigInteger, nullable=False, default=1)
+    test_run = Column(BigInteger, nullable=False, default=0)
+    test_preview = Column(JSON, nullable=True)
+    reembedded = Column(BigInteger, nullable=False, default=0)
 
     status = Column(Text, nullable=False, default='running')  # running|completed|failed|cancelled
     total_files = Column(BigInteger, nullable=False, default=0)
@@ -73,6 +76,10 @@ class MetadataProposal(Base):
     proposed_description = Column(Text, nullable=True)
     proposed_summary = Column(Text, nullable=True)
     proposed_tags = Column(JSON, nullable=True)  # list[str]
+    proposed_keywords = Column(JSON, nullable=True)  # list[str]
+    proposed_extra = Column(JSON, nullable=True)  # {category, doc_type, audience}
+    previous_keywords = Column(JSON, nullable=True)
+    previous_extra = Column(JSON, nullable=True)
 
     # Previous values for the diff view + undo semantics.
     previous_title = Column(Text, nullable=True)
@@ -106,6 +113,9 @@ class MetadataScanModel(BaseModel):
     attributes: Optional[list[str]] = None
     file_id: Optional[str] = None
     max_parallel: int = 1
+    test_run: bool = False
+    test_preview: Optional[dict] = None
+    reembedded: int = 0
     status: str = 'running'
     total_files: int = 0
     processed_files: int = 0
@@ -128,10 +138,14 @@ class MetadataProposalModel(BaseModel):
     proposed_description: Optional[str] = None
     proposed_summary: Optional[str] = None
     proposed_tags: Optional[list[str]] = None
+    proposed_keywords: Optional[list[str]] = None
+    proposed_extra: Optional[dict] = None
     previous_title: Optional[str] = None
     previous_description: Optional[str] = None
     previous_summary: Optional[str] = None
     previous_tags: Optional[list[str]] = None
+    previous_keywords: Optional[list[str]] = None
+    previous_extra: Optional[dict] = None
     redaction_count: int = 0
     proposer_model_id: str
     status: str = 'pending'
@@ -147,6 +161,7 @@ class MetadataScanForm(BaseModel):
     attributes: Optional[list[str]] = None
     file_id: Optional[str] = None
     max_parallel: int = 1
+    test_run: bool = False
 
 
 class MetadataScansTable:
@@ -166,6 +181,8 @@ class MetadataScansTable:
                     attributes=attrs or None,
                     file_id=form_data.file_id,
                     max_parallel=max(1, min(int(form_data.max_parallel), 8)),
+                    test_run=1 if form_data.test_run else 0,
+                    reembedded=0,
                     total_files=0,
                     processed_files=0,
                     proposals_created=0,
@@ -214,6 +231,7 @@ class MetadataScansTable:
         processed: Optional[int] = None,
         proposals: Optional[int] = None,
         redactions: Optional[int] = None,
+        reembedded: Optional[int] = None,
     ) -> None:
         from sqlalchemy import update
 
@@ -226,10 +244,21 @@ class MetadataScansTable:
             values['proposals_created'] = int(proposals)
         if redactions is not None:
             values['redactions'] = int(redactions)
+        if reembedded is not None:
+            values['reembedded'] = int(reembedded)
         if not values:
             return
         async with get_async_db_context() as db:
             await db.execute(update(MetadataScan).where(MetadataScan.id == id).values(**values))
+            await db.commit()
+
+    async def set_test_preview(self, id: str, preview: dict) -> None:
+        from sqlalchemy import update
+
+        async with get_async_db_context() as db:
+            await db.execute(
+                update(MetadataScan).where(MetadataScan.id == id).values(test_preview=preview)
+            )
             await db.commit()
 
     async def finish_scan(self, id: str, status: str, errors: Optional[list[str]] = None) -> None:

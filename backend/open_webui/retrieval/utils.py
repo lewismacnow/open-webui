@@ -375,6 +375,31 @@ def get_doc(collection_name: str, user: UserModel = None):
         raise e
 
 
+def build_metadata_header(metadata: dict | None) -> str:
+    """Compact one-line metadata header prepended to chunk content at EMBED
+    time (content+metadata embeddings). The stored chunk text stays
+    content-only - only the vector encodes the header. Kept token-cheap:
+    pipe-separated label:value pairs, description truncated."""
+    metadata = metadata or {}
+    parts = []
+    title = metadata.get('title') or metadata.get('name')
+    if title:
+        parts.append(f'Title: {str(title)[:120]}')
+    desc = metadata.get('description')
+    if desc:
+        parts.append(f'Description: {str(desc)[:200]}')
+    keywords = metadata.get('keywords')
+    if isinstance(keywords, list) and keywords:
+        parts.append('Keywords: ' + ', '.join(str(k) for k in keywords[:15]))
+    for key, label in (('category', 'Category'), ('doc_type', 'Type'), ('audience', 'Audience')):
+        v = metadata.get(key)
+        if v:
+            parts.append(f'{label}: {str(v)[:64]}')
+    if not parts:
+        return ''
+    return '[' + ' | '.join(parts) + ']'
+
+
 def get_enriched_texts(collection_result: GetResult) -> list[str]:
     enriched_texts = []
     for idx, text in enumerate(collection_result.documents[0]):
