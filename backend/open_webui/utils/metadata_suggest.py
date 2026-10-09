@@ -149,7 +149,7 @@ def normalize_audience(raw):
         return None
     a = raw.lower().strip().replace(' ', '-')
     for known in AUDIENCES:
-        if a == known or a.startswith(known):
+        if known in a:  # containment: 'system-administrators' -> 'admin'
             return known
     return 'all'
 
