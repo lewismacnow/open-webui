@@ -163,11 +163,7 @@
 			const result = await syncGithubSyncSourceNow(localStorage.token, source.id);
 			const r = result || {};
 			toast.success(
-				$i18n.t('Sync done: +{added} added, ~{updated} updated, −{removed} removed', {
-					added: r.added ?? 0,
-					updated: r.updated ?? 0,
-					removed: r.removed ?? 0
-				})
+				`Sync done: +${r.added ?? 0} added, ~${r.updated ?? 0} updated, −${r.removed ?? 0} removed`
 			);
 			await refresh();
 		} catch (e) {
