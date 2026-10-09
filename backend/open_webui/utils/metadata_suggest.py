@@ -276,18 +276,46 @@ async def _suggest_one(request, user, model_id: str, file, attributes: list[str]
         'stream': False,
         'temperature': 0.2,
     }
-    response = await generate_chat_completion(request, form_data=payload, user=user)
-    # Non-stream responses are dict-like (same parse as tool_generator).
-    try:
-        content = (((response or {}).get('choices') or [{}])[0].get('message', {}) or {}).get('content') or ''
-    except Exception as e:
-        raise RuntimeError(f'unparseable model response ({type(response).__name__}): {e}')
-    if not content.strip():
-        raise RuntimeError('model returned an empty message')
-    parsed = _extract_json(content)
-    if parsed is None:
-        raise RuntimeError(f'model response contained no JSON object: {content[:120]!r}')
-    return parsed
+    def _extract_content(resp) -> str:
+        """Pull text out of a non-stream completion response.
+
+        Handles the common shapes: content as str; content as a list of
+        parts ({type: text, text: ...}); and message objects that carry
+        the payload under reasoning_content. Returns stripped text."""
+        try:
+            msg = (((resp or {}).get('choices') or [{}])[0].get('message')) or {}
+        except Exception as e:
+            raise RuntimeError(f'unparseable model response ({type(resp).__name__}): {e}')
+        content = msg.get('content')
+        if isinstance(content, list):
+            content = ''.join(
+                part.get('text', '') for part in content if isinstance(part, dict)
+            )
+        if not (content or '').strip():
+            content = msg.get('reasoning_content') or ''
+        return (content or '').strip()
+
+    # Some providers intermittently return an empty first response
+    # (reasoning models, rate-limit soft-fails). One retry before failing.
+    last_err = None
+    for attempt in range(2):
+        if attempt:
+            await asyncio.sleep(1.5)
+        response = await generate_chat_completion(request, form_data=payload, user=user)
+        try:
+            content = _extract_content(response)
+        except RuntimeError as e:
+            last_err = str(e)
+            continue
+        if not content:
+            last_err = f'model {model_id!r} returned an empty message (attempt {attempt + 1}/2)'
+            continue
+        parsed = _extract_json(content)
+        if parsed is None:
+            last_err = f'model response contained no JSON object: {content[:120]!r}'
+            continue
+        return parsed
+    raise RuntimeError(last_err or 'model returned an empty message')
 
 
 async def reembed_file(app, file, knowledge_id: str) -> bool:
@@ -377,7 +405,8 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
     elif scan.mode == 'missing':
         files = [f for f in files if any(_is_missing(v) for v in _current_metadata(f).values())]
 
-    total = len(files)
+    # Test runs process exactly one file - report 1, not the full KB size.
+    total = 1 if scan.test_run else len(files)
     await MetadataScans.update_progress(scan.id, total=total)
     if total == 0:
         await MetadataScans.finish_scan(scan.id, 'completed', ['No matching files'])

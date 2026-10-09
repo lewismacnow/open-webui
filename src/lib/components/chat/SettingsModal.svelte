@@ -60,7 +60,7 @@
 	import FailoverQueue from '$lib/components/admin/Settings/FailoverQueue.svelte';
 	import ServiceKeys from '$lib/components/admin/Settings/ServiceKeys.svelte';
 	import GithubSync from '$lib/components/admin/Settings/GithubSync.svelte';
-	import MetadataSuggestions from '$lib/components/admin/Settings/MetadataSuggestions.svelte';
+	import MetadataEnrichment from '$lib/components/admin/Settings/MetadataEnrichment.svelte';
 	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
 	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
 	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
@@ -179,7 +179,7 @@
 		'admin:tools-config': $i18n.t('Tools'),
 		'admin:token-caps': $i18n.t('Tools'),
 		'admin:github-sync': $i18n.t('Tools'),
-		'admin:metadata-suggestions': $i18n.t('Tools'),
+		'admin:metadata-enrichment': $i18n.t('Tools'),
 		'admin:web': $i18n.t('Tools'),
 		'admin:code-execution': $i18n.t('Tools'),
 		'admin:pipelines': $i18n.t('Tools'),
@@ -449,10 +449,10 @@
 			keywords: ['github', 'repository', 'repo', 'branch', 'sync', 'pat', 'token']
 		},
 		{
-			id: 'admin:metadata-suggestions',
-			titleKey: 'admin.metadata-suggestions',
-			title: 'Metadata Suggestions',
-			searchPrefixes: ['admin.metadata-suggestions.'],
+			id: 'admin:metadata-enrichment',
+			titleKey: 'admin.metadata-enrichment',
+			title: 'Metadata Enrichment',
+			searchPrefixes: ['admin.metadata-enrichment.'],
 			keywords: ['metadata', 'improve', 'title', 'description', 'tags', 'llm']
 		},
 		{
@@ -1004,8 +1004,8 @@
 				<TokenCaps />
 			{:else if selectedTab === 'admin:github-sync'}
 				<GithubSync />
-			{:else if selectedTab === 'admin:metadata-suggestions'}
-				<MetadataSuggestions />
+			{:else if selectedTab === 'admin:metadata-enrichment'}
+				<MetadataEnrichment />
 			{:else if selectedTab === 'admin:web'}
 				<AdminWebSearch saveHandler={adminConfigSaveHandler} />
 			{:else if selectedTab === 'admin:code-execution'}
