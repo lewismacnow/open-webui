@@ -397,7 +397,18 @@ class ModelsTable:
     ) -> ModelListResponse:
         async with get_async_db_context(db) as db:
             stmt = select(Model, User).outerjoin(User, User.id == Model.user_id)
-            stmt = stmt.filter(Model.base_model_id != None)
+            # Workspace models are wrappers: they have a legacy base_model_id
+            # OR a failover chain configuration. A wrapper set to the GLOBAL
+            # failover chain (meta.failover_source == 'global') legitimately
+            # has base_model_id == null - filtering on base_model_id alone
+            # made those models vanish from the workspace list (they saved
+            # fine and then hit 'model id already registered' on retry).
+            stmt = stmt.filter(
+                or_(
+                    Model.base_model_id != None,
+                    Model.meta['failover_source'].as_string() != None,
+                )
+            )
 
             if filter:
                 query_key = filter.get('query')

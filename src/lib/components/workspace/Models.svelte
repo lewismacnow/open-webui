@@ -45,6 +45,15 @@
 		resolveLocalizedModelName
 	} from '$lib/utils/localizedContent';
 
+	// Fork: subtitle for wrapper models. Global-failover wrappers have no
+	// base_model_id - show 'Global failover chain' instead of a provider id.
+	function modelBaseLabel(model: any): string {
+		if (model?.meta?.failover_source === 'global') {
+			return $i18n.t('Global failover chain');
+		}
+		return model?.base_model_id ?? '';
+	}
+
 	import EllipsisHorizontal from '../icons/EllipsisHorizontal.svelte';
 	import CheckCircle from '../icons/CheckCircle.svelte';
 	import Minus from '../icons/Minus.svelte';
@@ -779,7 +788,7 @@
 											content={(
 												resolveLocalizedModelDescription(model, $i18n.language) ?? ''
 											).trim() ||
-												model.base_model_id ||
+												modelBaseLabel(model) ||
 												$i18n.t('No description')}
 											className="min-w-0"
 											placement="top-start"
@@ -788,7 +797,7 @@
 												class="truncate text-[0.6875rem] leading-4 text-gray-400 dark:text-gray-600"
 											>
 												{(resolveLocalizedModelDescription(model, $i18n.language) ?? '').trim() ||
-													model.base_model_id ||
+													modelBaseLabel(model) ||
 													$i18n.t('No description')}
 											</div>
 										</Tooltip>
