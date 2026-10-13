@@ -76,6 +76,14 @@ class ProviderCandidate:
     pre_claimed: bool = False
 
 
+# How long a cached 'unhealthy' status stays trusted after its cooldown
+# expired without a fresh probe confirming it. The health-check loop
+# re-probes every 30s, so 90s means "three missed probe cycles" — past
+# that the entry is stale and the provider is treated as unknown (still
+# ranked below healthy providers, but no longer permanently banned).
+UNHEALTHY_STATUS_TRUST_SECONDS = 90
+
+
 def _health_status(health_cache: Optional[dict], url: str) -> str:
     """Return 'healthy' | 'unhealthy' | 'unknown' for a given provider URL."""
     if not health_cache:
@@ -87,7 +95,15 @@ def _health_status(health_cache: Optional[dict], url: str) -> str:
     unhealthy_until = entry.get('unhealthy_until')
     if unhealthy_until and unhealthy_until > time.time():
         return 'unhealthy'
-    return entry.get('status', 'unknown')
+    status = entry.get('status', 'unknown')
+    if status == 'unhealthy':
+        # Cooldown expired. Trust the cached 'unhealthy' only while it is
+        # fresh (recently observed); a stale one decays to 'unknown' so a
+        # dead or delayed health loop can never ban a provider forever.
+        last_observed = entry.get('last_check_at') or entry.get('last_error_at') or 0
+        if time.time() - last_observed > UNHEALTHY_STATUS_TRUST_SECONDS:
+            return 'unknown'
+    return status
 
 
 async def resolve_failover_candidates(

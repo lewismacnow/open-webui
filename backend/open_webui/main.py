@@ -576,6 +576,17 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(embedding_worker_loop(app))
 
+    # Provider health probes: without this loop, PROVIDER_HEALTH entries
+    # written by request-path failures were never re-probed — a provider
+    # that failed once stayed 'unhealthy' in the cache forever, so after
+    # a failover to the secondary the primary was never tried again even
+    # after it came back online (the 15s cooldown expired but the stale
+    # status field kept it sorted last). The loop re-probes every 30s so
+    # a recovered primary returns to the top of the rotation.
+    from open_webui.utils.provider_health import health_check_loop
+
+    app.state.provider_health_check_loop = asyncio.create_task(health_check_loop(app))
+
     if await Config.get('models.base_models_cache'):
         try:
             await get_all_models(
