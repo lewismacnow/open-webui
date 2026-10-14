@@ -403,10 +403,22 @@ class ModelsTable:
             # has base_model_id == null - filtering on base_model_id alone
             # made those models vanish from the workspace list (they saved
             # fine and then hit 'model id already registered' on retry).
+            #
+            # Model.meta is a JSONField (TypeDecorator over UnicodeText) so
+            # SQL JSON operators like `meta['failover_source'].as_string()`
+            # raise NotImplementedError on the ORM mapped attribute. Use
+            # the same cast-to-text + LIKE pattern the tag filter below
+            # already uses (cross-dialect on SQLite + PostgreSQL), and
+            # reuse json_text_variants for the ASCII/unicode encoding
+            # ambiguity. failover_source only takes 'global' or 'custom';
+            # a missing key or explicit null serialises as
+            # '"failover_source":null' which neither pattern matches.
+            meta_text = cast(Model.meta, String)
+            failover_variants = [v for raw in ('global', 'custom') for v in json_text_variants(raw)]
             stmt = stmt.filter(
                 or_(
                     Model.base_model_id != None,
-                    Model.meta['failover_source'].as_string() != None,
+                    *(meta_text.like(f'%"{v}"%', escape='\\') for v in failover_variants),
                 )
             )
 
