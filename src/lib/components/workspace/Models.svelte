@@ -770,6 +770,20 @@
 													{model.id}
 												</div>
 
+												{#if model?.meta?.failover_source === 'global'}
+													<Tooltip
+														content={$i18n.t(
+															'Uses the global failover chain configured in Admin > Wrapper Model Providers'
+														)}
+													>
+														<span
+															class="hidden shrink-0 rounded-full bg-blue-500/10 px-1.5 py-0.5 text-[0.625rem] font-medium text-blue-600 dark:text-blue-400 sm:inline"
+														>
+															{$i18n.t('Global chain')}
+														</span>
+													</Tooltip>
+												{/if}
+
 												<Tooltip content={dayjs(model.updated_at * 1000).format('LLLL')}>
 													<div
 														class="shrink-0 truncate text-[0.6875rem] leading-5 text-gray-400 dark:text-gray-600"

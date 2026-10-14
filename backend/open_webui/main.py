@@ -1900,9 +1900,32 @@ async def chat_completion(
 
             model = request.app.state.MODELS[model_id]
             model_info = await Models.get_model_by_id(model_id)
-            missing_base_model = bool(
+            raw_missing = bool(
                 model_info and model_info.base_model_id and model_info.base_model_id not in request.app.state.MODELS
             )
+            # A wrapper that carries a failover chain (global or custom)
+            # is the user's way of saying "route to any of these providers
+            # for this base" - the request-level resolver in
+            # resolve_failover_candidates picks the right provider when the
+            # chat actually fires. The legacy missing-base-model block
+            # here rewrites form_data['model'] and rebinds `model` to a
+            # fallback dict (often synthesised with empty meta), which
+            # silently drops the wrapper's system prompt and attached
+            # knowledge - new wrappers started losing their params/knowledge
+            # once base_model_id was mirrored to the prefixed chain entry
+            # id (e.g. 'openai/llama3'), which the MODELS lookup (raw
+            # openai ids) didn't recognise as a false positive. Treat any
+            # failover-configured wrapper as 'base is reachable enough'
+            # so the rebind is skipped and the wrapper's info.meta +
+            # info.params flow through to the chat pipeline untouched.
+            failover_configured = bool(
+                model_info
+                and (
+                    getattr(model_info.meta, 'failover_source', None)
+                    or (getattr(model_info.meta, 'failover_providers', None) or [])
+                )
+            )
+            missing_base_model = raw_missing and not failover_configured
 
             if missing_base_model and ENABLE_CUSTOM_MODEL_FALLBACK:
                 fallback_model_id = next(
