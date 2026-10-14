@@ -309,6 +309,17 @@ async def create_new_model(
 
     model = await Models.get_model_by_id(form_data.id, db=db)
     if model:
+        # Surface the conflicting row in logs so admins can tell
+        # 'another active wrapper already has this id' from 'the
+        # previous delete of this id silently failed' (a real symptom
+        # the create endpoint can't distinguish on its own).
+        log.warning(
+            'create_new_model id=%r conflicts with existing row: name=%r is_active=%s created_at=%s',
+            form_data.id,
+            getattr(model, 'name', None),
+            getattr(model, 'is_active', None),
+            getattr(model, 'created_at', None),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.MODEL_ID_TAKEN,
@@ -1139,6 +1150,16 @@ async def delete_model_by_id(
         )
 
     result = await Models.delete_model_by_id(form_data.id, db=db)
+    if not result:
+        # delete_model_by_id already logs the underlying exception; this
+        # is the request-level breadcrumb so the ghost-row symptom
+        # ('I deleted it but creating the same id again says taken')
+        # is traceable to a single id without grepping model.py logs.
+        log.warning(
+            'delete_model_by_id returned False for model id=%r; the row may '
+            'still exist - check server logs for the underlying exception.',
+            form_data.id,
+        )
     if result:
         await publish_event(
             request,

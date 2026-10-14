@@ -646,7 +646,14 @@ class ModelsTable:
                 await db.commit()
 
                 return True
-        except Exception:
+        except Exception as exc:
+            # Previously swallowed silently, which left a 'ghost' model
+            # row in the DB that the UI thought was deleted but that
+            # the create endpoint (id-uniqueness) still blocked, with no
+            # way for the admin to diagnose why delete 'succeeded'. Log
+            # the failure with the offending id so the row surviving is
+            # debuggable from server logs alone.
+            log.exception('delete_model_by_id(%r) failed: %s', id, exc)
             return False
 
     async def delete_all_models(self, db: AsyncSession | None = None) -> bool:
