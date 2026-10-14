@@ -76,6 +76,14 @@ class ProviderCandidate:
     pre_claimed: bool = False
 
 
+# How long a cached 'unhealthy' status stays trusted after its cooldown
+# expired without a fresh probe confirming it. The health-check loop
+# re-probes every 30s, so 90s means "three missed probe cycles" — past
+# that the entry is stale and the provider is treated as unknown (still
+# ranked below healthy providers, but no longer permanently banned).
+UNHEALTHY_STATUS_TRUST_SECONDS = 90
+
+
 def _health_status(health_cache: Optional[dict], url: str) -> str:
     """Return 'healthy' | 'unhealthy' | 'unknown' for a given provider URL."""
     if not health_cache:
@@ -87,7 +95,15 @@ def _health_status(health_cache: Optional[dict], url: str) -> str:
     unhealthy_until = entry.get('unhealthy_until')
     if unhealthy_until and unhealthy_until > time.time():
         return 'unhealthy'
-    return entry.get('status', 'unknown')
+    status = entry.get('status', 'unknown')
+    if status == 'unhealthy':
+        # Cooldown expired. Trust the cached 'unhealthy' only while it is
+        # fresh (recently observed); a stale one decays to 'unknown' so a
+        # dead or delayed health loop can never ban a provider forever.
+        last_observed = entry.get('last_check_at') or entry.get('last_error_at') or 0
+        if time.time() - last_observed > UNHEALTHY_STATUS_TRUST_SECONDS:
+            return 'unknown'
+    return status
 
 
 async def resolve_failover_candidates(
@@ -180,22 +196,46 @@ async def resolve_failover_candidates(
         if getattr(model_info.meta, 'failover_source', None) == 'global':
             chains_data = await Config.get('models.wrapper_provider_chains') or []
             # Backwards compat: an earlier fork version stored this as
-            # ``{wrapper_id: [entries]}`` keyed by wrapper id. If we see a
-            # dict, fall back to the first non-empty value so legacy
-            # configs keep working until the admin re-saves through the
-            # new (flat) admin page.
+            # ``{wrapper_id: [entries]}`` keyed by wrapper id. Prefer THIS
+            # wrapper's chain when present; only otherwise fall back to the
+            # first non-empty value (previous behaviour picked a random
+            # wrapper's chain whenever multiple wrappers had saved chains).
             if isinstance(chains_data, dict):
-                log.warning(
-                    'resolve_failover_candidates: legacy per-wrapper dict '
-                    'format for models.wrapper_provider_chains; falling back '
-                    'to the first non-empty chain.'
-                )
-                chains_data = next(
-                    (v for v in chains_data.values() if v),
-                    [],
-                )
+                this_wrapper = chains_data.get(getattr(model_info, 'id', None))
+                if this_wrapper:
+                    chains_data = this_wrapper
+                else:
+                    log.warning(
+                        'resolve_failover_candidates: legacy per-wrapper dict '
+                        'format for models.wrapper_provider_chains; no entry '
+                        'for wrapper %r; falling back to the first non-empty chain.',
+                        getattr(model_info, 'id', None),
+                    )
+                    chains_data = next(
+                        (v for v in chains_data.values() if v),
+                        [],
+                    )
             if not isinstance(chains_data, list):
                 chains_data = []
+            if not chains_data:
+                # CRITICAL silent-failure guard: a wrapper marked 'global'
+                # with an EMPTY admin chain previously resolved to a single
+                # primary candidate - the wrapper's own custom
+                # failover_providers list is ignored under 'global', so
+                # taking the primary offline surfaced a raw connection
+                # error with NO failover. Degrade to the wrapper's saved
+                # custom chain (if any) instead of losing failover.
+                saved_custom = getattr(model_info.meta, 'failover_providers', None)
+                if saved_custom:
+                    log.warning(
+                        'resolve_failover_candidates: wrapper %r is set to the '
+                        'global failover chain but models.wrapper_provider_chains '
+                        'is EMPTY; falling back to the wrapper saved custom chain '
+                        '(%d entries) so failover still works.',
+                        getattr(model_info, 'id', None),
+                        len(saved_custom),
+                    )
+                    chains_data = saved_custom
             # PersistentConfig deserialises to plain dicts — normalise to the
             # attribute-access shape the loop below expects (carrying
             # max_concurrent through for the capacity tier).
@@ -277,6 +317,18 @@ async def resolve_failover_candidates(
 
     # Stable sort preserves configured order within each health tier.
     candidates.sort(key=health_rank)
+
+    if len(candidates) < 2 and model_info and getattr(model_info.meta, 'failover_source', None):
+        log.warning(
+            'resolve_failover_candidates: wrapper %r (failover_source=%r) resolved '
+            'to %d candidate(s) [%s]. Failover will NOT be possible for this '
+            'request - check the chain configuration and that chain entries '
+            'resolve against current connections (OPENAI_MODELS).',
+            getattr(model_info, 'id', None),
+            getattr(model_info.meta, 'failover_source', None),
+            len(candidates),
+            ', '.join(f'{c.model_name}@{c.url}' for c in candidates) or 'none',
+        )
     return candidates
 
 
