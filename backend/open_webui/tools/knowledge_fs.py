@@ -188,15 +188,9 @@ def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool 
         use_regex = True
 
     if use_regex:
-        normalized = normalize_regex(pattern)
-        try:
-            options = re2.Options()
-            options.case_sensitive = not case_insensitive
-            options.max_mem = 1 << 20  # Bound compiled programs and the engine's matching cache to 1 MiB.
-            options.log_errors = False
-            compiled = re2.compile(normalized, options=options)
-        except re2.error as e:
-            return None, f'Invalid or unsupported regex (RE2 syntax): {e}'
+        compiled, error = _compile_search_regex(pattern, case_insensitive)
+        if error:
+            return None, error
 
         budget = _active_budget.get() or MatchBudget()
 
@@ -427,7 +421,7 @@ async def _get_accessible_kb_ids(
 
     user_id = user.get('id')
     user_role = user.get('role', 'user')
-    user_group_ids = [g.id for g in await Groups.get_groups_by_member_id(user_id)]
+    user_group_ids = [g.id for g in await Groups.get_groups_by_member_id(user_id, include_inherited=True)]
 
     async def _has_access(kb):
         return (
