@@ -157,6 +157,13 @@ from open_webui.utils.tools import (
     get_tools,
     get_updated_tool_function,
 )
+
+# v0.12.2 sync: used by the local connect_mcp_server (kept fork-side on the
+# merge) — upstream's middleware no longer imports these, but ours still needs
+# them.
+from open_webui.utils.tools import build_tool_server_headers
+from open_webui.utils.mcp.client import MCPClient
+from open_webui.utils.misc import is_string_allowed
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
@@ -3131,6 +3138,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     # Upstream v0.11.4: also load skills for builtin-tools callers, not just
     # explicitly-requested skill_ids.
+    # v0.12.2 sync: upstream gates the skills listing behind the model's
+    # builtinTools config — keep that gate alongside the fork's load logic.
+    model_builtin_tools = model.get('info', {}).get('meta', {}).get('builtinTools') or {}
     if skill_ids or use_builtin_tools:
         import aiohttp
         from open_webui.env import AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL, AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER_DATA
@@ -7948,10 +7958,16 @@ async def streaming_chat_response_handler(response, ctx):
             # a terminal [DONE] if the stream fails mid-response instead of
             # silently dropping the connection.
             try:
+                # v0.12.2 sync: fork terminal-summary vars (rag_sources, last_id,
+                # last_model) coexist with upstream's API-outlet streaming state
+                # (message, outlet_task). assistant_message kept for the legacy
+                # fork finalization path below.
                 assistant_message = {}
                 rag_sources = []
                 last_id = None
                 last_model = None
+                message = {}
+                outlet_task = None
                 filter_context = FilterContext()
                 outlet_enabled = ENABLE_API_OUTLET_FILTERS and bool(filter_functions)
                 if ENABLE_API_OUTLET_FILTERS and not outlet_enabled:
@@ -8030,8 +8046,10 @@ async def streaming_chat_response_handler(response, ctx):
                         except Exception:
                             pass
 
-                if has_api_outlet_filters and assistant_message:
-                    ctx['assistant_message'] = assistant_message
+                if outlet_task is not None:
+                    await asyncio.shield(outlet_task)
+                elif outlet_enabled and message:
+                    ctx['assistant_message'] = message
                     await outlet_filter_handler(ctx)
             except Exception as e:
                 log.exception('Chat completion stream failed mid-response: %s', e)

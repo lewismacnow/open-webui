@@ -23,6 +23,10 @@ log = logging.getLogger(__name__)
 _TIKTOKEN_ENC = None
 _TIKTOKEN_AVAILABLE = None  # None = unknown, True/False after first attempt
 
+# v0.12.2 sync: upstream constant — inline base64 data URIs are excluded
+# from file-token estimation (they are not sent to the model as tags).
+BASE64_DATA_URI_RE = re.compile(r'data:[\w/+.;=%-]*;base64,[A-Za-z0-9+/=]*')
+
 DEFAULT_CONTEXT_COMPACTION_PROMPT = """### Task:
 Summarize the conversation history that will be compacted out of the active chat context.
 

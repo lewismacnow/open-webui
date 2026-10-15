@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta
 from threading import Lock
 from time import monotonic
-from typing import Union
+from typing import Optional, Union
 
 import bcrypt
 import jwt

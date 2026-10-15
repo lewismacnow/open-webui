@@ -150,6 +150,7 @@ from open_webui.models.models import Models, normalize_model_tags
 from open_webui.models.groups import Groups, resolve_group_default_models
 from open_webui.models.users import Users
 from open_webui.routers import (
+    apps,
     github_sync_admin,
     metadata_suggestions,
     analytics,
@@ -2595,31 +2596,47 @@ async def chat_completion(
 
                 response = await chat_completion_handler(request, form_data, user)
 
-                await asyncio.shield(emit_cancel_event())
-            except Exception:
-                pass
-            # UI (socket) callers need the CancelledError to propagate so
-            # the surrounding task machinery unwinds correctly. Stateless
-            # API callers (no session_id) have no such machinery — and an
-            # escaping CancelledError is converted by uvicorn into an
-            # "Exception in ASGI application" + HTTP 500 whenever the
-            # transport is still open (e.g. an in-process cancellation or
-            # a mid-handshake client timeout, commonly landing inside
-            # connect_mcp_server's session.initialize() for models with
-            # MCP tool servers attached). Return a clean 499 instead so
-            # API consumers see an honest "cancelled" rather than a 500.
-            if not metadata.get('session_id'):
-                return JSONResponse(
-                    status_code=499,
-                    content={
-                        'error': {
-                            'message': 'Request cancelled before completion',
-                            'type': 'cancelled',
-                            'code': 'request_cancelled',
-                        }
-                    },
-                )
-            raise  # re-raise to ensure proper task cancellation handling
+                if isinstance(response, Response) and response.status_code >= 400:
+                    error_detail = get_response_error_detail(response)
+                    if metadata.get('session_id') and metadata.get('chat_id'):
+                        return None
+                    return response
+
+                if ctx is None:
+                    ctx = await build_chat_response_context(request, form_data, user, model, metadata, tasks, events)
+                else:
+                    ctx.update(form_data=form_data, metadata=metadata, events=events)
+
+                return await process_chat_response(response, ctx)
+            except asyncio.CancelledError:
+                log.info('Chat processing was cancelled')
+                try:
+
+                    async def emit_cancel_event():
+                        event_emitter = await get_event_emitter(metadata)
+                        if event_emitter:
+                            await event_emitter({'type': 'chat:tasks:cancel'})
+
+                    await asyncio.shield(emit_cancel_event())
+                except Exception:
+                    pass
+                # Fork: stateless API callers (no session_id) have no task
+                # machinery to unwind - an escaping CancelledError is
+                # converted by uvicorn into an ASGI 500 whenever the
+                # transport is still open. Return a clean 499 instead so
+                # API consumers see an honest "cancelled" rather than a 500.
+                if not metadata.get('session_id'):
+                    return JSONResponse(
+                        status_code=499,
+                        content={
+                            'error': {
+                                'message': 'Request cancelled before completion',
+                                'type': 'cancelled',
+                                'code': 'request_cancelled',
+                            }
+                        },
+                    )
+                raise  # re-raise to ensure proper task cancellation handling
         except Exception as e:
             error_detail = e.detail if isinstance(e, HTTPException) else str(e)
             log.error('Error processing chat payload: %s', error_detail)

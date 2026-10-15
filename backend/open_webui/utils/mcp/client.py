@@ -143,7 +143,7 @@ class MCPClient:
         self.server_name = server_name
         self.instructions: Optional[str] = None
 
-    async def connect(self, url: str, headers: Optional[dict] = None):
+    async def connect(self, url: str, headers: Optional[dict] = None, auth: Optional[httpx.Auth] = None):
         # The MCP SDK's `async with streamablehttp_client(...)` and
         # `async with anyio.create_task_group()` contexts can fire benign
         # cleanup race errors during __aexit__: 'aclose(): asynchronous

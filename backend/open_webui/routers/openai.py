@@ -43,7 +43,7 @@ from open_webui.utils.anthropic import ANTHROPIC_VERSION, get_anthropic_models, 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import get_headers_and_cookies, include_user_info_headers
 from open_webui.utils.json_codec import JSONCodec
-from open_webui.utils.misc import convert_logit_bias_input_to_json, stream_chunks_handler
+from open_webui.utils.misc import convert_logit_bias_input_to_json, get_provider_function, stream_chunks_handler
 from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils import provider_inflight
 from open_webui.utils.payload import (

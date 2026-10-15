@@ -360,7 +360,8 @@ async def delete_group_by_id(
                 detail='Group still has service API keys; revoke and delete them first',
             )
 
-        result = await Groups.delete_group_by_id(id, db=db)
+        changes = {}
+        result = await Groups.delete_group_by_id(id, db=db, changes=changes)
         if result:
             await publish_event(
                 request,

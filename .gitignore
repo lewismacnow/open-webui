@@ -318,3 +318,5 @@ cypress/screenshots
 
 # OpenCode slim
 .slim/deepwork/
+.slim/deepwork/
+.slim/deepwork/

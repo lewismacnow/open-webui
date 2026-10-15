@@ -47,8 +47,10 @@ from open_webui.utils.plugin import (
     resolve_valves_schema_options,
     set_tool_module_in_cache,
 )
+from open_webui.env import ENABLE_PLUGINS
 from open_webui.utils.tool_generator import generate_tool_code
-from open_webui.utils.tools import get_tool_servers, get_tool_specs
+from open_webui.utils.tools import connect_mcp_server, get_tool_servers
+from open_webui.utils.tools import get_tool_specs as get_local_tool_specs
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession
 
