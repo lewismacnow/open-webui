@@ -22,6 +22,9 @@
 
 	export let selectedItems = [];
 	export let disabled = false;
+	// Fork: per-model default snippet count, shown as the placeholder for
+	// each knowledge base's per-KB override input.
+	export let defaultTopK: number | null = null;
 	let showPicker = false;
 	let picker: KnowledgeSelector;
 	let valueElement: HTMLElement | null = null;
@@ -269,6 +272,23 @@
 											{file.name || file.id}
 										</div>
 									</button>
+
+									<!-- Fork: per-KB snippet count override (rag_top_k) -->
+									{#if (file?.context ?? 'chunk') !== 'full'}
+										<div class="flex shrink-0 items-center gap-1">
+											<span class="whitespace-nowrap text-[10px] text-gray-400 dark:text-gray-500">
+												{$i18n.t('Snippets')}
+											</span>
+											<input
+												{disabled}
+												type="number"
+												class="w-12 rounded border border-gray-200 bg-transparent px-1 py-px text-right text-[10px] outline-hidden dark:border-gray-600"
+												placeholder={defaultTopK ? `${defaultTopK}` : $i18n.t('Global')}
+												min="1"
+												bind:value={file.rag_top_k}
+											/>
+										</div>
+									{/if}
 
 									{#if file.status === 'uploading'}
 										<div class="shrink-0 text-gray-400 dark:text-gray-500">

@@ -245,6 +245,8 @@
 		model_id: string;
 	}> = [];
 	let failoverSource: 'global' | 'custom' = 'custom';
+	// Fork: per-model default document snippet count (rag_top_k).
+	let ragTopK: number | null = null;
 	let voices: { id: string; name?: string }[] = [];
 
 	$: translatedLocales = Object.entries(info?.meta?.i18n ?? {})
@@ -508,6 +510,14 @@
 		// the legacy base_model_id so code paths that only know the old shape
 		// keep working. failover_providers is written regardless of the
 		// source toggle so flipping back to 'custom' keeps the saved list.
+		if (ragTopK !== null && ragTopK > 0) {
+			modelInfo.meta.rag_top_k = ragTopK;
+		} else {
+			if (modelInfo.meta.rag_top_k) {
+				delete modelInfo.meta.rag_top_k;
+			}
+		}
+
 		modelInfo.meta.failover_source = failoverSource;
 		const validProviders = failoverProviders.filter((p) => p.model_id);
 		if (validProviders.length > 0) {
@@ -711,14 +721,18 @@
 					return {
 						id: item.collection_name,
 						name: item.name,
-						legacy: true
+						legacy: true,
+						// Fork: preserve per-KB snippet override across normalization
+						...(item?.rag_top_k ? { rag_top_k: item.rag_top_k } : {})
 					};
 				} else if (item?.collection_names) {
 					return {
 						name: item.name,
 						type: 'collection',
 						collection_names: item.collection_names,
-						legacy: true
+						legacy: true,
+						// Fork: preserve per-KB snippet override across normalization
+						...(item?.rag_top_k ? { rag_top_k: item.rag_top_k } : {})
 					};
 				} else {
 					return item;
@@ -750,7 +764,10 @@
 			// models auto-migrate on first edit. null/undefined
 			// failover_source behaves as 'custom' (back-compat).
 			failoverSource = model?.meta?.failover_source === 'global' ? 'global' : 'custom';
-			if (Array.isArray(model?.meta?.failover_providers) && model.meta.failover_providers.length > 0) {
+			if (
+				Array.isArray(model?.meta?.failover_providers) &&
+				model.meta.failover_providers.length > 0
+			) {
 				failoverProviders = model.meta.failover_providers.map((p: any) => ({
 					model_id: p.model_id ?? p.model_name ?? ''
 				}));
@@ -759,6 +776,7 @@
 			} else {
 				failoverProviders = [];
 			}
+			ragTopK = model?.meta?.rag_top_k ?? null;
 
 			info = structuredClone(model);
 			info.meta.i18n = info.meta.i18n ?? {};
@@ -1704,7 +1722,27 @@
 								<hr class="my-3 border-gray-100/60 dark:border-gray-850/60" />
 
 								<div class="my-3 space-y-0.5">
-									<Knowledge bind:selectedItems={knowledge} disabled={readOnly} />
+									<Knowledge
+										bind:selectedItems={knowledge}
+										disabled={readOnly}
+										defaultTopK={ragTopK}
+									/>
+
+								{#if knowledge.length > 0}
+									<div class="my-2 flex items-center gap-2 px-1">
+										<label class="text-xs text-gray-500 dark:text-gray-400" for="model-rag-top-k">
+											{$i18n.t('Document Snippets Returned')}
+										</label>
+										<input
+											id="model-rag-top-k"
+											type="number"
+											class="w-20 rounded border border-gray-200 bg-transparent px-1.5 py-0.5 text-right text-xs outline-hidden dark:border-gray-700"
+											placeholder={$i18n.t('Global')}
+											bind:value={ragTopK}
+											min="1"
+										/>
+									</div>
+								{/if}
 									<ToolsSelector
 										bind:selectedToolIds={toolIds}
 										tools={$tools ?? []}

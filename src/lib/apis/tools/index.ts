@@ -586,3 +586,48 @@ export const setProductionToolVersion = async (token: string, id: string, versio
 	if (!response.ok) throw await response.json();
 	return response.json();
 };
+
+export const generateTool = async (
+	token: string,
+	config: {
+		model: string;
+		prompt: string;
+		existing_code?: string;
+		existing_name?: string;
+		existing_description?: string;
+	}
+): Promise<{
+	code: string;
+	name: string;
+	description: string;
+	validation_passed: boolean;
+	validation_message: string;
+	attempts: number;
+}> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/tools/generate`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(config)
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err?.detail ?? err?.message ?? 'Request failed';
+			console.error('generateTool error:', err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};

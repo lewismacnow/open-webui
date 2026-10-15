@@ -32,6 +32,8 @@
 	export let hideHandler: Function;
 	export let privacyHandler: Function;
 	export let isDefaultSelected = false;
+	// Fork: per-base-model failover chain editor trigger
+	export let failoverHandler: Function | null = null;
 	export let isDefaultPinned = false;
 	export let defaultSelectedHandler: Function;
 	export let defaultPinnedHandler: Function;
@@ -227,6 +229,31 @@
 
 				<div class="flex items-center">{$i18n.t('Export')}</div>
 			</button>
+			<!-- Fork: per-base-model failover chain editor -->
+			{#if failoverHandler}
+				<button
+					class="select-none flex w-full gap-2 items-center h-[1.6875rem] px-2 text-[13px] font-normal cursor-pointer hover:bg-gray-50/40 dark:hover:bg-gray-800/40 rounded-xl"
+					on:click={() => {
+						failoverHandler();
+					}}
+				>
+					<svg
+						xmlns="http://www.w3.org/2000/svg"
+						fill="none"
+						viewBox="0 0 24 24"
+						stroke-width="1.5"
+						stroke="currentColor"
+						class="size-3.5"
+					>
+						<path
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 0 0-3.7-3.7 48.678 48.678 0 0 0-7.324 0 4.006 4.006 0 0 0-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 0 0 3.7 3.7 48.656 48.656 0 0 0 7.324 0 4.006 4.006 0 0 0 3.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3-3 3"
+						/>
+					</svg>
+					<div class="flex items-center">{$i18n.t('Edit Failover')}</div>
+				</button>
+			{/if}
 		</DropdownMenu>
 	</div>
 </Dropdown>

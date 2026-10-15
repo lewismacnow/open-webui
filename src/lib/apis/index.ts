@@ -1615,12 +1615,19 @@ export type EventWebhookTarget = {
 	id: string;
 };
 
+// Fork: custom headers on event webhooks
+export type EventWebhookHeader = {
+	key: string;
+	value: string;
+};
+
 export type EventWebhook = {
 	id: string;
 	name: string;
 	url: string;
 	enabled: boolean;
 	events: string[];
+	headers?: EventWebhookHeader[];
 	targets: EventWebhookTarget[] | null;
 	created_at?: number;
 	updated_at?: number;

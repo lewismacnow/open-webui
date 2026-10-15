@@ -76,6 +76,108 @@
 	<Grid {className} {strokeWidth} />
 {:else if id === 'documents'}
 	<Document {className} {strokeWidth} />
+{:else if id === 'api-tools'}
+	<svg
+		aria-hidden="true"
+		xmlns="http://www.w3.org/2000/svg"
+		fill="none"
+		viewBox="0 0 24 24"
+		stroke="currentColor"
+		stroke-width={strokeWidth}
+		class={className}
+	>
+		<path
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 1 1-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 0 0 4.486-6.336l-3.276 3.277a3.004 3.004 0 0 1-2.25-2.25l3.276-3.276a4.5 4.5 0 0 0-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437 1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008Z"
+		/>
+	</svg>
+{:else if id === 'failover-queue'}
+	<svg
+		aria-hidden="true"
+		xmlns="http://www.w3.org/2000/svg"
+		fill="none"
+		viewBox="0 0 24 24"
+		stroke="currentColor"
+		stroke-width={strokeWidth}
+		class={className}
+	>
+		<path
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			d="M3.75 6.75h13.5m-13.5 0a1.5 1.5 0 0 1 0-3h13.5a1.5 1.5 0 0 1 0 3m-13.5 0v3h13.5v-3m-13.5 0v-3M6.75 12.75h10.5m-10.5 0a1.5 1.5 0 0 1 0-3h10.5a1.5 1.5 0 0 1 0 3m-10.5 0V15.75h10.5V12.75m-10.5 0v-3m6.75 9.75h-3a1.5 1.5 0 0 1 0-3h3a1.5 1.5 0 0 1 0 3m-3 0V18.75h3V15.75"
+		/>
+	</svg>
+{:else if id === 'wrapper-model-providers'}
+	<svg
+		aria-hidden="true"
+		xmlns="http://www.w3.org/2000/svg"
+		fill="none"
+		viewBox="0 0 24 24"
+		stroke="currentColor"
+		stroke-width={strokeWidth}
+		class={className}
+	>
+		<path
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			d="M6.75 17.25h10.5m-10.5 0a2.25 2.25 0 0 1-2.25-2.25m2.25 2.25a2.25 2.25 0 0 0 2.25 2.25h6a2.25 2.25 0 0 0 2.25-2.25m-13.5-2.25v-.75A2.25 2.25 0 0 1 6.75 12h10.5a2.25 2.25 0 0 1 2.25 2.25v.75m-13.5 0a2.25 2.25 0 0 1-2.25-2.25v-.75A2.25 2.25 0 0 1 6.75 7.5h10.5a2.25 2.25 0 0 1 2.25 2.25v.75m0 3.75a2.25 2.25 0 0 0 2.25-2.25v-.75a2.25 2.25 0 0 0-2.25-2.25m0 0V6.75A2.25 2.25 0 0 0 17.25 4.5h-10.5A2.25 2.25 0 0 0 4.5 6.75v.75m0 0a2.25 2.25 0 0 0-2.25 2.25v.75a2.25 2.25 0 0 0 2.25 2.25m0 0v.75a2.25 2.25 0 0 0 2.25 2.25m10.5-9.75h.008v.008h-.008V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z"
+		/>
+	</svg>
+{:else if id === 'service-keys'}
+	<!-- Lucide-style outline key. -->
+	<svg
+		aria-hidden="true"
+		xmlns="http://www.w3.org/2000/svg"
+		fill="none"
+		viewBox="0 0 24 24"
+		stroke="currentColor"
+		stroke-width={strokeWidth}
+		class={className}
+	>
+		<path
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-9.879 5.063l-5.433 5.433a1.125 1.125 0 0 1-1.591 0l-1.591-1.591a1.125 1.125 0 0 1 0-1.591l5.433-5.433A6 6 0 0 1 18.75 8.25Z"
+		/>
+		<path
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			d="M16.5 7.875a1.125 1.125 0 0 1-1.125 1.125M18.75 9.75a3.375 3.375 0 0 1-3.375 3.375"
+		/>
+	</svg>
+{:else if id === 'tools-config'}
+	<svg
+		aria-hidden="true"
+		xmlns="http://www.w3.org/2000/svg"
+		fill="none"
+		viewBox="0 0 24 24"
+		stroke="currentColor"
+		stroke-width={strokeWidth}
+		class={className}
+	>
+		<path
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.216 1.371l-1.013.978c-.28.267-.407.65-.368 1.03.015.123.022.247.022.372s-.007.249-.022.372c-.039.38.088.763.368 1.03l1.013.978a1.125 1.125 0 0 1 .216 1.371l-1.296 2.247a1.125 1.125 0 0 1-1.37.49l-1.217-.456a1.125 1.125 0 0 0-1.075.124 4.5 4.5 0 0 1-.22.127c-.332.184-.582.496-.645.87l-.213 1.281c-.09.542-.56.94-1.11.94h-2.593c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.063-.374-.313-.686-.645-.87a4.507 4.507 0 0 1-.22-.127 1.125 1.125 0 0 0-1.075-.124l-1.217.456a1.125 1.125 0 0 1-1.37-.49L2.82 16.72a1.125 1.125 0 0 1 .216-1.371l1.013-.978c.28-.267.407-.65.368-1.03A6.743 6.743 0 0 1 4.4 12c0-.125.007-.249.022-.372.039-.38-.088-.763-.368-1.03l-1.013-.978a1.125 1.125 0 0 1-.216-1.371l1.296-2.247a1.125 1.125 0 0 1 1.37-.49l1.217.456c.355.133.75.072 1.075-.124.073-.044.146-.087.22-.127.332-.184.582-.496.645-.87l.213-1.28ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
+		/>
+	</svg>
+{:else if id === 'token-caps'}
+	<svg
+		aria-hidden="true"
+		xmlns="http://www.w3.org/2000/svg"
+		fill="none"
+		viewBox="0 0 24 24"
+		stroke="currentColor"
+		stroke-width={strokeWidth}
+		class={className}
+	>
+		<path
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			d="M12 3v17.25m0 0c-1.472 0-2.882.265-4.185.75M12 20.25c1.472 0 2.882.265 4.185.75M18.75 4.97A48.416 48.416 0 0 0 12 4.5c-2.291 0-4.545.16-6.75.47m13.5 0c1.01.143 2.01.317 3 .52m-3-.52 2.62 10.726c.122.499-.106 1.028-.589 1.202a5.988 5.988 0 0 1-2.031.352 5.988 5.988 0 0 1-2.031-.352c-.483-.174-.711-.703-.59-1.202L18.75 4.971Zm-16.5.52c.99-.203 1.99-.377 3-.52m0 0 2.62 10.726c.122.499-.106 1.028-.589 1.202a5.989 5.989 0 0 1-2.031.352 5.989 5.989 0 0 1-2.031-.352c-.483-.174-.711-.703-.59-1.202L5.25 4.971Z"
+		/>
+	</svg>
 {:else if id === 'web'}
 	<GlobeAlt {className} {strokeWidth} />
 {:else if id === 'code-execution'}

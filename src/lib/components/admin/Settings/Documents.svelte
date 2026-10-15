@@ -21,6 +21,8 @@
 	import { reindexKnowledgeFiles, reindexKnowledgeMetadata } from '$lib/apis/knowledge';
 	import { reindexMemoryVectors } from '$lib/apis/memories';
 	import { deleteAllFiles } from '$lib/apis/files';
+	import { getRagVisionConfig, setRagVisionConfig } from '$lib/apis/configs';
+	import { models } from '$lib/stores';
 
 	import ResetUploadDirConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import ResetVectorDBConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
@@ -78,6 +80,11 @@
 		'shrink-0 text-xs text-gray-500 transition-colors hover:text-gray-900 dark:text-gray-500 dark:hover:text-white';
 	const textareaClass =
 		'w-full rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 py-1.5 text-xs text-gray-700 outline-hidden transition-colors placeholder:text-gray-300 focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:placeholder:text-gray-700 dark:focus:border-blue-500';
+
+	// Optional model id used to describe images for RAG when the chatting
+	// model does not support vision. Empty string means disabled.
+	let visionSupportModel = '';
+	let visionSystemPrompt = '';
 
 	const embeddingModelUpdateHandler = async () => {
 		if (RAG_EMBEDDING_ENGINE === '' && RAG_EMBEDDING_MODEL.split('/').length - 1 > 1) {
@@ -345,6 +352,15 @@
 		config.RAG_TOKENIZER_MODEL = config?.RAG_TOKENIZER_MODEL ?? '';
 
 		RAGConfig = config;
+
+		const ragVisionConfig = await getRagVisionConfig(localStorage.token).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+		if (ragVisionConfig) {
+			visionSupportModel = ragVisionConfig.VISION_SUPPORT_MODEL;
+			visionSystemPrompt = ragVisionConfig.VISION_SYSTEM_PROMPT;
+		}
 	});
 </script>
 
@@ -1355,7 +1371,9 @@
 
 							<AdminSettingField
 								label={$i18n.t('settings.admin.documents.relevanceThreshold.label')}
-								description={$i18n.t('settings.admin.documents.relevanceThreshold.description')}
+								description={$i18n.t(
+									'Soft filter for RAG results. 0 = return everything (default). Higher values drop low-similarity docs from the top-k window. Range: 0.0–1.0.'
+								)}
 							>
 								<input
 									class={inputClass}
@@ -1487,6 +1505,74 @@
 							bind:value={RAGConfig.FILE_MAX_COUNT}
 							autocomplete="off"
 							min="0"
+						/>
+					</AdminSettingField>
+					<AdminSettingField
+						label={$i18n.t('Image RAG Query Generation Prompt')}
+						description={$i18n.t(
+							'Prompt used to generate RAG search queries from images when no text is provided. Leave empty for default.'
+						)}
+					>
+						<Textarea
+							className={textareaClass}
+							placeholder={$i18n.t(
+								'Leave empty to use the default prompt, or enter a custom prompt'
+							)}
+							bind:value={RAGConfig.IMAGE_RAG_QUERY_GENERATION_PROMPT_TEMPLATE}
+						/>
+					</AdminSettingField>
+
+					<AdminSettingField
+						label={$i18n.t('Vision Support Model')}
+						description={$i18n.t(
+							'Used to describe images for RAG when the chatting model does not support vision. Leave disabled to use only vision-capable chatting models.'
+						)}
+					>
+						<select
+							class={inputClass}
+							bind:value={visionSupportModel}
+							on:change={async () => {
+								const res = await setRagVisionConfig(localStorage.token, {
+									VISION_SUPPORT_MODEL: visionSupportModel,
+									VISION_SYSTEM_PROMPT: visionSystemPrompt
+								}).catch((error) => {
+									toast.error(`${error}`);
+									return null;
+								});
+								if (res !== null) {
+									toast.success($i18n.t('Vision Support Model updated successfully'));
+								}
+							}}
+						>
+							<option value="">{$i18n.t('Disabled (vision models only)')}</option>
+							{#each $models as model}
+								<option value={model.id}>
+									{model.name}
+									{model?.connection_type === 'local' ? `(${$i18n.t('Local')})` : ''}
+								</option>
+							{/each}
+						</select>
+					</AdminSettingField>
+
+					<AdminSettingField
+						label={$i18n.t('Vision Support System Prompt')}
+						description={$i18n.t(
+							"Optional system prompt sent to the Vision Support Model when describing images. When set, this replaces the default describe prompt and the chatting model's system prompt, giving you full control over how images are described and OCR'd. Leave empty to use the built-in default."
+						)}
+					>
+						<Textarea
+							bind:value={visionSystemPrompt}
+							on:change={async () => {
+								await setRagVisionConfig(localStorage.token, {
+									VISION_SUPPORT_MODEL: visionSupportModel,
+									VISION_SYSTEM_PROMPT: visionSystemPrompt
+								});
+							}}
+							placeholder={$i18n.t(
+								'Describe images for the non-vision chat model, including visual details and full OCR of any visible text...'
+							)}
+							rows={6}
+							class={textareaClass}
 						/>
 					</AdminSettingField>
 				</div>

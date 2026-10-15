@@ -125,7 +125,11 @@ export const DEFAULT_CAPABILITIES = {
 	status_updates: true,
 	usage: undefined,
 	memory: true,
-	builtin_tools: true
+	builtin_tools: true,
+	// Fork: API Tools — per-model opt-in capabilities (backend defaults
+	// api_tools to True but the model editor default shows opt-out).
+	api_tools: false,
+	api_terminal: false
 };
 
 export const PASTED_TEXT_CHARACTER_LIMIT = 1000;

@@ -57,6 +57,22 @@
 		builtin_tools: {
 			label: $i18n.t('settings.admin.models.capabilities.builtinTools.label'),
 			description: $i18n.t('settings.admin.models.capabilities.builtinTools.description')
+		},
+		// Fork: API Tools — per-model capability switches. Backend gates
+		// stateless API callers on meta.capabilities.api_tools (default
+		// True, admin opt-out list) and api_terminal unlocks the model's
+		// attached terminal for API Tools callers.
+		api_tools: {
+			label: $i18n.t('API Tools'),
+			description: $i18n.t(
+				'Allow stateless API callers to use built-in tools (time, knowledge, web search) with this model.'
+			)
+		},
+		api_terminal: {
+			label: $i18n.t('API Terminal'),
+			description: $i18n.t(
+				'Allow API Tools callers to use the terminal attached to this model.'
+			)
 		}
 	};
 

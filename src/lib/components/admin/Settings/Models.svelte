@@ -99,6 +99,8 @@
 	let showManageModal = false;
 	let showResetModal = false;
 	let showDeleteModal = false;
+	let showFailoverModal = false;
+	let failoverModalModel: { id: string; name?: string } | null = null;
 	let modelToDelete: ModelListItem | null = null;
 	let savingModelOrder = false;
 	let savingModelsSettings = false;
@@ -773,6 +775,7 @@
 />
 
 <ManageModelsModal bind:show={showManageModal} />
+<BaseModelFailoverModal bind:show={showFailoverModal} model={failoverModalModel} />
 
 {#if models !== null}
 	{#if selectedModelId === null}
@@ -1242,6 +1245,10 @@
 										}}
 										exportHandler={() => {
 											exportModelHandler(model);
+										}}
+										failoverHandler={() => {
+											failoverModalModel = { id: model.id, name: model.name };
+											showFailoverModal = true;
 										}}
 										hideHandler={() => {
 											hideModelHandler(model);

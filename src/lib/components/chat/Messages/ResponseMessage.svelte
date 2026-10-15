@@ -1611,9 +1611,23 @@
 									{/if}
 
 									{#if message.timestamp}
+										{@const providerUsed = message.provider
+											? ($models.find((m) => m.id === message.provider.model_name)?.name ??
+												message.provider.model_name)
+											: null}
+										{@const providerPosition = message.provider?.position ?? 0}
 										<Tooltip
 											className="flex self-center"
-											content={formatMessageTimestampFull(message.timestamp * 1000, $i18n.language)}
+											content={`${formatMessageTimestampFull(message.timestamp * 1000, $i18n.language)}${
+												$user?.role === 'admin' && providerUsed
+													? '\n\n' +
+														$i18n.t('Base model: {{m}}', { m: providerUsed }) +
+														(providerPosition > 0
+															? ' ' + $i18n.t('(backup #{{n}})', { n: providerPosition })
+															: '') +
+														(message.provider?.url ? '\n' + message.provider.url : '')
+													: ''
+											}`}
 											placement="bottom"
 										>
 											<time

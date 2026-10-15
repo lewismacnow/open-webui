@@ -54,12 +54,6 @@
 	import AdminIntegrations from '$lib/components/admin/Settings/Integrations.svelte';
 	import AdminApps from '$lib/components/admin/Settings/Apps.svelte';
 	import AdminDocuments from '$lib/components/admin/Settings/Documents.svelte';
-	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
-	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
-	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
-	import AdminAudio from '$lib/components/admin/Settings/Audio.svelte';
-	import AdminImages from '$lib/components/admin/Settings/Images.svelte';
-	import AdminPipelines from '$lib/components/admin/Settings/Pipelines.svelte';
 	import AdminApiTools from '$lib/components/admin/Settings/ApiTools.svelte';
 	import WrapperModelProviders from '$lib/components/admin/Settings/WrapperModelProviders.svelte';
 	import ToolsConfig from '$lib/components/admin/Settings/ToolsConfig.svelte';
@@ -68,6 +62,12 @@
 	import ServiceKeys from '$lib/components/admin/Settings/ServiceKeys.svelte';
 	import GithubSync from '$lib/components/admin/Settings/GithubSync.svelte';
 	import MetadataEnrichment from '$lib/components/admin/Settings/MetadataEnrichment.svelte';
+	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
+	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
+	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
+	import AdminAudio from '$lib/components/admin/Settings/Audio.svelte';
+	import AdminImages from '$lib/components/admin/Settings/Images.svelte';
+	import AdminPipelines from '$lib/components/admin/Settings/Pipelines.svelte';
 	import AdminDatabase from '$lib/components/admin/Settings/Database.svelte';
 
 	const i18n: Writable<any> = getContext('i18n');
@@ -317,6 +317,32 @@
 			searchPrefixes: ['settings.admin.models.', 'settings.personal.general.parameters.']
 		},
 		{
+			id: 'admin:wrapper-model-providers',
+			titleKey: 'admin.wrapper-model-providers',
+			title: 'Wrapper Model Providers',
+			searchPrefixes: ['admin.wrapper-model-providers.'],
+			keywords: ['failover', 'provider', 'chain', 'global', 'concurrency']
+		},
+		{
+			id: 'admin:failover-queue',
+			titleKey: 'admin.failover-queue',
+			title: 'Failover Capacity Queue',
+			searchPrefixes: ['admin.failover-queue.'],
+			keywords: [
+				'failover',
+				'queue',
+				'capacity',
+				'wrapper',
+				'provider',
+				'chain',
+				'load',
+				'429',
+				'throttle',
+				'max concurrent',
+				'backpressure'
+			]
+		},
+		{
 			id: 'admin:subagents',
 			titleKey: 'settings.admin.subagents.title',
 			title: $i18n.t('settings.admin.subagents.title'),
@@ -404,32 +430,6 @@
 				'ip whitelist',
 				'cidr',
 				'revoke'
-			]
-		},
-		{
-			id: 'admin:wrapper-model-providers',
-			titleKey: 'admin.wrapper-model-providers',
-			title: 'Wrapper Model Providers',
-			searchPrefixes: ['admin.wrapper-model-providers.'],
-			keywords: ['failover', 'provider', 'chain', 'global', 'concurrency']
-		},
-		{
-			id: 'admin:failover-queue',
-			titleKey: 'admin.failover-queue',
-			title: 'Failover Capacity Queue',
-			searchPrefixes: ['admin.failover-queue.'],
-			keywords: [
-				'failover',
-				'queue',
-				'capacity',
-				'wrapper',
-				'provider',
-				'chain',
-				'load',
-				'429',
-				'throttle',
-				'max concurrent',
-				'backpressure'
 			]
 		},
 		{
