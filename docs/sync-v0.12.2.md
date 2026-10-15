@@ -302,3 +302,32 @@ commit `b9d62997e`):
 - The fork's local `connect_mcp_server` in middleware.py shadows the
   utils.tools import of the same name (the import is unused-but-harmless;
   the local definition has the signature the fork's call sites expect).
+
+
+---
+
+## 10. Full frontend port (2026-10-15, commit `1f701dc7c`)
+
+The frontend deferral in section 5 has been RESOLVED. The entire upstream
+v0.12.2 Svelte 5 frontend was taken wholesale and every fork
+customisation was ported onto it:
+
+- **Taken from upstream:** full `src/` tree (Svelte 5, new
+  Select/DropdownOptions, FileViewer/EntryRow/Browser knowledge
+  architecture, settings search, apps/MFA/history UIs),
+  `package.json` + lockfile (pyodide etc.; node engines upper bound
+  relaxed + `.npmrc engine-strict=false` so node-24 dev machines build).
+- **Fork features ported:** 8 admin settings tabs; ModelEditor failover
+  chain picker (state, init, guard, save in the v0.12.2 reactive
+  modelInfo block, UI); Models list Global-chain chip + subtitle;
+  FileViewer metadata Details panel; EntryRow embedding-status chip
+  (Queued/Embedding/Embed failed) fed by knowledge_file.status;
+  MessageInput Vision-RAG image gate; 25 fork API exports in
+  apis/configs (+ searchGroups, getKnowledgeFiles); all fork-only
+  admin components and API modules restored.
+
+The 63 "orphaned" upstream files noted in section 9 are no longer
+orphaned — they are part of the now-active upstream frontend.
+
+**Status:** build green on upstream v0.12.2 deps; tag `v0.12.2` moved to
+the ported commit `1f701dc7c`.
