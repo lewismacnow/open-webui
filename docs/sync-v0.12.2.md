@@ -248,3 +248,57 @@ add unrelated tables and indexes), so the merge order is safe.
   `https://github.com/lewismacnow/open-webui.git`
 - **CHANGELOG.md:** new `## [0.12.2-fork] - 2026-10-15` entry added
   summarising the sync.
+
+
+---
+
+## 9. Post-sync double-check (2026-10-15)
+
+A verification pass over the landed sync found 9 integration seams where
+`-X ours` kept fork conflict regions but upstream hunks merged around them
+still referenced symbols those regions dropped (each repaired best-of-both,
+commit `b9d62997e`):
+
+1. `main.py` — `apps` router used but not imported (NameError at boot).
+2. `main.py` — `process_chat` cancel/error handling structurally broken
+   (inherited from the fork base): a stray undefined
+   `emit_cancel_event()` shield-call ran on every successful chat and the
+   error path returned 499/bare-raised. Reconstructed from upstream's
+   clean structure with the fork's 499-for-stateless-API addition.
+3. `routers/groups.py` — `changes` dict undefined in delete-group flow.
+4. `routers/openai.py` — `get_provider_function` missing from imports.
+5. `routers/tools.py` — `connect_mcp_server` / `get_local_tool_specs` /
+   `ENABLE_PLUGINS` imports missing.
+6. `tools/knowledge_fs.py` — `_compile_search_regex` undefined,
+   `normalized` unassigned; merged `build_matcher` now combines the RE2
+   engine with the fork's literal prefilter.
+7. `utils/auth.py` — `Optional` dropped from the typing import.
+8. `utils/context_compaction.py` — `BASE64_DATA_URI_RE` definition dropped.
+9. `utils/middleware.py` — `MCPClient`/`build_tool_server_headers`/
+   `is_string_allowed` imports missing; `model_builtin_tools` undefined;
+   streaming wrapper mixed fork terminal-summary vars with upstream
+   outlet state.
+
+### Verification evidence
+- pyflakes undefined-name sweep over all 141 merged backend files: clean.
+- py_compile over the entire backend tree: passes.
+- Import smoke: all fork modules + all new upstream modules (apps, mfa,
+  history tables, audio realtime, redis room channels) import cleanly
+  (`pyotp` is in requirements; `pyaudioop` is a pydub-on-Python-3.14
+  test-env artifact, prod Docker runs 3.11).
+- Upstream router registration diff: fork registers everything upstream
+  does, plus `github_sync_admin` and `service_keys`.
+- Socket namespace registrations match upstream.
+- Env constants referenced by new modules all present.
+- Alembic: single head `kb05mergeheads`.
+- Frontend build: green.
+- No conflict markers anywhere in backend/ or src/.
+- Tag `v0.12.2` moved to the seam-repaired commit `b9d62997e`.
+
+### Known deferred / non-issues
+- 63 orphaned upstream frontend files (added by the merge, unused by the
+  restored fork UI) are inert — not compiled, not imported — and remain
+  available for the follow-up Svelte 5 frontend port.
+- The fork's local `connect_mcp_server` in middleware.py shadows the
+  utils.tools import of the same name (the import is unused-but-harmless;
+  the local definition has the signature the fork's call sites expect).
