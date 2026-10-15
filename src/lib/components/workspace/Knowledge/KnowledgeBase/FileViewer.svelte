@@ -32,6 +32,8 @@
 	let previewError = '';
 	let indexedError = '';
 	let sourceToggle = false;
+	// Fork: metadata-enrichment Details panel toggle
+	let showFileDetails = false;
 	let showRaw = false;
 	let previewName = fileName(file);
 	let request = 0;
@@ -240,6 +242,13 @@
 			aria-pressed={state.mode === 'indexed'}
 			on:click={() => (state.mode = 'indexed')}>{$i18n.t('Indexed text')}</button
 		>
+		<button
+			type="button"
+			class="shrink-0 px-1 py-0.5 {showFileDetails ? '' : 'text-gray-400'}"
+			aria-pressed={showFileDetails}
+			on:click={() => (showFileDetails = !showFileDetails)}
+			>{showFileDetails ? $i18n.t('Hide details') : $i18n.t('Details')}</button
+		>
 		{#if writeAccess}
 			{#if state.editing}
 				<button
@@ -287,6 +296,44 @@
 			</div></Dropdown
 		>
 	</div>
+	{#if showFileDetails}
+		<div
+			class="shrink-0 space-y-1.5 border-b border-gray-100 px-3 py-2 text-xs max-h-56 overflow-y-auto dark:border-gray-850"
+		>
+			<div class="grid grid-cols-2 gap-x-4 gap-y-1">
+				{#each [['id', file.id], ['embed_mode', file.meta?.embed_mode ?? 'content_only (default)'], ['doc_type', file.meta?.doc_type], ['category', file.meta?.category], ['audience', file.meta?.audience], ['content_type', file.meta?.content_type], ['size', file.meta?.size]] as [label, value] (label)}
+					{#if value}
+						<div><span class="text-gray-400">{label}:</span> {value}</div>
+					{/if}
+				{/each}
+			</div>
+			{#if file.meta?.description}
+				<div><span class="text-gray-400">description:</span> {file.meta.description}</div>
+			{/if}
+			{#if file.meta?.summary}
+				<div class="text-gray-500 dark:text-gray-400 line-clamp-3">
+					<span class="text-gray-400">summary:</span> {file.meta.summary}
+				</div>
+			{/if}
+			{#if file.meta?.tags?.length}
+				<div class="flex flex-wrap gap-1">
+					{#each file.meta.tags as tag (tag)}
+						<span class="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] dark:bg-gray-850">{tag}</span>
+					{/each}
+				</div>
+			{/if}
+			{#if file.meta?.keywords?.length}
+				<div class="flex flex-wrap gap-1">
+					{#each file.meta.keywords as kw (kw)}
+						<span
+							class="rounded bg-blue-50 px-2 py-0.5 font-mono text-[10px] text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">{kw}</span
+						>
+					{/each}
+				</div>
+			{/if}
+		</div>
+	{/if}
+
 	{#if state.mode === 'preview'}
 		{#if previewError}<div class="p-4 text-xs text-gray-500">
 				<p role="alert">{previewError}</p>

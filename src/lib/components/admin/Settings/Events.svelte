@@ -49,8 +49,7 @@
 		name: '',
 		url: '',
 		enabled: true,
-		events: ['*'] as string[],
-		headers: [] as Array<{ key: string; value: string }>
+		events: ['*'] as string[]
 	};
 
 	const inputClass =
@@ -104,8 +103,7 @@
 			name: '',
 			url: '',
 			enabled: true,
-			events: ['*'],
-			headers: []
+			events: ['*']
 		};
 		pattern = '';
 		resetTargets();
@@ -124,8 +122,7 @@
 			name: webhook.name,
 			url: webhook.url,
 			enabled: webhook.enabled,
-			events: webhook.events?.length ? [...webhook.events] : ['*'],
-			headers: webhook.headers?.length ? [...webhook.headers] : []
+			events: webhook.events?.length ? [...webhook.events] : ['*']
 		};
 		pattern = '';
 
@@ -339,17 +336,11 @@
 	};
 
 	const saveWebhook = async () => {
-		// Filter out empty header key/value pairs before saving
-		const cleanHeaders = (form.headers ?? [])
-			.filter((h) => h.key.trim() !== '' && h.value !== '')
-			.map((h) => ({ key: h.key.trim(), value: h.value }));
-
 		const payload = {
 			name: form.name || (form.id === 'default' ? 'Default webhook' : 'Webhook'),
 			url: form.url,
 			enabled: form.enabled,
 			events: form.events.length ? form.events : ['*'],
-			headers: cleanHeaders,
 			targets: selectedTargets()
 		};
 
@@ -457,55 +448,6 @@
 							</Tooltip>
 						</div>
 					</div>
-				</div>
-
-				<div class="mt-3">
-					<div class="flex items-center justify-between">
-						<label class={`text-xs text-gray-500`}
-							>{$i18n.t('Headers (optional)')}
-							<span class="ml-1 text-gray-400 text-[0.625rem]"
-								>{$i18n.t('Sent as HTTP headers on the POST request')}</span
-							>
-						</label>
-						<button
-							type="button"
-							class="text-xs text-gray-700 dark:text-gray-300 hover:underline"
-							on:click={() => (form.headers = [...form.headers, { key: '', value: '' }])}
-						>
-							{$i18n.t('Add header')}
-						</button>
-					</div>
-
-					{#if form.headers.length > 0}
-						<div class="mt-2 flex flex-col gap-1.5">
-							{#each form.headers as header, i}
-								<div class="flex items-center gap-1.5">
-									<input
-										class={`flex-1 text-xs font-mono ${inputClass}`}
-										type="text"
-										placeholder={$i18n.t('Header name')}
-										autocomplete="off"
-										bind:value={header.key}
-									/>
-									<input
-										class={`flex-1 text-xs font-mono ${inputClass}`}
-										type="text"
-										placeholder={$i18n.t('Value')}
-										autocomplete="off"
-										bind:value={header.value}
-									/>
-									<button
-										type="button"
-										aria-label={$i18n.t('Remove header')}
-										class="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500"
-										on:click={() => (form.headers = form.headers.filter((_, j) => j !== i))}
-									>
-										<XMark className="size-3.5" strokeWidth="2" />
-									</button>
-								</div>
-							{/each}
-						</div>
-					{/if}
 				</div>
 
 				<div class="mt-3">
@@ -711,193 +653,6 @@
 					{/if}
 				</div>
 
-				<div class="mt-3 border-t border-gray-100 dark:border-gray-850 pt-3">
-					<details class="text-xs">
-						<summary class="cursor-pointer text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 select-none">
-							{$i18n.t('Payload schema')}
-							<span class="ml-1 text-gray-400 text-[0.625rem]">
-								{$i18n.t('JSON body sent to the webhook URL')}
-							</span>
-						</summary>
-						<div class="mt-2 max-h-72 overflow-auto rounded-lg border border-gray-100 dark:border-gray-850 bg-gray-50/40 dark:bg-white/[0.03] p-3">
-							<p class="text-gray-500 dark:text-gray-400 mb-2">
-								{$i18n.t(
-									'Default payload (any URL other than Slack / Discord / Teams). ' +
-									'Service-specific slugs send a simplified payload instead — see notes below.'
-								)}
-							</p>
-							<pre class="text-[0.6875rem] font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300">{`{
-  "schema": "open-webui.events.v1",
-  "id": "evt_<uuid>",
-  "event": "config.updated",
-  "resource": "config",
-  "operation": "updated",
-  "created_at": 1734567890,
-  "instance_id": "owui_<uuid>",
-  "version": "0.11.0",
-  "source": "open-webui:matomo prod",
-  "actor": {
-    "id": "user_<uuid>",
-    "name": "Jane Doe",
-    "email": "jane@example.com",
-    "role": "user"
-  },
-  "subject": {
-    "id": "user_<uuid>",
-    "name": "Jane Doe",
-    "email": "jane@example.com",
-    "role": "user"
-  },
-  "data": {
-    "<event-specific>": "..."
-  },
-  "message": "Config updated"
-}`}</pre>
-
-							<details class="mt-3 text-gray-500 dark:text-gray-400">
-								<summary class="cursor-pointer text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 select-none">
-									{$i18n.t('Field reference')}
-								</summary>
-								<table class="mt-2 w-full text-[0.6875rem]">
-									<thead class="text-left text-gray-500 dark:text-gray-400">
-										<tr>
-											<th class="font-medium py-0.5 pr-2">{$i18n.t('Field')}</th>
-											<th class="font-medium py-0.5 pr-2">{$i18n.t('Type')}</th>
-											<th class="font-medium py-0.5">{$i18n.t('Notes')}</th>
-										</tr>
-									</thead>
-									<tbody>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">schema</td>
-											<td class="py-0.5 pr-2">string</td>
-											<td class="py-0.5">{$i18n.t('Schema version (e.g. open-webui.events.v1).')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">id</td>
-											<td class="py-0.5 pr-2">string</td>
-											<td class="py-0.5">{$i18n.t('Unique event ID (UUID).')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">event</td>
-											<td class="py-0.5 pr-2">string</td>
-											<td class="py-0.5">{$i18n.t('Event name (e.g. config.updated, chat.completed).')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">resource</td>
-											<td class="py-0.5 pr-2">string</td>
-											<td class="py-0.5">{$i18n.t('Resource type (e.g. config, chat, user).')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">operation</td>
-											<td class="py-0.5 pr-2">string</td>
-											<td class="py-0.5">{$i18n.t('Operation performed (e.g. created, updated, deleted).')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">created_at</td>
-											<td class="py-0.5 pr-2">integer</td>
-											<td class="py-0.5">{$i18n.t('Unix timestamp (seconds).')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">instance_id</td>
-											<td class="py-0.5 pr-2">string / null</td>
-											<td class="py-0.5">{$i18n.t('Unique instance ID (null if not configured).')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">version</td>
-											<td class="py-0.5 pr-2">string</td>
-											<td class="py-0.5">{$i18n.t('Open WebUI version (e.g. 0.11.0).')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">source</td>
-											<td class="py-0.5 pr-2">string</td>
-											<td class="py-0.5">{$i18n.t('Source identifier (e.g. open-webui).')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">actor</td>
-											<td class="py-0.5 pr-2">object / null</td>
-											<td class="py-0.5">{$i18n.t('User who triggered the event.')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">subject</td>
-											<td class="py-0.5 pr-2">object / null</td>
-											<td class="py-0.5">{$i18n.t('Resource subject (the entity the event is about).')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">data</td>
-											<td class="py-0.5 pr-2">object</td>
-											<td class="py-0.5">{$i18n.t('Event-specific payload.')}</td>
-										</tr>
-										<tr>
-											<td class="font-mono py-0.5 pr-2">message</td>
-											<td class="py-0.5 pr-2">string / null</td>
-											<td class="py-0.5">{$i18n.t('Human-readable event message.')}</td>
-										</tr>
-									</tbody>
-								</table>
-							</details>
-
-							<details class="mt-3 text-gray-500 dark:text-gray-400">
-								<summary class="cursor-pointer text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 select-none">
-									{$i18n.t('Service-specific payloads')}
-								</summary>
-								<div class="mt-2 space-y-2 text-[0.6875rem]">
-									<div>
-										<p class="font-medium text-gray-700 dark:text-gray-300">
-											{$i18n.t('Slack')}
-											<span class="font-mono text-gray-500">https://hooks.slack.com/...</span>
-										</p>
-										<pre class="font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300 mt-1">{`{
-  "text": "<event name>\\n<description>\\nEvent: <event name>"
-}`}</pre>
-									</div>
-									<div>
-										<p class="font-medium text-gray-700 dark:text-gray-300">
-											{$i18n.t('Discord')}
-											<span class="font-mono text-gray-500">https://discord.com/api/webhooks/...</span>
-										</p>
-										<pre class="font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300 mt-1">{`{
-  "content": "<event name>\\n<description>\\nEvent: <event name>"
-}`}</pre>
-									</div>
-									<div>
-										<p class="font-medium text-gray-700 dark:text-gray-300">
-											{$i18n.t('Microsoft Teams')}
-											<span class="font-mono text-gray-500">webhook.office.com/...</span>
-										</p>
-										<pre class="font-mono whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300 mt-1">{`{
-  "@type": "MessageCard",
-  "@context": "http://schema.org/extensions",
-  "themeColor": "0076D7",
-  "summary": "<event name>",
-  "sections": [
-    {
-      "activityTitle": "<event name>",
-      "activitySubtitle": "<webhook name> (0.11.0) - <operation>",
-      "activityImage": "<favicon url>",
-      "text": "<description>",
-      "facts": [
-        { "name": "event", "value": "<event name>" },
-        { "name": "id", "value": "<user id>" },
-        ...
-      ],
-      "markdown": true
-    }
-  ]
-}`}</pre>
-									</div>
-								</div>
-							</details>
-
-							<div class="mt-3 text-gray-500 dark:text-gray-400 text-[0.6875rem]">
-								{$i18n.t('HTTP request')}:
-							</div>
-							<pre class="font-mono text-[0.6875rem] text-gray-700 dark:text-gray-300 mt-1">{`POST /events
-Content-Type: application/json
-<configuration headers, if any>`}</pre>
-						</div>
-					</details>
-				</div>
-
 				<div class="flex justify-between items-center pt-4 text-sm font-normal">
 					<div>
 						{#if editing}
@@ -915,7 +670,7 @@ Content-Type: application/json
 
 					<button
 						type="submit"
-						class="px-3.5 py-1.5 text-sm font-normal bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full flex flex-row space-x-1 items-center"
+						class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
 					>
 						{$i18n.t('Save')}
 					</button>

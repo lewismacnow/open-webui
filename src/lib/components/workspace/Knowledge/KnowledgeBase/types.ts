@@ -16,6 +16,9 @@ export type KnowledgeFile = {
 		[key: string]: unknown;
 	};
 	data?: { status?: string; error?: string };
+	// Fork: durable embedding pipeline state from knowledge_file.status
+	embedding_status?: string | null;
+	embedding_error?: string | null;
 	user?: { name?: string; email?: string };
 };
 export type KnowledgeDirectory = {

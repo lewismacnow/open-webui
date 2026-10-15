@@ -2,7 +2,6 @@
 	import { resolveLocalizedFunction } from '$lib/utils/localizedContent';
 	import { functions as localizedFunctions } from '$lib/stores';
 	import { toast } from 'svelte-sonner';
-	import dayjs from 'dayjs';
 
 	import { createEventDispatcher, onDestroy } from 'svelte';
 	import { onMount, tick, getContext } from 'svelte';
@@ -34,7 +33,6 @@
 		getMessageContentParts,
 		sanitizeResponseContent,
 		createMessagesList,
-		formatDate,
 		formatMessageTimestamp,
 		formatMessageTimestampFull,
 		removeDetails,
@@ -71,6 +69,7 @@
 	import { getOutputText, replaceOutputMessageText, type OutputItem } from './structuredOutput';
 
 	interface MessageType {
+		user_id?: string;
 		id: string;
 		model: string;
 		content: string;
@@ -174,6 +173,7 @@
 
 	export let isLastMessage = true;
 	export let readOnly = false;
+	export let shareMode: 'continue' | null = null;
 	export let allowDelete = true;
 	export let compactPreview = false;
 	export let editCodeBlock = true;
@@ -289,9 +289,14 @@
 		} else {
 			$audioQueue.setId(`${message.id}`);
 			$audioQueue.setPlaybackRate($settings.audio?.tts?.playbackRate ?? 1);
-			$audioQueue.onStopped = () => {
+			$audioQueue.onStopped = ({ event }) => {
 				speaking = false;
 				speakingIdx = undefined;
+
+				if (event === 'error') {
+					speakAbort?.abort();
+					toast.error($i18n.t('Audio playback failed'));
+				}
 			};
 
 			loadingSpeech = true;
@@ -564,13 +569,16 @@
 				console.log(tags);
 
 				if (tags) {
-					updatedMessage.annotation.tags = tags;
-					feedbackItem.data.tags = tags;
+					const taggedMessage = {
+						...message,
+						annotation: { ...(message?.annotation ?? {}), tags: tags }
+					};
+					feedbackItem.data = { ...feedbackItem.data, ...taggedMessage.annotation };
 
-					saveMessage(message.id, updatedMessage);
+					saveMessage(message.id, taggedMessage);
 					await updateFeedbackById(
 						localStorage.token,
-						updatedMessage.feedbackId,
+						taggedMessage.feedbackId,
 						feedbackItem
 					).catch((error) => {
 						toast.error(`${error}`);
@@ -677,7 +685,7 @@
 	>
 		<div class={`shrink-0 ltr:mr-2 rtl:ml-2 hidden @lg:flex mt-0.5 `}>
 			<ProfileImage
-				src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
+				src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id ?? message.model}&lang=${$i18n.language}`}
 				className={'size-7 assistant-message-profile-image'}
 			/>
 		</div>
@@ -690,40 +698,6 @@
 							{localizedModelName}
 						</span>
 					</Tooltip>
-
-					{#if message.timestamp}
-						{@const providerUsed = message.provider
-							? $models.find((m) => m.id === message.provider.model_name)?.name ??
-								message.provider.model_name
-							: null}
-						{@const providerPosition = message.provider?.position ?? 0}
-						<div
-							class="self-center text-xs font-medium first-letter:capitalize ml-0.5 translate-y-[1px] {($settings?.highContrastMode ??
-							false)
-								? 'dark:text-gray-100 text-gray-900'
-								: 'invisible group-hover:visible transition text-gray-400'}"
-						>
-							<Tooltip
-								content={`${dayjs(message.timestamp * 1000).format('LLLL')}${
-									$user?.role === 'admin' && providerUsed
-										? '\n\n' +
-											$i18n.t('Base model: {{m}}', { m: providerUsed }) +
-											(providerPosition > 0
-												? ' ' + $i18n.t('(backup #{{n}})', { n: providerPosition })
-												: '') +
-											(message.provider?.url ? '\n' + message.provider.url : '')
-										: ''
-								}`}
-							>
-								<span class="line-clamp-1"
-									>{$i18n.t(formatDate(message.timestamp * 1000), {
-										LOCALIZED_TIME: dayjs(message.timestamp * 1000).format('LT'),
-										LOCALIZED_DATE: dayjs(message.timestamp * 1000).format('L')
-									})}</span
-								>
-							</Tooltip>
-						</div>
-					{/if}
 				</Name>
 			{/if}
 
@@ -828,7 +802,7 @@
 									<div>
 										<button
 											id="save-new-message-button"
-											class="px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 border border-gray-100 dark:border-gray-700 text-gray-700 dark:text-gray-200 transition rounded-3xl"
+											class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-100 px-2.5 text-xs font-normal text-gray-800 transition hover:bg-gray-100/70 disabled:opacity-60 dark:bg-gray-850 dark:text-white dark:hover:bg-gray-850/60"
 											on:click={() => {
 												saveAsCopyHandler();
 											}}
@@ -840,7 +814,7 @@
 									<div class="flex space-x-1.5">
 										<button
 											id="close-edit-message-button"
-											class="px-2.5 py-1 bg-white dark:bg-gray-900 hover:bg-gray-100 text-gray-800 dark:text-gray-100 transition rounded-3xl"
+											class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-normal text-gray-600 transition hover:bg-gray-100 hover:text-gray-900 disabled:opacity-60 dark:text-gray-400 dark:hover:bg-gray-850 dark:hover:text-white"
 											on:click={() => {
 												cancelEditMessage();
 											}}
@@ -848,15 +822,17 @@
 											{$i18n.t('Cancel')}
 										</button>
 
-										<button
-											id="confirm-edit-message-button"
-											class="px-2.5 py-1 bg-gray-900 dark:bg-white hover:bg-gray-850 text-gray-100 dark:text-gray-800 transition rounded-3xl"
-											on:click={() => {
-												editMessageConfirmHandler();
-											}}
-										>
-											{$i18n.t('Save')}
-										</button>
+										{#if !message.user_id || message.user_id === $user?.id}
+											<button
+												id="confirm-edit-message-button"
+												class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+												on:click={() => {
+													editMessageConfirmHandler();
+												}}
+											>
+												{$i18n.t('Save')}
+											</button>
+										{/if}
 									</div>
 								</div>
 							</div>
@@ -880,10 +856,11 @@
 									floatingButtons={message?.done &&
 										!readOnly &&
 										($settings?.showFloatingActionButtons ?? true)}
-									save={!readOnly}
+									save={(!readOnly && (!message.user_id || message.user_id === $user?.id)) ||
+										(shareMode === 'continue' && message.user_id === $user?.id)}
 									preview={!readOnly}
 									{compactPreview}
-									{editCodeBlock}
+									editCodeBlock={!readOnly && editCodeBlock}
 									{topPadding}
 									done={message?.done ?? false}
 									allowEmbeds={!readOnly}
@@ -913,15 +890,13 @@
 											if (updatedOutput !== sourceMessage.output) {
 												sourceMessage.output = updatedOutput;
 											} else {
-												sourceMessage.content = sourceMessage.content.replace(
-													raw,
-													raw.replace(oldContent, newContent)
+												sourceMessage.content = sourceMessage.content.replace(raw, () =>
+													raw.replace(oldContent, () => newContent)
 												);
 											}
 										} else {
-											sourceMessage.content = sourceMessage.content.replace(
-												raw,
-												raw.replace(oldContent, newContent)
+											sourceMessage.content = sourceMessage.content.replace(raw, () =>
+												raw.replace(oldContent, () => newContent)
 											);
 										}
 
@@ -933,7 +908,7 @@
 							{#if !message.done && !message.error && (hasResponseContent || !hasVisibleStatus)}
 								<div class="text-[0.9375rem] leading-relaxed">
 									<span
-										class="inline-block w-[0.125rem] h-3.5 bg-gray-400 dark:bg-gray-500 ml-0.5 animate-pulse align-text-bottom"
+										class="inline-block w-[0.125rem] h-3.5 bg-gray-400 dark:bg-gray-500 ml-0.5 animate-cursor-pulse align-text-bottom"
 									></span>
 								</div>
 							{/if}
@@ -963,14 +938,14 @@
 					<div class="mt-0.5 flex justify-start whitespace-nowrap text-gray-600 dark:text-gray-500">
 						<Tooltip
 							className="flex self-center"
-							content={formatMessageTimestampFull(message.timestamp * 1000)}
+							content={formatMessageTimestampFull(message.timestamp * 1000, $i18n.language)}
 							placement="bottom"
 						>
 							<time
 								datetime={new Date(message.timestamp * 1000).toISOString()}
 								class="ml-1 shrink-0 whitespace-nowrap text-[0.6875rem] tabular-nums text-gray-400 dark:text-gray-600 select-none"
 							>
-								{formatMessageTimestamp(message.timestamp * 1000)}
+								{formatMessageTimestamp(message.timestamp * 1000, $i18n.language)}
 							</time>
 						</Tooltip>
 					</div>
@@ -1286,8 +1261,39 @@
 									</Tooltip>
 								{/if}
 
-								{#if !readOnly}
-									{#if !$temporaryChatEnabled && ($config?.features.enable_message_rating ?? true) && ($user?.role === 'admin' || ($user?.permissions?.chat?.rate_response ?? true))}
+								{#if $user && message.done && forkHandler && ($user?.role === 'admin' || ($user?.permissions?.chat?.import ?? true))}
+									<Tooltip content={$i18n.t('Fork chat')} placement="bottom">
+										<button
+											aria-label={$i18n.t('Fork chat')}
+											class="{isLastMessage || ($settings?.highContrastMode ?? false)
+												? 'visible'
+												: 'hover-reveal'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
+											on:click={() => {
+												forkHandler?.(message.id);
+											}}
+										>
+											<svg
+												class="w-4 h-4"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.8"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												aria-hidden="true"
+											>
+												<path d="M4 12H9" />
+												<path d="M9 12C12.5 12 12.5 7 16 7H20" />
+												<path d="M17 4L20 7L17 10" />
+												<path d="M9 12C12.5 12 12.5 17 16 17H20" />
+												<path d="M17 14L20 17L17 20" />
+											</svg>
+										</button>
+									</Tooltip>
+								{/if}
+
+								{#if (!readOnly && (!message.user_id || message.user_id === $user?.id)) || (shareMode === 'continue' && message.user_id === $user?.id)}
+									{#if !readOnly && !$temporaryChatEnabled && ($config?.features.enable_message_rating ?? true) && ($user?.role === 'admin' || ($user?.permissions?.chat?.rate_response ?? true))}
 										<Tooltip content={$i18n.t('Good Response')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Good Response')}
@@ -1299,7 +1305,8 @@
 													? 'bg-gray-100 dark:bg-gray-800'
 													: ''} dark:hover:text-white hover:text-black transition disabled:cursor-progress disabled:hover:bg-transparent"
 												disabled={feedbackLoading}
-												on:click={async () => {
+												on:click={async (e) => {
+													e.stopPropagation();
 													await feedbackHandler(1);
 													window.setTimeout(() => {
 														document
@@ -1337,7 +1344,8 @@
 													? 'bg-gray-100 dark:bg-gray-800'
 													: ''} dark:hover:text-white hover:text-black transition disabled:cursor-progress disabled:hover:bg-transparent"
 												disabled={feedbackLoading}
-												on:click={async () => {
+												on:click={async (e) => {
+													e.stopPropagation();
 													await feedbackHandler(-1);
 													window.setTimeout(() => {
 														document
@@ -1512,39 +1520,9 @@
 												</button>
 											</Tooltip>
 										{/if}
-
-										{#if message?.provider?.url && isLastMessage && $user?.role === 'admin'}
-											<Tooltip content={$i18n.t('Retry with a different provider')} placement="bottom">
-												<button
-													type="button"
-													aria-label={$i18n.t('Retry with a different provider')}
-													class="visible p-1.5 hover:bg-amber-500/10 rounded-lg text-amber-600 dark:text-amber-400 transition"
-													on:click={() => {
-														showRateComment = false;
-														regenerateResponse(message, null, {
-															skipProviderUrls: [message.provider.url]
-														});
-													}}
-												>
-													<svg
-														xmlns="http://www.w3.org/2000/svg"
-														viewBox="0 0 20 20"
-														fill="currentColor"
-														class="w-4 h-4"
-														aria-hidden="true"
-													>
-														<path
-															fill-rule="evenodd"
-															d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.929a.75.75 0 00-1.5 0V5.36l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z"
-															clip-rule="evenodd"
-														/>
-													</svg>
-												</button>
-											</Tooltip>
-										{/if}
 									{/if}
 
-									{#each model?.actions ?? [] as action}
+									{#each (!readOnly && model?.actions) || [] as action}
 										<Tooltip
 											content={resolveLocalizedFunction(
 												action,
@@ -1589,37 +1567,6 @@
 											</button>
 										</Tooltip>
 									{/each}
-
-									{#if message.done && !readOnly && forkHandler && ($user?.role === 'admin' || ($user?.permissions?.chat?.import ?? true))}
-										<Tooltip content={$i18n.t('Fork chat')} placement="bottom">
-											<button
-												aria-label={$i18n.t('Fork chat')}
-												class="{isLastMessage || ($settings?.highContrastMode ?? false)
-													? 'visible'
-													: 'hover-reveal'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
-												on:click={() => {
-													forkHandler?.(message.id);
-												}}
-											>
-												<svg
-													class="w-4 h-4"
-													viewBox="0 0 24 24"
-													fill="none"
-													stroke="currentColor"
-													stroke-width="1.8"
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													aria-hidden="true"
-												>
-													<path d="M4 12H9" />
-													<path d="M9 12C12.5 12 12.5 7 16 7H20" />
-													<path d="M17 4L20 7L17 10" />
-													<path d="M9 12C12.5 12 12.5 17 16 17H20" />
-													<path d="M17 14L20 17L17 20" />
-												</svg>
-											</button>
-										</Tooltip>
-									{/if}
 
 									{#if $user?.role === 'admin' || ($user?.permissions?.chat?.delete_message ?? true)}
 										{#if siblings.length > 1}
@@ -1666,14 +1613,14 @@
 									{#if message.timestamp}
 										<Tooltip
 											className="flex self-center"
-											content={formatMessageTimestampFull(message.timestamp * 1000)}
+											content={formatMessageTimestampFull(message.timestamp * 1000, $i18n.language)}
 											placement="bottom"
 										>
 											<time
 												datetime={new Date(message.timestamp * 1000).toISOString()}
 												class="hover-reveal ml-1 shrink-0 whitespace-nowrap text-[0.6875rem] tabular-nums text-gray-400 dark:text-gray-600 select-none"
 											>
-												{formatMessageTimestamp(message.timestamp * 1000)}
+												{formatMessageTimestamp(message.timestamp * 1000, $i18n.language)}
 											</time>
 										</Tooltip>
 									{/if}

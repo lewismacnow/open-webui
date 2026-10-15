@@ -368,39 +368,7 @@ export const getKnowledgeBases = async (token: string = '', page: number | null 
 	}
 
 	return res;
-}
-
-export type KnowledgeFileListItem = {
-	id: string;
-	filename: string;
-	meta?: Record<string, any>;
-	created_at?: number;
 };
-
-export const getKnowledgeFiles = async (
-	token: string = '',
-	knowledgeId: string,
-	query: string = '',
-	page: number = 1,
-	limit: number = 50
-): Promise<KnowledgeFileListItem[]> => {
-	let error = null;
-	const params = new URLSearchParams({ page: String(page), limit: String(limit) });
-	if (query) params.set('query', query);
-	const res = await fetch(
-		`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/files?${params.toString()}`,
-		{
-			method: 'GET',
-			headers: {
-				Accept: 'application/json',
-				authorization: `Bearer ${token}`
-			}
-		}
-	);
-	if (!res.ok) throw await res.json();
-	return res.json();
-};
-;
 
 export const searchKnowledgeBases = async (
 	token: string = '',
@@ -409,7 +377,8 @@ export const searchKnowledgeBases = async (
 	page: number | null = null,
 	source: string | null = null,
 	orderBy: string | null = null,
-	direction: string | null = null
+	direction: string | null = null,
+	signal?: AbortSignal
 ) => {
 	let error = null;
 
@@ -423,6 +392,7 @@ export const searchKnowledgeBases = async (
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/search?${searchParams.toString()}`, {
 		method: 'GET',
+		signal,
 		headers: {
 			Accept: 'application/json',
 			'Content-Type': 'application/json',
@@ -437,6 +407,7 @@ export const searchKnowledgeBases = async (
 			return json;
 		})
 		.catch((err) => {
+			if (signal?.aborted) return null;
 			error = err.detail;
 			console.error(err);
 			return null;
@@ -633,98 +604,10 @@ export const streamPendingKnowledgeFiles = async (token: string, id: string) => 
 	return res;
 };
 
-export const getKnowledgeEmbeddingProgress = async (token: string, id: string) => {
-	let error = null;
-
-	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${id}/embedding/progress`, {
-		method: 'GET',
-		headers: {
-			Accept: 'application/json',
-			authorization: `Bearer ${token}`
-		}
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.error(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res as {
-		pending: number;
-		processing: number;
-		completed: number;
-		failed: number;
-		total: number;
-	} | null;
-};
-
-export const retryKnowledgeEmbedding = async (token: string, id: string) => {
-	let error = null;
-
-	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${id}/embedding/retry`, {
-		method: 'POST',
-		headers: {
-			Accept: 'application/json',
-			authorization: `Bearer ${token}`
-		}
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.error(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res as { requeued: number } | null;
-};
-
-export const recoverStuckKnowledgeFiles = async (token: string, id: string) => {
-	let error = null;
-
-	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${id}/files/recover`, {
-		method: 'POST',
-		headers: {
-			Accept: 'application/json',
-			authorization: `Bearer ${token}`
-		}
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.error(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res as { recovering: number } | null;
-};
-
 type KnowledgeUpdateForm = {
 	name?: string;
 	description?: string;
 	data?: object;
-	meta?: object;
 	access_grants?: object[];
 };
 
@@ -742,7 +625,6 @@ export const updateKnowledgeById = async (token: string, id: string, form: Knowl
 			name: form?.name ? form.name : undefined,
 			description: form?.description ? form.description : undefined,
 			data: form?.data ? form.data : undefined,
-			meta: form?.meta ? form.meta : undefined,
 			access_grants: form.access_grants
 		})
 	})
@@ -1276,4 +1158,35 @@ export const moveFileInKnowledge = async (
 	}
 
 	return res;
+};
+
+export type KnowledgeFileListItem = {
+	id: string;
+	filename: string;
+	meta?: Record<string, any>;
+	created_at?: number;
+};
+
+export const getKnowledgeFiles = async (
+	token: string = '',
+	knowledgeId: string,
+	query: string = '',
+	page: number = 1,
+	limit: number = 50
+): Promise<KnowledgeFileListItem[]> => {
+	let error = null;
+	const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+	if (query) params.set('query', query);
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/files?${params.toString()}`,
+		{
+			method: 'GET',
+			headers: {
+				Accept: 'application/json',
+				authorization: `Bearer ${token}`
+			}
+		}
+	);
+	if (!res.ok) throw await res.json();
+	return res.json();
 };

@@ -154,8 +154,23 @@
 						>{file.directory_path}</span
 					>{/if}</span
 			>{/if}
-		{#if !directory && !renaming}<span class="shrink-0 text-[0.6875rem] text-gray-400"
-				>{pending
+		{#if !directory && !renaming}<span
+				class="flex shrink-0 items-center gap-1.5 text-[0.6875rem] text-gray-400"
+				>{#if !pending && file.embedding_status && file.embedding_status !== 'completed'}
+					<!-- Fork: durable embedding pipeline state (knowledge_file.status) -->
+					<span
+						class={file.embedding_status === 'failed'
+							? 'rounded-full bg-red-500/10 px-1.5 py-0.5 text-red-500'
+							: 'rounded-full bg-gray-500/10 px-1.5 py-0.5 text-gray-500 dark:text-gray-400'}
+						title={file.embedding_error ?? ''}
+					>
+						{file.embedding_status === 'failed'
+							? $i18n.t('Embed failed')
+							: file.embedding_status === 'processing'
+								? $i18n.t('Embedding')
+								: $i18n.t('Queued')}
+					</span>
+				{/if}{pending
 					? status === 'uploading'
 						? $i18n.t('Uploading')
 						: $i18n.t('Processing')

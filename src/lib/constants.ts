@@ -26,6 +26,7 @@ export const COMMUNITY_ORIGINS = [
 // was built here keep its word across every release.
 export const WEBUI_VERSION = APP_VERSION;
 export const WEBUI_BUILD_HASH = APP_BUILD_HASH;
+export const WEBUI_BUILD_CHANNEL = APP_BUILD_CHANNEL;
 export const REQUIRED_OLLAMA_VERSION = '0.1.16';
 
 export const SUPPORTED_FILE_TYPE = [
@@ -124,9 +125,7 @@ export const DEFAULT_CAPABILITIES = {
 	status_updates: true,
 	usage: undefined,
 	memory: true,
-	builtin_tools: true,
-	api_tools: false,
-	api_terminal: false
+	builtin_tools: true
 };
 
 export const PASTED_TEXT_CHARACTER_LIMIT = 1000;

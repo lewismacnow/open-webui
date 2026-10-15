@@ -717,7 +717,210 @@ export const setModelsConfig = async (token: string, config: object) => {
 	return res;
 };
 
-// --- Model Failover ---
+export const getSubagentsConfig = async (token: string) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/subagents`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	});
+	if (!res.ok) throw await res.json();
+	return res.json();
+};
+
+export const setSubagentsConfig = async (token: string, config: object) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/subagents`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(config)
+	});
+	if (!res.ok) throw await res.json();
+	return res.json();
+};
+
+export const setDefaultPromptSuggestions = async (
+	token: string,
+	promptSuggestions: any[] | null,
+	promptSuggestionsI18n: Record<string, any> = {}
+) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/suggestions`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			suggestions: promptSuggestions,
+			i18n: promptSuggestionsI18n
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getBanners = async (token: string): Promise<Banner[]> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/banners`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const setBanners = async (token: string, banners: Banner[]) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/banners`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			banners: banners
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getApiToolsConfig = async (
+	token: string
+): Promise<{
+	enabled: boolean;
+	allowed_categories: string[];
+	allow_tool_servers: boolean;
+	opt_out_models: string[];
+}> => {
+	let error = null;
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/api-tools`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = `getApiToolsConfig: ${err}`;
+			console.log(error);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return {
+		enabled: res?.enabled ?? false,
+		allowed_categories: res?.allowed_categories ?? ['time', 'knowledge', 'web_search'],
+		allow_tool_servers: res?.allow_tool_servers ?? false,
+		opt_out_models: res?.opt_out_models ?? []
+	};
+};
+
+export const setApiToolsConfig = async (
+	token: string,
+	config: {
+		enabled: boolean;
+		allowed_categories: string[];
+		allow_tool_servers: boolean;
+		opt_out_models?: string[];
+	}
+): Promise<{
+		enabled: boolean;
+		allowed_categories: string[];
+		allow_tool_servers: boolean;
+		opt_out_models: string[];
+	}> => {
+	let error = null;
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/api-tools`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			enabled: config.enabled,
+			allowed_categories: config.allowed_categories,
+			allow_tool_servers: config.allow_tool_servers,
+			opt_out_models: config.opt_out_models ?? []
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = `setApiToolsConfig: ${err}`;
+			console.log(error);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return {
+		enabled: res?.enabled ?? config.enabled,
+		allowed_categories: res?.allowed_categories ?? config.allowed_categories,
+		allow_tool_servers: res?.allow_tool_servers ?? config.allow_tool_servers,
+		opt_out_models: res?.opt_out_models ?? config.opt_out_models ?? []
+	};
+};
 
 export type ModelFailoverEntry = {
 	model_id: string;
@@ -734,6 +937,7 @@ export type ModelFailoverMap = Record<string, ModelFailoverEntry[]>;
  * Admin-only on the backend; returns an empty object when no failover has
  * been configured for any model.
  */
+
 export const getModelFailoverMap = async (token: string): Promise<ModelFailoverMap> => {
 	let error = null;
 
@@ -802,6 +1006,7 @@ export type WrapperChainEntry = {
 
 // The chain is global — one list applied to every wrapper model with
 // failover_source='global'. Not keyed by wrapper id.
+
 export type WrapperProviderChains = WrapperChainEntry[];
 
 /**
@@ -810,6 +1015,7 @@ export type WrapperProviderChains = WrapperChainEntry[];
  * Admin-only on the backend; returns an empty array when no chain has
  * been configured.
  */
+
 export const getWrapperProviderChains = async (token: string): Promise<WrapperProviderChains> => {
 	let error = null;
 
@@ -869,17 +1075,6 @@ export const setWrapperProviderChains = async (
 };
 
 // --- Tools Config ---
-
-export type ToolsConfig = {
-	match_budget_seconds: number;
-	max_regex_quantifier_count: number;
-	max_regex_quantifier_expansion: number;
-	kb_exec_max_output_chars: number;
-	kb_exec_max_grep_files: number;
-	knowledge_grep_max_matches: number;
-	view_file_max_chars: number;
-	view_file_default_max_chars: number;
-};
 
 export const getToolsConfig = async (token: string): Promise<ToolsConfig> => {
 	let error = null;
@@ -979,6 +1174,7 @@ export type FailoverQueueConfig = {
  * Admin-only on the backend; returns the documented defaults when no
  * persisted config exists yet.
  */
+
 export const getFailoverQueueConfig = async (token: string): Promise<FailoverQueueConfig> => {
 	let error = null;
 
@@ -1254,6 +1450,7 @@ export const getEndpointTokenUsage = async (
  * Empty string means "not set" (only vision-capable chatting models get
  * image RAG). Admin-only on the backend.
  */
+
 export const getRagVisionConfig = async (
 	token: string
 ): Promise<{
@@ -1325,210 +1522,3 @@ export const setRagVisionConfig = async (
 };
 
 // --- API Tools ---
-
-export const getApiToolsConfig = async (
-	token: string
-): Promise<{
-	enabled: boolean;
-	allowed_categories: string[];
-	allow_tool_servers: boolean;
-	opt_out_models: string[];
-}> => {
-	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/api-tools`, {
-		method: 'GET',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		}
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			error = `getApiToolsConfig: ${err}`;
-			console.log(error);
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return {
-		enabled: res?.enabled ?? false,
-		allowed_categories: res?.allowed_categories ?? ['time', 'knowledge', 'web_search'],
-		allow_tool_servers: res?.allow_tool_servers ?? false,
-		opt_out_models: res?.opt_out_models ?? []
-	};
-};
-
-export const setApiToolsConfig = async (
-	token: string,
-	config: {
-		enabled: boolean;
-		allowed_categories: string[];
-		allow_tool_servers: boolean;
-		opt_out_models?: string[];
-	}
-): Promise<{
-		enabled: boolean;
-		allowed_categories: string[];
-		allow_tool_servers: boolean;
-		opt_out_models: string[];
-	}> => {
-	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/api-tools`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			enabled: config.enabled,
-			allowed_categories: config.allowed_categories,
-			allow_tool_servers: config.allow_tool_servers,
-			opt_out_models: config.opt_out_models ?? []
-		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			error = `setApiToolsConfig: ${err}`;
-			console.log(error);
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return {
-		enabled: res?.enabled ?? config.enabled,
-		allowed_categories: res?.allowed_categories ?? config.allowed_categories,
-		allow_tool_servers: res?.allow_tool_servers ?? config.allow_tool_servers,
-		opt_out_models: res?.opt_out_models ?? config.opt_out_models ?? []
-	};
-};
-
-// --- Subagents ---
-
-export const getSubagentsConfig = async (token: string) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/subagents`, {
-		method: 'GET',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		}
-	});
-	if (!res.ok) throw await res.json();
-	return res.json();
-};
-
-export const setSubagentsConfig = async (token: string, config: object) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/subagents`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify(config)
-	});
-	if (!res.ok) throw await res.json();
-	return res.json();
-};
-
-export const setDefaultPromptSuggestions = async (
-	token: string,
-	promptSuggestions: any[] | null,
-	promptSuggestionsI18n: Record<string, any> = {}
-) => {
-	let error = null;
-
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/suggestions`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			suggestions: promptSuggestions,
-			i18n: promptSuggestionsI18n
-		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.error(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res;
-};
-
-export const getBanners = async (token: string): Promise<Banner[]> => {
-	let error = null;
-
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/banners`, {
-		method: 'GET',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		}
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.error(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res;
-};
-
-export const setBanners = async (token: string, banners: Banner[]) => {
-	let error = null;
-
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/banners`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			banners: banners
-		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.error(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res;
-};

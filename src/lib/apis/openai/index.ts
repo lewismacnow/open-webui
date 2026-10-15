@@ -1,15 +1,21 @@
 import { OPENAI_API_BASE_URL, WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 
 export const getErrorMessage = (err: any, fallback = 'Server connection failed') => {
-	const detail = err?.detail;
-	if (typeof detail === 'string') return detail;
-
+	if (Array.isArray(err)) return fallback;
 	return (
-		detail?.error?.message ??
-		detail?.message ??
-		err?.error?.message ??
-		err?.message ??
-		(typeof err === 'string' ? err : fallback)
+		[
+			err?.detail?.error?.message,
+			err?.detail?.message,
+			err?.detail?.content,
+			err?.detail?.error,
+			err?.detail,
+			err?.error?.message,
+			err?.error?.content,
+			err?.error,
+			err?.message,
+			err?.content,
+			err
+		].find((value) => typeof value === 'string') ?? fallback
 	);
 };
 
@@ -392,26 +398,18 @@ export const verifyOpenAIConnection = async (
 export const chatCompletion = async (
 	token: string = '',
 	body: object,
-	url: string = `${WEBUI_BASE_URL}/api`,
-	// Set when retrying after a failover-provider failure — the backend
-	// will skip these connection URLs when resolving the candidate list.
-	skipProviderUrls: string[] = []
+	url: string = `${WEBUI_BASE_URL}/api`
 ): Promise<[Response | null, AbortController]> => {
 	const controller = new AbortController();
 	let error = null;
 
-	const headers: Record<string, string> = {
-		Authorization: `Bearer ${token}`,
-		'Content-Type': 'application/json'
-	};
-	if (skipProviderUrls.length > 0) {
-		headers['X-Skip-Provider-URLs'] = skipProviderUrls.join(',');
-	}
-
 	const res = await fetch(`${url}/chat/completions`, {
 		signal: controller.signal,
 		method: 'POST',
-		headers,
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json'
+		},
 		body: JSON.stringify(body)
 	}).catch((err) => {
 		console.error(err);
@@ -429,25 +427,16 @@ export const chatCompletion = async (
 export const generateOpenAIChatCompletion = async (
 	token: string = '',
 	body: object,
-	url: string = `${WEBUI_BASE_URL}/api`,
-	// When regenerating after a mid-stream provider failure, the caller can
-	// pass the failed provider URL(s) here. The backend's failover resolver
-	// will skip those and pick the next candidate.
-	skipProviderUrls: string[] = []
+	url: string = `${WEBUI_BASE_URL}/api`
 ) => {
 	let error = null;
 
-	const headers: Record<string, string> = {
-		Authorization: `Bearer ${token}`,
-		'Content-Type': 'application/json'
-	};
-	if (skipProviderUrls.length > 0) {
-		headers['X-Skip-Provider-URLs'] = skipProviderUrls.join(',');
-	}
-
 	const res = await fetch(`${url}/chat/completions`, {
 		method: 'POST',
-		headers,
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json'
+		},
 		credentials: 'include',
 		body: JSON.stringify(body)
 	})
