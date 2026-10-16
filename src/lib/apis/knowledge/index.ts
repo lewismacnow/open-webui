@@ -522,9 +522,9 @@ export const searchKnowledgeFilesById = async (
 	if (orderBy) searchParams.append('order_by', orderBy);
 	if (direction) searchParams.append('direction', direction);
 	searchParams.append('page', page.toString());
-	// directoryId: undefined = don't filter, null = root, string = specific dir
-	if (directoryId !== undefined) {
-		searchParams.append('directory_id', directoryId ?? '');
+	// directoryId: undefined / null / '' = root (no filter); non-empty string = specific dir
+	if (directoryId) {
+		searchParams.append('directory_id', directoryId);
 	}
 	if (includeContent) searchParams.append('include_content', 'true');
 

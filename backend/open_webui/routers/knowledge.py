@@ -1405,9 +1405,14 @@ async def get_knowledge_files_by_id(
         filter['order_by'] = order_by
     if direction:
         filter['direction'] = direction
-    # directory_id filtering: present in filter = scope to that directory (None = root)
-    if directory_id is not None:
-        filter['directory_id'] = directory_id if directory_id else None
+    # directory_id filtering: empty string = root (no filter), None = root
+    # (no filter), non-empty string = scope to that directory. The empty /
+    # None path must NOT be coerced to the literal value None because
+    # search_files_by_id treats `filter['directory_id'] is None` as
+    # "files with directory_id IS NULL" - which excludes KB-root files
+    # (their directory_id is the root-directory UUID, not NULL).
+    if directory_id is not None and directory_id != '':
+        filter['directory_id'] = directory_id
 
     return await Knowledges.search_files_by_id(id, user.id, filter=filter, skip=skip, limit=limit, db=db)
 
