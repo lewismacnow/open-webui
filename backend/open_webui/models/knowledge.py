@@ -630,7 +630,7 @@ class KnowledgeTable:
                 # that adds those columns has not run yet) we simply return the
                 # files with no embedding status rather than blanking the KB.
                 status_map: dict = {}
-                file_ids = [file.id for file, _user in items]
+                file_ids = [file.id for file, _user, _dir_id in items]
                 if file_ids:
                     try:
                         status_result = await db.execute(
@@ -649,11 +649,12 @@ class KnowledgeTable:
                         status_map = {}
 
                 files = []
-                for file, user in items:
+                for file, user, _dir_id in items:
                     embedding_status, embedding_error = status_map.get(file.id, (None, None))
                     files.append(
                         FileUserResponse(
                             id=file.id,
+                            directory_id=_dir_id,
                             user_id=file.user_id,
                             hash=file.hash,
                             filename=file.filename,
