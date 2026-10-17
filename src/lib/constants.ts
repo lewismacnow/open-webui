@@ -26,6 +26,7 @@ export const COMMUNITY_ORIGINS = [
 // was built here keep its word across every release.
 export const WEBUI_VERSION = APP_VERSION;
 export const WEBUI_BUILD_HASH = APP_BUILD_HASH;
+export const WEBUI_BUILD_CHANNEL = APP_BUILD_CHANNEL;
 export const REQUIRED_OLLAMA_VERSION = '0.1.16';
 
 export const SUPPORTED_FILE_TYPE = [
@@ -125,6 +126,8 @@ export const DEFAULT_CAPABILITIES = {
 	usage: undefined,
 	memory: true,
 	builtin_tools: true,
+	// Fork: API Tools — per-model opt-in capabilities (backend defaults
+	// api_tools to True but the model editor default shows opt-out).
 	api_tools: false,
 	api_terminal: false
 };

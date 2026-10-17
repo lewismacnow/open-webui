@@ -181,6 +181,9 @@ class KnowledgeForm(BaseModel):
 
 
 class FileUserResponse(FileModelResponse):
+    directory_id: str | None = None
+    directory_path: str = ''
+    has_original: bool = True
     user: Optional[UserResponse] = None
     # Per-KB embedding state from the knowledge_file link (pending |
     # processing | completed | failed). None for legacy rows.
@@ -497,7 +500,7 @@ class KnowledgeTable:
         if knowledge.user_id == user_id:
             return True
         if user_group_ids is None:
-            user_groups = await Groups.get_groups_by_member_id(user_id, db=db)
+            user_groups = await Groups.get_groups_by_member_id(user_id, db=db, include_inherited=True)
             user_group_ids = {group.id for group in user_groups}
         return await AccessGrants.has_access(
             user_id=user_id,
@@ -551,7 +554,7 @@ class KnowledgeTable:
         try:
             async with get_async_db_context(db) as db:
                 stmt = (
-                    select(File, User)
+                    select(File, User, KnowledgeFile.directory_id)
                     .join(KnowledgeFile, File.id == KnowledgeFile.file_id)
                     .outerjoin(User, User.id == KnowledgeFile.user_id)
                     .filter(KnowledgeFile.knowledge_id == knowledge_id)
@@ -627,7 +630,7 @@ class KnowledgeTable:
                 # that adds those columns has not run yet) we simply return the
                 # files with no embedding status rather than blanking the KB.
                 status_map: dict = {}
-                file_ids = [file.id for file, _user in items]
+                file_ids = [file.id for file, _user, _dir_id in items]
                 if file_ids:
                     try:
                         status_result = await db.execute(
@@ -646,11 +649,12 @@ class KnowledgeTable:
                         status_map = {}
 
                 files = []
-                for file, user in items:
+                for file, user, _dir_id in items:
                     embedding_status, embedding_error = status_map.get(file.id, (None, None))
                     files.append(
                         FileUserResponse(
                             id=file.id,
+                            directory_id=_dir_id,
                             user_id=file.user_id,
                             hash=file.hash,
                             filename=file.filename,

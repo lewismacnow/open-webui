@@ -99,7 +99,7 @@
 </script>
 
 {#if loaded}
-	<div class="w-full h-full pb-2">
+	<div class="w-full h-full overflow-y-auto scrollbar-hover pr-1.5 pb-2">
 		<Dashboard />
 
 		<!-- API token usage (OpenAI-compatible path; not part of the chat

@@ -31,60 +31,6 @@ export const createNewGroup = async (token: string, group: object) => {
 	return res;
 };
 
-export const searchGroups = async (
-	token: string,
-	query?: string,
-	orderBy?: string,
-	direction?: string,
-	page = 1,
-	signal?: AbortSignal
-) => {
-	let error = null;
-	let res = null;
-
-	const searchParams = new URLSearchParams();
-
-	searchParams.set('page', `${page}`);
-
-	if (query) {
-		searchParams.set('query', query);
-	}
-
-	if (orderBy) {
-		searchParams.set('order_by', orderBy);
-	}
-
-	if (direction) {
-		searchParams.set('direction', direction);
-	}
-
-	res = await fetch(`${WEBUI_API_BASE_URL}/groups/search?${searchParams.toString()}`, {
-		method: 'GET',
-		signal,
-		headers: {
-			Accept: 'application/json',
-			'Content-Type': 'application/json',
-			authorization: `Bearer ${token}`
-		}
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			if (signal?.aborted) return null;
-			console.error(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res;
-};
-
 export const getGroups = async (token: string = '', share?: boolean) => {
 	let error = null;
 
@@ -340,6 +286,75 @@ export const getGroupPreview = async (token: string, id: string) => {
 		.catch((err) => {
 			error = err.detail;
 			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getGroupMembers = async (
+	token: string,
+	id: string,
+	membership: 'direct' | 'inherited' | 'effective' = 'effective',
+	query = '',
+	page = 1
+) => {
+	const params = new URLSearchParams({ membership, query, page: String(page) });
+	const res = await fetch(`${WEBUI_API_BASE_URL}/groups/id/${id}/members?${params}`, {
+		headers: { Authorization: `Bearer ${token}` }
+	});
+	if (!res.ok) throw (await res.json()).detail;
+	return res.json();
+};
+
+export const searchGroups = async (
+	token: string,
+	query?: string,
+	orderBy?: string,
+	direction?: string,
+	page = 1,
+	signal?: AbortSignal
+) => {
+	let error = null;
+	let res = null;
+
+	const searchParams = new URLSearchParams();
+
+	searchParams.set('page', `${page}`);
+
+	if (query) {
+		searchParams.set('query', query);
+	}
+
+	if (orderBy) {
+		searchParams.set('order_by', orderBy);
+	}
+
+	if (direction) {
+		searchParams.set('direction', direction);
+	}
+
+	res = await fetch(`${WEBUI_API_BASE_URL}/groups/search?${searchParams.toString()}`, {
+		method: 'GET',
+		signal,
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			if (signal?.aborted) return null;
+			console.error(err);
+			error = err.detail;
 			return null;
 		});
 

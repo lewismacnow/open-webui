@@ -179,6 +179,18 @@ def _branch_literals(branch: str, lower: bool) -> Optional[list[str]]:
     return literals or None
 
 
+def _compile_search_regex(pattern: str, case_insensitive: bool, literal: bool = False) -> tuple:
+    try:
+        options = re2.Options()
+        options.case_sensitive = not case_insensitive
+        options.literal = literal
+        options.max_mem = 1 << 20  # Bound compiled programs and the engine's matching cache to 1 MiB.
+        options.log_errors = False
+        return re2.compile(pattern if literal else normalize_regex(pattern), options=options), None
+    except re2.error as e:
+        return None, f'Invalid or unsupported regex (RE2 syntax): {e}'
+
+
 def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool = False) -> tuple:
     """Build a matcher function. Returns (match_fn, error_str_or_None)."""
     if len(pattern) > MAX_SEARCH_PATTERN_LENGTH:
@@ -188,16 +200,11 @@ def build_matcher(pattern: str, case_insensitive: bool = False, use_regex: bool 
         use_regex = True
 
     if use_regex:
-        normalized = normalize_regex(pattern)
-        try:
-            options = re2.Options()
-            options.case_sensitive = not case_insensitive
-            options.max_mem = 1 << 20  # Bound compiled programs and the engine's matching cache to 1 MiB.
-            options.log_errors = False
-            compiled = re2.compile(normalized, options=options)
-        except re2.error as e:
-            return None, f'Invalid or unsupported regex (RE2 syntax): {e}'
+        compiled, error = _compile_search_regex(pattern, case_insensitive)
+        if error:
+            return None, error
 
+        normalized = normalize_regex(pattern)
         budget = _active_budget.get() or MatchBudget()
 
         # Literal prefilter — only when EVERY alternation branch yields
@@ -427,7 +434,7 @@ async def _get_accessible_kb_ids(
 
     user_id = user.get('id')
     user_role = user.get('role', 'user')
-    user_group_ids = [g.id for g in await Groups.get_groups_by_member_id(user_id)]
+    user_group_ids = [g.id for g in await Groups.get_groups_by_member_id(user_id, include_inherited=True)]
 
     async def _has_access(kb):
         return (
