@@ -3321,6 +3321,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                             request,
                             server_id,
                             user,
+                            metadata,
                             extra_params,
                         )
                         if result is None:
