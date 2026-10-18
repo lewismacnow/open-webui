@@ -2469,7 +2469,6 @@ async def connect_mcp_server(
         user,
         server_id=server_id,
         metadata=metadata,
-        extra_params=extra_params,
     )
 
     client = MCPClient()
