@@ -135,6 +135,16 @@ async def _embed_one(app, link) -> None:
         await _remove_failed_file(link)
         return
 
+    # Ignored files are excluded from knowledge queries: do not embed them
+    # (the metadata enrichment marks low-value documents as ignored).
+    if (file.meta or {}).get('ignored'):
+        await Knowledges.set_embedding_status(
+            link.knowledge_id,
+            link.file_id,
+            'ignored',
+        )
+        return
+
     try:
         # Link-first ingestion (GitHub sync, durable upload path): a linked
         # file may not have gone through extraction yet. The KB-copy branch

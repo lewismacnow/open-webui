@@ -744,7 +744,16 @@ async def _sync_github_source_inner(app, source: KnowledgeGithubSourceModel) -> 
                     file_hash = hashlib.sha256(content).hexdigest()
 
                     # Replace the previous version of this repo path, if any.
+                    # The enriched title and the ignored flag travel with the
+                    # file: renaming a file must not make the sync treat it as
+                    # a new document, and an ignored (low value) file must not
+                    # come back on the next sync.
+                    carried_meta: dict = {}
                     if existing:
+                        prev_meta = existing.meta or {}
+                        for key in ('title', 'ignored', 'ignored_reason', 'ignored_at'):
+                            if prev_meta.get(key) is not None:
+                                carried_meta[key] = prev_meta.get(key)
                         await Knowledges.remove_file_from_knowledge_by_id(source.knowledge_id, existing.id)
                         await Files.delete_file_by_id(existing.id)
 
@@ -785,6 +794,7 @@ async def _sync_github_source_inner(app, source: KnowledgeGithubSourceModel) -> 
                                 'size': len(content),
                                 'file_hash': file_hash,
                                 'source_label': f'{owner}/{repo}@{branch}',
+                                **carried_meta,
                                 'data': {
                                     'knowledge_id': source.knowledge_id,
                                     'github_source_id': source.id,

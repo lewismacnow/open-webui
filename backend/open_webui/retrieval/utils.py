@@ -1785,10 +1785,19 @@ async def get_sources_from_items(
         try:
             if 'documents' in query_result:
                 if 'metadatas' in query_result:
+                    metadata = query_result['metadatas'][0] or {}
+                    # Safety net: files marked as ignored (low-value
+                    # documents flagged by the metadata enrichment) must
+                    # never be returned. Their vectors are removed when
+                    # they are ignored, but a chunk embedded before the
+                    # flag was set would still carry the flag in its
+                    # metadata - drop it here too.
+                    if isinstance(metadata, dict) and metadata.get('ignored'):
+                        continue
                     source = {
                         'source': query_result['file'],
                         'document': query_result['documents'][0],
-                        'metadata': query_result['metadatas'][0],
+                        'metadata': metadata,
                     }
                     if 'distances' in query_result and query_result['distances']:
                         source['distances'] = query_result['distances'][0]
