@@ -43,6 +43,16 @@ EMBEDDING_RECOVERY_AGE = int(os.getenv('EMBEDDING_RECOVERY_AGE', '600'))
 # Minimum gap between automatic recovery sweeps.
 EMBEDDING_RECOVERY_INTERVAL = int(os.getenv('EMBEDDING_RECOVERY_INTERVAL', '300'))
 
+# How many times a file may fail embedding before it is abandoned (removed
+# from the knowledge base and the file table). Between attempts the file is
+# re-queued at the END of the pending queue, so a transient provider error
+# (rate limit, timeout, provider restart) is retried after the rest of the
+# queue has drained instead of blocking it.
+MAX_EMBED_ATTEMPTS = int(os.getenv('EMBEDDING_MAX_ATTEMPTS', '3'))
+# How often to sweep links left in 'failed' (e.g. by a worker crash or a
+# failure recorded before the retry policy existed) back into the queue.
+FAILED_REQUEUE_INTERVAL = int(os.getenv('EMBEDDING_FAILED_REQUEUE_INTERVAL', '300'))
+
 
 async def recover_stuck_extractions(app, knowledge_id: str | None = None, ignore_age: bool = False) -> int:
     """Re-drive files orphaned in the extraction phase.
@@ -103,22 +113,26 @@ async def _embed_one(app, link) -> None:
 
     user = await Users.get_user_by_id(link.user_id)
     if not user:
+        # Permanent failure - the owner is gone, retrying cannot help.
         await Knowledges.set_embedding_status(
             link.knowledge_id,
             link.file_id,
             'failed',
             error='Owner user not found',
         )
+        await _remove_failed_file(link)
         return
 
     file = await Files.get_file_by_id(link.file_id)
     if not file:
+        # Permanent failure - the file row is gone.
         await Knowledges.set_embedding_status(
             link.knowledge_id,
             link.file_id,
             'failed',
             error='File not found',
         )
+        await _remove_failed_file(link)
         return
 
     try:
@@ -146,11 +160,105 @@ async def _embed_one(app, link) -> None:
             )
         await Knowledges.set_embedding_status(link.knowledge_id, link.file_id, 'completed')
     except Exception as e:
-        log.warning(f'Embedding failed for file {link.file_id} in KB {link.knowledge_id}: {e}')
         detail = getattr(e, 'detail', None) or str(e)
-        await Knowledges.set_embedding_status(
-            link.knowledge_id, link.file_id, 'failed', error=str(detail)
+        # A duplicate-content conflict is permanent: the same bytes are
+        # already in this knowledge collection under another file, so
+        # re-adding them can never succeed. Retrying is pointless - the
+        # duplicate file is removed instead.
+        if 'duplicate content' in str(detail).lower():
+            log.warning(
+                'Embedding skipped for file %s in KB %s: %s - removing the duplicate file',
+                link.file_id,
+                link.knowledge_id,
+                detail,
+            )
+            await Knowledges.set_embedding_status(link.knowledge_id, link.file_id, 'failed', error=str(detail))
+            await _remove_failed_file(link)
+            return
+        outcome = await Knowledges.record_embedding_failure(
+            link.knowledge_id,
+            link.file_id,
+            error=str(detail),
+            max_attempts=MAX_EMBED_ATTEMPTS,
         )
+        if outcome == 'requeued':
+            log.warning(
+                'Embedding failed for file %s in KB %s: %s - requeued at the end of the queue '
+                'for another attempt (max %d)',
+                link.file_id,
+                link.knowledge_id,
+                detail,
+                MAX_EMBED_ATTEMPTS,
+            )
+            return
+        if outcome == 'abandoned':
+            log.warning(
+                'Embedding failed for file %s in KB %s after %d attempts: %s - removing the file',
+                link.file_id,
+                link.knowledge_id,
+                MAX_EMBED_ATTEMPTS,
+                detail,
+            )
+            await _remove_failed_file(link)
+            return
+        log.warning(f'Embedding failed for file {link.file_id} in KB {link.knowledge_id}: {e}')
+
+
+async def _remove_failed_file(link) -> None:
+    """Remove a file that exhausted its embedding attempts.
+
+    Deletes the file's vector chunks (per-file collection + the KB
+    collection), the knowledge_file link and the file row, so the file
+    disappears from the knowledge base instead of being retried forever.
+    Every step is best-effort: a failure here must not kill the worker
+    loop.
+    """
+    file_id = link.file_id
+    knowledge_id = link.knowledge_id
+    try:
+        from open_webui.retrieval.vector import ASYNC_VECTOR_DB_CLIENT
+
+        file_collection = f'file-{file_id}'
+        try:
+            if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
+                await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+        except Exception as exc:
+            log.debug('Could not delete collection %s: %s', file_collection, exc)
+        try:
+            await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge_id, filter={'file_id': file_id})
+        except Exception as exc:
+            log.debug('Could not delete chunks of %s in %s: %s', file_id, knowledge_id, exc)
+    except Exception as exc:
+        log.debug('Vector cleanup for %s failed: %s', file_id, exc)
+
+    try:
+        await Knowledges.remove_file_from_knowledge_by_id(knowledge_id, file_id)
+    except Exception as exc:
+        log.warning('Could not remove link for file %s: %s', file_id, exc)
+    try:
+        await Files.delete_file_by_id(file_id)
+    except Exception as exc:
+        log.warning('Could not delete file %s: %s', file_id, exc)
+
+
+async def recover_failed_embeddings(app) -> int:
+    """Re-queue links left in 'failed' whose attempt budget is not spent.
+
+    Files that failed before the retry policy existed (legacy rows have
+    attempts IS NULL), or that failed while the worker was down, are put
+    back into the queue. Files that already exhausted their attempts are
+    left alone - the worker removes them on the next failure handling.
+
+    Returns the number of links re-queued.
+    """
+    try:
+        requeued = await Knowledges.requeue_failed_embeddings(max_attempts=MAX_EMBED_ATTEMPTS)
+    except Exception:
+        log.exception('Embedding worker: failed to re-queue failed embeddings')
+        return 0
+    if requeued:
+        log.info('Re-queued %d failed embedding(s) for another attempt', requeued)
+    return requeued
 
 
 async def embedding_worker_loop(app) -> None:
@@ -168,6 +276,7 @@ async def embedding_worker_loop(app) -> None:
 
     # Recover extraction-phase orphans on startup, then periodically.
     last_recovery = 0.0
+    last_failed_requeue = 0.0
 
     while True:
         try:
@@ -181,6 +290,17 @@ async def embedding_worker_loop(app) -> None:
                         log.info(f'Recovered {recovered} stuck extraction(s)')
                 except Exception:
                     log.exception('Embedding worker: stuck-extraction recovery failed')
+
+            # Re-queue files whose embedding failed (legacy rows, or a
+            # failure recorded while the worker was down) so they get
+            # another attempt. Files that already used up their attempt
+            # budget are left alone.
+            if time.time() - last_failed_requeue >= FAILED_REQUEUE_INTERVAL:
+                last_failed_requeue = time.time()
+                try:
+                    await recover_failed_embeddings(app)
+                except Exception:
+                    log.exception('Embedding worker: failed-embedding re-queue failed')
 
             link = await Knowledges.claim_next_pending_embedding()
             if link is None:
