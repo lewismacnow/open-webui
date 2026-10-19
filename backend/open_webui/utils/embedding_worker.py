@@ -262,7 +262,7 @@ async def recover_failed_embeddings(app) -> int:
     Returns the number of links re-queued.
     """
     try:
-        requeued = await Knowledges.requeue_failed_embeddings(max_attempts=MAX_EMBED_ATTEMPTS)
+        requeued = await Knowledges.requeue_failed_embeddings_with_budget(max_attempts=MAX_EMBED_ATTEMPTS)
     except Exception:
         log.exception('Embedding worker: failed to re-queue failed embeddings')
         return 0

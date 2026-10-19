@@ -916,7 +916,7 @@ class KnowledgeTable:
                 await db.rollback()
                 return 'missing'
 
-    async def requeue_failed_embeddings(
+    async def requeue_failed_embeddings_with_budget(
         self,
         max_attempts: int = 3,
         limit: int = 200,
@@ -1003,6 +1003,9 @@ class KnowledgeTable:
     async def requeue_failed_embeddings(self, knowledge_id: str, db: Optional[AsyncSession] = None) -> int:
         """Reset all 'failed' links in a KB back to 'pending' so the worker
         retries them. Returns the number of rows re-queued.
+
+        Links that already used up their attempt budget are left alone -
+        the worker removes those files instead of retrying them forever.
         """
         async with get_async_db_context(db) as db:
             try:
@@ -1011,6 +1014,7 @@ class KnowledgeTable:
                     .where(
                         KnowledgeFile.knowledge_id == knowledge_id,
                         KnowledgeFile.status == 'failed',
+                        (KnowledgeFile.attempts.is_(None)) | (KnowledgeFile.attempts < 3),
                     )
                     .values(status='pending', error=None, updated_at=int(time.time()))
                 )
