@@ -1017,30 +1017,46 @@ async def run_metadata_scan(app, scan: MetadataScanModel) -> None:
 
 
 async def apply_proposal(proposal) -> None:
-    """Apply a pending proposal to its file. Called from the admin router
-    after explicit confirmation — the ONLY write path."""
+    """Apply a stored proposal to its file.
+
+    The approval flow is gone - the scan applies changes automatically via
+    ``apply_enrichment``. This shim stays for compatibility with any
+    caller that still holds a proposal row: it re-applies the proposal
+    through the same write path (meta.title for the title - the file NAME
+    is never touched, it is the GitHub sync's source of truth).
+    """
     file = await Files.get_file_by_id(proposal.file_id)
     if not file:
         raise ValueError('File no longer exists')
 
-    if proposal.proposed_title:
-        await Files.update_file_name_by_id(file.id, proposal.proposed_title)
+    payload = {
+        'proposed_title': proposal.proposed_title,
+        'proposed_description': proposal.proposed_description,
+        'proposed_summary': proposal.proposed_summary,
+        'proposed_tags': proposal.proposed_tags,
+        'proposed_keywords': proposal.proposed_keywords,
+        'proposed_extra': proposal.proposed_extra,
+    }
+    payload = {k: v for k, v in payload.items() if v is not None}
+    if not payload:
+        return
 
     meta = dict(file.meta or {})
     changed = False
-    if proposal.proposed_description is not None:
-        meta['description'] = proposal.proposed_description
+    if payload.get('proposed_title'):
+        meta['title'] = payload['proposed_title']
         changed = True
-    if proposal.proposed_summary is not None:
-        meta['summary'] = proposal.proposed_summary
-        changed = True
-    if proposal.proposed_tags is not None:
-        meta['tags'] = proposal.proposed_tags
-        changed = True
-    if proposal.proposed_keywords is not None:
-        meta['keywords'] = proposal.proposed_keywords
-        changed = True
-    for k, v in (proposal.proposed_extra or {}).items():
+    for key, meta_key in (
+        ('proposed_description', 'description'),
+        ('proposed_summary', 'summary'),
+        ('proposed_tags', 'tags'),
+        ('proposed_keywords', 'keywords'),
+    ):
+        value = payload.get(key)
+        if value is not None:
+            meta[meta_key] = value
+            changed = True
+    for k, v in (payload.get('proposed_extra') or {}).items():
         meta[k] = v
         changed = True
     if changed:

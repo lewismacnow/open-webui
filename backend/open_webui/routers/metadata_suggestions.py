@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.metadata_proposal import (
@@ -137,7 +137,7 @@ async def list_enrichment_files(
 @router.post('/files/{id}/ignore')
 async def ignore_file(
     id: str,
-    body: Optional[dict] = None,
+    body: Optional[dict] = Body(default=None),
     user=Depends(get_admin_user),
 ):
     """Mark a file as ignored.
