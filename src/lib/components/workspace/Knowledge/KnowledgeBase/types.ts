@@ -10,8 +10,10 @@ export type KnowledgeFile = {
 	updated_at?: number;
 	meta?: {
 		name?: string;
+		title?: string;
 		size?: number;
 		content_type?: string;
+		ignored?: boolean;
 		data?: { directory_id?: string | null };
 		[key: string]: unknown;
 	};
@@ -35,7 +37,7 @@ export type ViewerState = {
 	originalUnavailable?: boolean;
 };
 export const fileName = (file: KnowledgeFile) =>
-	file.meta?.name || file.name || file.filename || 'Untitled';
+	file.meta?.title || file.meta?.name || file.name || file.filename || 'Untitled';
 export const newViewerState = (): ViewerState => ({
 	mode: 'preview',
 	indexed: null,

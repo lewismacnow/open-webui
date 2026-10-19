@@ -156,7 +156,14 @@
 			>{/if}
 		{#if !directory && !renaming}<span
 				class="flex shrink-0 items-center gap-1.5 text-[0.6875rem] text-gray-400"
-				>{#if !pending && file.embedding_status && file.embedding_status !== 'completed'}
+				>{#if !pending && file.meta?.ignored}
+					<span
+						class="rounded-full bg-gray-500/10 px-1.5 py-0.5 text-gray-500 dark:text-gray-400"
+						title={$i18n.t('Excluded from knowledge queries')}
+					>
+						{$i18n.t('Ignored')}
+					</span>
+				{/if}{#if !pending && file.embedding_status && file.embedding_status !== 'completed'}
 					<!-- Fork: durable embedding pipeline state (knowledge_file.status) -->
 					<span
 						class={file.embedding_status === 'failed'
