@@ -115,6 +115,7 @@ class FileUpdateForm(BaseModel):
     hash: str | None = None
     data: dict | None = None
     meta: dict | None = None
+    path: str | None = None
 
 
 class FilesTable:
@@ -344,6 +345,9 @@ class FilesTable:
 
                 if form_data.meta is not None:
                     file.meta = {**(file.meta if file.meta else {}), **form_data.meta}
+
+                if form_data.path is not None:
+                    file.path = form_data.path
 
                 file.updated_at = int(time.time())
                 await db.commit()

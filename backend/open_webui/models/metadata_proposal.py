@@ -18,7 +18,7 @@ import uuid
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Column, Index, JSON, Text
+from sqlalchemy import BigInteger, Boolean, Column, Index, JSON, Text
 
 from open_webui.internal.db import Base, get_async_db_context
 
@@ -45,6 +45,16 @@ class MetadataScan(Base):
     test_run = Column(BigInteger, nullable=False, default=0)
     test_preview = Column(JSON, nullable=True)
     reembedded = Column(BigInteger, nullable=False, default=0)
+    # Counters for the automatic (no-approval) enrichment flow.
+    content_updated = Column(BigInteger, nullable=False, default=0)
+    titles_updated = Column(BigInteger, nullable=False, default=0)
+    ignored = Column(BigInteger, nullable=False, default=0)
+    # Scan options (persisted so the background worker can honour them).
+    improve_content = Column(Boolean, nullable=False, default=True)
+    update_titles = Column(Boolean, nullable=False, default=True)
+    ignore_low_value = Column(Boolean, nullable=False, default=True)
+    force = Column(Boolean, nullable=False, default=False)
+    include_ignored = Column(Boolean, nullable=False, default=False)
 
     status = Column(Text, nullable=False, default='running')  # running|completed|failed|cancelled
     total_files = Column(BigInteger, nullable=False, default=0)
@@ -78,6 +88,13 @@ class MetadataProposal(Base):
     proposed_tags = Column(JSON, nullable=True)  # list[str]
     proposed_keywords = Column(JSON, nullable=True)  # list[str]
     proposed_extra = Column(JSON, nullable=True)  # {category, doc_type, audience}
+    # The model's improved document body (markdown) - applied to the file
+    # and re-embedded so the vectors reflect the better content.
+    proposed_content = Column(Text, nullable=True)
+    # Bounded excerpt of the body BEFORE the change, for the test-run
+    # preview (before/after).
+    previous_content_excerpt = Column(Text, nullable=True)
+    content_changed = Column(BigInteger, nullable=False, default=0)
     previous_keywords = Column(JSON, nullable=True)
     previous_extra = Column(JSON, nullable=True)
 
@@ -116,6 +133,14 @@ class MetadataScanModel(BaseModel):
     test_run: bool = False
     test_preview: Optional[dict] = None
     reembedded: int = 0
+    content_updated: int = 0
+    titles_updated: int = 0
+    ignored: int = 0
+    improve_content: bool = True
+    update_titles: bool = True
+    ignore_low_value: bool = True
+    force: bool = False
+    include_ignored: bool = False
     status: str = 'running'
     total_files: int = 0
     processed_files: int = 0
@@ -140,6 +165,9 @@ class MetadataProposalModel(BaseModel):
     proposed_tags: Optional[list[str]] = None
     proposed_keywords: Optional[list[str]] = None
     proposed_extra: Optional[dict] = None
+    proposed_content: Optional[str] = None
+    previous_content_excerpt: Optional[str] = None
+    content_changed: bool = False
     previous_title: Optional[str] = None
     previous_description: Optional[str] = None
     previous_summary: Optional[str] = None
@@ -162,6 +190,12 @@ class MetadataScanForm(BaseModel):
     file_id: Optional[str] = None
     max_parallel: int = 1
     test_run: bool = False
+    # Automatic enrichment options (no approval step).
+    improve_content: bool = True
+    update_titles: bool = True
+    ignore_low_value: bool = True
+    force: bool = False
+    include_ignored: bool = False
 
 
 class MetadataScansTable:
@@ -183,6 +217,14 @@ class MetadataScansTable:
                     max_parallel=max(1, min(int(form_data.max_parallel), 8)),
                     test_run=1 if form_data.test_run else 0,
                     reembedded=0,
+                    content_updated=0,
+                    titles_updated=0,
+                    ignored=0,
+                    improve_content=1 if form_data.improve_content else 0,
+                    update_titles=1 if form_data.update_titles else 0,
+                    ignore_low_value=1 if form_data.ignore_low_value else 0,
+                    force=1 if form_data.force else 0,
+                    include_ignored=1 if form_data.include_ignored else 0,
                     total_files=0,
                     processed_files=0,
                     proposals_created=0,
@@ -232,6 +274,9 @@ class MetadataScansTable:
         proposals: Optional[int] = None,
         redactions: Optional[int] = None,
         reembedded: Optional[int] = None,
+        content_updated: Optional[int] = None,
+        titles_updated: Optional[int] = None,
+        ignored: Optional[int] = None,
     ) -> None:
         from sqlalchemy import update
 
@@ -246,6 +291,12 @@ class MetadataScansTable:
             values['redactions'] = int(redactions)
         if reembedded is not None:
             values['reembedded'] = int(reembedded)
+        if content_updated is not None:
+            values['content_updated'] = int(content_updated)
+        if titles_updated is not None:
+            values['titles_updated'] = int(titles_updated)
+        if ignored is not None:
+            values['ignored'] = int(ignored)
         if not values:
             return
         async with get_async_db_context() as db:
@@ -256,9 +307,7 @@ class MetadataScansTable:
         from sqlalchemy import update
 
         async with get_async_db_context() as db:
-            await db.execute(
-                update(MetadataScan).where(MetadataScan.id == id).values(test_preview=preview)
-            )
+            await db.execute(update(MetadataScan).where(MetadataScan.id == id).values(test_preview=preview))
             await db.commit()
 
     async def finish_scan(self, id: str, status: str, errors: Optional[list[str]] = None) -> None:
@@ -277,7 +326,11 @@ class MetadataProposalsTable:
     async def insert_proposal(self, model: dict) -> Optional[MetadataProposalModel]:
         id = str(uuid.uuid4())
         now = int(time.time())
-        values = {**model, 'id': id, 'created_at': now, 'status': 'pending'}
+        values = {**model, 'id': id, 'created_at': now}
+        # The enrichment flow applies changes automatically, so the caller
+        # decides the status ('applied' / 'no_change' / 'failed'). Default
+        # to 'pending' only when the caller did not say.
+        values.setdefault('status', 'pending')
         async with get_async_db_context() as db:
             await db.execute(MetadataProposal.__table__.insert().values(**values))
             await db.commit()

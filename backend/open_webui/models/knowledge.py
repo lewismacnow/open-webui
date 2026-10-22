@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Integer,
     Column,
     ForeignKey,
     Index,
@@ -112,6 +113,11 @@ class KnowledgeFile(Base):
     # to 'completed' by the migration.
     status = Column(Text, nullable=True)  # pending | processing | completed | failed
     error = Column(Text, nullable=True)
+    # Embed attempt counter. A failed embed is re-queued (status back to
+    # 'pending', at the END of the queue) until it has been attempted
+    # MAX_EMBED_ATTEMPTS times; after that the file is abandoned and
+    # removed instead of being retried forever.
+    attempts = Column(Integer, nullable=True, default=0)
 
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
@@ -132,6 +138,7 @@ class KnowledgeFileModel(BaseModel):
 
     status: Optional[str] = None
     error: Optional[str] = None
+    attempts: Optional[int] = None
 
     created_at: int  # timestamp in epoch
     updated_at: int  # timestamp in epoch
@@ -786,13 +793,18 @@ class KnowledgeTable:
         The UPDATE...WHERE status='pending' guard makes the claim safe even if
         more than one worker/process runs concurrently — only one claim wins a
         given row.
+
+        Ordering is by ``updated_at`` (then ``created_at``) rather than
+        ``created_at`` alone: a re-queued file (embedding failed, scheduled
+        for another attempt) gets a fresh ``updated_at`` and therefore lands
+        at the END of the queue instead of being picked again immediately.
         """
         async with get_async_db_context(db) as db:
             try:
                 result = await db.execute(
                     select(KnowledgeFile)
                     .filter(KnowledgeFile.status == 'pending')
-                    .order_by(KnowledgeFile.created_at.asc())
+                    .order_by(KnowledgeFile.updated_at.asc(), KnowledgeFile.created_at.asc())
                     .limit(1)
                 )
                 row = result.scalars().first()
@@ -837,6 +849,111 @@ class KnowledgeTable:
             except Exception:
                 await db.rollback()
                 return False
+
+    async def record_embedding_failure(
+        self,
+        knowledge_id: str,
+        file_id: str,
+        error: Optional[str],
+        max_attempts: int = 3,
+        db: AsyncSession | None = None,
+    ) -> str:
+        """Record a failed embedding attempt and decide the next step.
+
+        Returns one of:
+          - ``'requeued'``  - the attempt counter is still below
+            ``max_attempts``: the link goes back to ``pending`` with a fresh
+            ``updated_at`` so it is retried at the END of the queue.
+          - ``'abandoned'`` - the attempt budget is exhausted: the link is
+            marked ``failed`` and left there (the worker removes the file).
+          - ``'missing'``   - the link row no longer exists.
+        """
+        async with get_async_db_context(db) as db:
+            try:
+                row = (
+                    (
+                        await db.execute(
+                            select(KnowledgeFile).filter(
+                                KnowledgeFile.knowledge_id == knowledge_id,
+                                KnowledgeFile.file_id == file_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if row is None:
+                    return 'missing'
+
+                attempts = int(row.attempts or 0) + 1
+                if attempts >= max_attempts:
+                    await db.execute(
+                        update(KnowledgeFile)
+                        .where(KnowledgeFile.id == row.id)
+                        .values(
+                            status='failed',
+                            error=error,
+                            attempts=attempts,
+                            updated_at=int(time.time()),
+                        )
+                    )
+                    await db.commit()
+                    return 'abandoned'
+
+                await db.execute(
+                    update(KnowledgeFile)
+                    .where(KnowledgeFile.id == row.id)
+                    .values(
+                        status='pending',
+                        error=error,
+                        attempts=attempts,
+                        updated_at=int(time.time()),
+                    )
+                )
+                await db.commit()
+                return 'requeued'
+            except Exception:
+                await db.rollback()
+                return 'missing'
+
+    async def requeue_failed_embeddings_with_budget(
+        self,
+        max_attempts: int = 3,
+        limit: int = 200,
+        db: AsyncSession | None = None,
+    ) -> int:
+        """Re-queue failed links whose attempt budget is not exhausted.
+
+        Used to recover files that failed before the retry policy existed
+        (legacy rows have attempts IS NULL) and to retry files that failed
+        while the worker was down. Files that already exhausted their
+        attempts are left alone.
+
+        Returns the number of links re-queued.
+        """
+        async with get_async_db_context(db) as db:
+            try:
+                result = await db.execute(
+                    select(KnowledgeFile)
+                    .filter(
+                        KnowledgeFile.status == 'failed',
+                        (KnowledgeFile.attempts.is_(None)) | (KnowledgeFile.attempts < max_attempts),
+                    )
+                    .limit(limit)
+                )
+                rows = result.scalars().all()
+                if not rows:
+                    return 0
+                await db.execute(
+                    update(KnowledgeFile)
+                    .where(KnowledgeFile.id.in_([row.id for row in rows]))
+                    .values(status='pending', updated_at=int(time.time()))
+                )
+                await db.commit()
+                return len(rows)
+            except Exception:
+                await db.rollback()
+                return 0
 
     async def get_embedding_progress(self, knowledge_id: str, db: Optional[AsyncSession] = None) -> dict:
         """Return per-status counts for a knowledge base, e.g.
@@ -886,6 +1003,9 @@ class KnowledgeTable:
     async def requeue_failed_embeddings(self, knowledge_id: str, db: Optional[AsyncSession] = None) -> int:
         """Reset all 'failed' links in a KB back to 'pending' so the worker
         retries them. Returns the number of rows re-queued.
+
+        Links that already used up their attempt budget are left alone -
+        the worker removes those files instead of retrying them forever.
         """
         async with get_async_db_context(db) as db:
             try:
@@ -894,6 +1014,7 @@ class KnowledgeTable:
                     .where(
                         KnowledgeFile.knowledge_id == knowledge_id,
                         KnowledgeFile.status == 'failed',
+                        (KnowledgeFile.attempts.is_(None)) | (KnowledgeFile.attempts < 3),
                     )
                     .values(status='pending', error=None, updated_at=int(time.time()))
                 )

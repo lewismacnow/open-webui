@@ -38,6 +38,7 @@ from typing import Any, Optional
 import httpx
 
 from open_webui.internal.db import get_async_db_context
+from open_webui.models.config import Config
 from open_webui.models.files import Files, FileForm
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.users import Users
@@ -177,10 +178,29 @@ def matches_any(repo_path: str, patterns: list[str]) -> bool:
 #   2. rag.github.allowed_extensions (admin default config; mutable from UI)
 #   3. SYNC_ALLOWED_EXTENSIONS (hardcoded fallback for docs repos)
 _ADMIN_ALLOWED_DEFAULT = [
-    'md', 'markdown', 'mdx', 'txt', 'rst', 'adoc', 'asciidoc',
-    'html', 'htm', 'xhtml',
-    'pdf', 'docx', 'pptx', 'xlsx', 'odt', 'ods', 'odp',
-    'csv', 'tsv', 'json', 'xml', 'yaml', 'yml',
+    'md',
+    'markdown',
+    'mdx',
+    'txt',
+    'rst',
+    'adoc',
+    'asciidoc',
+    'html',
+    'htm',
+    'xhtml',
+    'pdf',
+    'docx',
+    'pptx',
+    'xlsx',
+    'odt',
+    'ods',
+    'odp',
+    'csv',
+    'tsv',
+    'json',
+    'xml',
+    'yaml',
+    'yml',
 ]
 
 
@@ -190,10 +210,20 @@ def _filename_deny(name: str) -> bool:
     files like api-credentials-management.md or secrets.md."""
     name_lc = name.lower()
     if name_lc in {
-        '.env', '.env.production', '.env.local', '.env.development', '.env.staging',
-        'secrets', 'secrets.json', 'secrets.yaml', 'secrets.toml',
-        'credentials', 'credentials.json', 'credentials.yaml',
-        '.htpasswd', '.netrc',
+        '.env',
+        '.env.production',
+        '.env.local',
+        '.env.development',
+        '.env.staging',
+        'secrets',
+        'secrets.json',
+        'secrets.yaml',
+        'secrets.toml',
+        'credentials',
+        'credentials.json',
+        'credentials.yaml',
+        '.htpasswd',
+        '.netrc',
     }:
         return True
     if name_lc.startswith(('id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa')):
@@ -212,6 +242,7 @@ def extension_allowed(repo_path: str, allowed_extensions: list[str]) -> bool:
     ext = last.rsplit('.', 1)[-1].lower() if '.' in last else ''
     allowed = {e.lstrip('.').lower() for e in allowed_extensions}
     return ext in allowed
+
 
 # Rate-limit safety margin - start pacing when we have this many calls
 # remaining (in addition to the one we're about to make). Lower bound that
@@ -274,7 +305,8 @@ class GithubSyncClient:
                 sleep_for = max((self._reset_at or now + 60) - now, 1.0)
                 log.info(
                     'GitHub rate-limit pacing: remaining=%s, sleeping %.0fs until reset',
-                    self._remaining, sleep_for,
+                    self._remaining,
+                    sleep_for,
                 )
                 await asyncio.sleep(sleep_for)
                 self._remaining = None
@@ -297,9 +329,7 @@ class GithubSyncClient:
             return None
         return (resp.json().get('commit') or {}).get('sha')
 
-    async def get_tree(
-        self, owner: str, repo: str, tree_sha: str, directory: str = ''
-    ) -> Optional[list[dict]]:
+    async def get_tree(self, owner: str, repo: str, tree_sha: str, directory: str = '') -> Optional[list[dict]]:
         """Recursive tree. When GitHub truncates the recursive response
         (repos over the tree-entry limit), fall back to a non-recursive
         walk pruned to the configured directory prefix - bounded API
@@ -324,9 +354,7 @@ class GithubSyncClient:
             # Whole-repo recursive response truncated and no directory
             # binding to target - we cannot enumerate the repo in one
             # call. Tell the admin to bind a directory.
-            raise RuntimeError(
-                'Repository tree truncated by GitHub API - narrow the directory path'
-            )
+            raise RuntimeError('Repository tree truncated by GitHub API - narrow the directory path')
 
         log.info('Recursive tree truncated for %s/%s - targeting subtree %r', owner, repo, prefix)
 
@@ -338,15 +366,9 @@ class GithubSyncClient:
         for seg in prefix.split('/'):
             node = await _node(current_sha)
             if node is None:
-                raise RuntimeError(
-                    f'Failed to fetch git tree node at {current_path or "/"} (HTTP error)'
-                )
+                raise RuntimeError(f'Failed to fetch git tree node at {current_path or "/"} (HTTP error)')
             child = next(
-                (
-                    e
-                    for e in (node.get('tree') or [])
-                    if e.get('path') == seg and e.get('type') == 'tree'
-                ),
+                (e for e in (node.get('tree') or []) if e.get('path') == seg and e.get('type') == 'tree'),
                 None,
             )
             if child is None:
@@ -358,9 +380,7 @@ class GithubSyncClient:
         # Phase 2: try a recursive fetch on the prefix subtree.
         # Almost always succeeds - one call returns every blob under
         # the bound directory.
-        sub_resp = await self._get(
-            f'/repos/{owner}/{repo}/git/trees/{current_sha}', params={'recursive': '1'}
-        )
+        sub_resp = await self._get(f'/repos/{owner}/{repo}/git/trees/{current_sha}', params={'recursive': '1'})
         if sub_resp.status_code != 200:
             return None
         sub_body = sub_resp.json()
@@ -369,7 +389,7 @@ class GithubSyncClient:
             # (e.g. 'csm/file.md', not 'markdown/csm/file.md'). Re-prefix
             # so the caller's path_is_safe(directory) filter matches.
             return [
-                {**entry, 'path': f"{prefix}/{entry['path']}"}
+                {**entry, 'path': f'{prefix}/{entry["path"]}'}
                 for entry in (sub_body.get('tree') or [])
                 if entry.get('path')
             ]
@@ -385,15 +405,13 @@ class GithubSyncClient:
             sha, base = queue.pop(0)
             node = await _node(sha)
             if node is None:
-                raise RuntimeError(
-                    f'Failed to fetch git tree node at {base or "/"} (HTTP error)'
-                )
+                raise RuntimeError(f'Failed to fetch git tree node at {base or "/"} (HTTP error)')
             if node.get('truncated'):
                 raise RuntimeError(
                     f'Directory {base or "/"} has too many entries for the GitHub tree API - narrow the directory path'
                 )
             for entry in node.get('tree') or []:
-                path = f"{base}/{entry['path']}" if base else entry['path']
+                path = f'{base}/{entry["path"]}' if base else entry['path']
                 if entry.get('type') == 'tree':
                     queue.append((entry['sha'], path))
                 else:
@@ -464,9 +482,7 @@ async def _sweep_stale_processing_files(source_id: str) -> int:
                 File.data['status'].as_string() == 'processing',
                 File.meta['data']['github_source_id'].as_string() == source_id,
                 File.updated_at < cutoff,
-                ~exists(
-                    select(KnowledgeFile.id).where(KnowledgeFile.file_id == File.id)
-                ),
+                ~exists(select(KnowledgeFile.id).where(KnowledgeFile.file_id == File.id)),
             )
         )
         await db.commit()
@@ -506,9 +522,17 @@ async def sync_github_source(app, source: KnowledgeGithubSourceModel) -> dict:
         return {
             'status': 'already_running',
             'error': 'A sync for this source is already in progress',
-            'added': 0, 'updated': 0, 'removed': 0, 'unchanged': 0,
-            'skipped_size': 0, 'skipped_ext': 0, 'skipped_deny': 0, 'skipped_dup': 0,
-            'truncated': False, 'total_candidates': 0, 'errors': ['already running'],
+            'added': 0,
+            'updated': 0,
+            'removed': 0,
+            'unchanged': 0,
+            'skipped_size': 0,
+            'skipped_ext': 0,
+            'skipped_deny': 0,
+            'skipped_dup': 0,
+            'truncated': False,
+            'total_candidates': 0,
+            'errors': ['already running'],
         }
     async with lock:
         _active_syncs.add(source.id)
@@ -720,7 +744,16 @@ async def _sync_github_source_inner(app, source: KnowledgeGithubSourceModel) -> 
                     file_hash = hashlib.sha256(content).hexdigest()
 
                     # Replace the previous version of this repo path, if any.
+                    # The enriched title and the ignored flag travel with the
+                    # file: renaming a file must not make the sync treat it as
+                    # a new document, and an ignored (low value) file must not
+                    # come back on the next sync.
+                    carried_meta: dict = {}
                     if existing:
+                        prev_meta = existing.meta or {}
+                        for key in ('title', 'ignored', 'ignored_reason', 'ignored_at'):
+                            if prev_meta.get(key) is not None:
+                                carried_meta[key] = prev_meta.get(key)
                         await Knowledges.remove_file_from_knowledge_by_id(source.knowledge_id, existing.id)
                         await Files.delete_file_by_id(existing.id)
 
@@ -761,6 +794,7 @@ async def _sync_github_source_inner(app, source: KnowledgeGithubSourceModel) -> 
                                 'size': len(content),
                                 'file_hash': file_hash,
                                 'source_label': f'{owner}/{repo}@{branch}',
+                                **carried_meta,
                                 'data': {
                                     'knowledge_id': source.knowledge_id,
                                     'github_source_id': source.id,
@@ -770,6 +804,25 @@ async def _sync_github_source_inner(app, source: KnowledgeGithubSourceModel) -> 
                             },
                         ),
                     )
+
+                    # Re-check the content hash AFTER the insert. The check
+                    # above runs before the file exists, so two files with
+                    # identical content fetched in parallel can BOTH pass it
+                    # (the sync fetches CONCURRENT_FETCHES files at once) and
+                    # both get linked - the loser then fails embedding with
+                    # DUPLICATE_CONTENT forever. Re-checking now sees the
+                    # sibling and keeps exactly one copy.
+                    dup_after = await Knowledges.get_file_by_hash_in_knowledge(source.knowledge_id, file_hash)
+                    if dup_after and dup_after.id != file_id:
+                        await Files.delete_file_by_id(file_id)
+                        result['skipped_dup'] += 1
+                        log.info(
+                            'GitHub sync %s: skipped duplicate content for %s (same bytes as %s)',
+                            source.id,
+                            path,
+                            dup_after.id,
+                        )
+                        return
 
                     await Knowledges.add_file_to_knowledge_by_id(
                         knowledge_id=source.knowledge_id,

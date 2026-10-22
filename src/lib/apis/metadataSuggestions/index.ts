@@ -2,6 +2,18 @@ import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 // --- LLM Metadata Enrichment ---
 
+export type KnowledgeEnrichmentFile = {
+	id: string;
+	filename: string | null;
+	title: string | null;
+	ignored: boolean;
+	ignored_reason: string | null;
+	ignored_at: number | null;
+	improved_at: number | null;
+	size: number | null;
+	content_type: string | null;
+};
+
 export type MetadataScan = {
 	id: string;
 	knowledge_id: string;
@@ -14,6 +26,9 @@ export type MetadataScan = {
 	test_run: boolean;
 	test_preview: Record<string, any> | null;
 	reembedded: number;
+	content_updated: number;
+	titles_updated: number;
+	ignored: number;
 	status: 'running' | 'completed' | 'failed' | 'cancelled';
 	total_files: number;
 	processed_files: number;
@@ -29,22 +44,28 @@ export type MetadataProposal = {
 	scan_id: string;
 	knowledge_id: string;
 	file_id: string;
+	user_id: string;
 	proposed_title: string | null;
 	proposed_description: string | null;
 	proposed_summary: string | null;
 	proposed_tags: string[] | null;
 	proposed_keywords: string[] | null;
 	proposed_extra: Record<string, string> | null;
+	proposed_content: string | null;
 	previous_title: string | null;
 	previous_description: string | null;
 	previous_summary: string | null;
 	previous_tags: string[] | null;
 	previous_keywords: string[] | null;
 	previous_extra: Record<string, string> | null;
+	previous_content_excerpt: string | null;
+	content_changed: boolean;
 	redaction_count: number;
 	proposer_model_id: string;
 	status: 'pending' | 'applied' | 'dismissed';
 	created_at: number;
+	applied_at: number | null;
+	applied_by: string | null;
 };
 
 export type StartScanInput = {
@@ -55,6 +76,11 @@ export type StartScanInput = {
 	file_id?: string | null;
 	max_parallel?: number;
 	test_run?: boolean;
+	improve_content?: boolean;
+	update_titles?: boolean;
+	ignore_low_value?: boolean;
+	force?: boolean;
+	include_ignored?: boolean;
 };
 
 const base = `${WEBUI_API_BASE_URL}/metadata-suggestions`;
@@ -105,28 +131,44 @@ export const getMetadataProposals = async (
 	{
 		knowledgeId,
 		scanId,
-		status = 'pending',
+		status,
 		limit = 200
-	}: { knowledgeId?: string | null; scanId?: string | null; status?: string; limit?: number }
+	}: {
+		knowledgeId?: string | null;
+		scanId?: string | null;
+		status?: string | null;
+		limit?: number;
+	}
 ): Promise<MetadataProposal[]> => {
-	const params = new URLSearchParams({ status, limit: String(limit) });
+	const params = new URLSearchParams({ limit: String(limit) });
+	if (status) params.set('status', status);
 	if (knowledgeId) params.set('knowledge_id', knowledgeId);
 	if (scanId) params.set('scan_id', scanId);
 	return req(`${base}/proposals?${params}`, token);
 };
 
-export const applyMetadataProposal = async (token: string, id: string): Promise<boolean> =>
-	req(`${base}/proposals/${id}/apply`, token, { method: 'POST' });
-
-export const dismissMetadataProposal = async (token: string, id: string): Promise<boolean> =>
-	req(`${base}/proposals/${id}/dismiss`, token, { method: 'POST' });
-
-export const applyAllMetadataProposals = async (
+export const getEnrichmentFiles = async (
 	token: string,
 	knowledgeId: string,
-	scanId?: string | null
-): Promise<{ status: boolean; applied: number; skipped: string[] }> => {
+	includeIgnored = false
+): Promise<KnowledgeEnrichmentFile[]> => {
 	const params = new URLSearchParams({ knowledge_id: knowledgeId });
-	if (scanId) params.set('scan_id', scanId);
-	return req(`${base}/proposals/apply-all?${params}`, token, { method: 'POST' });
+	if (includeIgnored) params.set('include_ignored', 'true');
+	return req(`${base}/files?${params}`, token);
 };
+
+export const ignoreEnrichmentFile = async (
+	token: string,
+	fileId: string,
+	reason?: string
+): Promise<{ status: boolean }> =>
+	req(`${base}/files/${fileId}/ignore`, token, {
+		method: 'POST',
+		body: JSON.stringify({ reason: reason ?? null })
+	});
+
+export const unignoreEnrichmentFile = async (
+	token: string,
+	fileId: string
+): Promise<{ status: boolean }> =>
+	req(`${base}/files/${fileId}/unignore`, token, { method: 'POST' });

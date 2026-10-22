@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.metadata_proposal import (
@@ -21,7 +21,6 @@ from open_webui.models.metadata_proposal import (
     MetadataScans,
 )
 from open_webui.utils.auth import get_admin_user
-from open_webui.utils.metadata_suggest import apply_proposal
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -86,71 +85,91 @@ async def get_scan(id: str, user=Depends(get_admin_user)):
 async def list_proposals(
     knowledge_id: Optional[str] = None,
     scan_id: Optional[str] = None,
-    status_filter: Optional[str] = 'pending',
+    status: Optional[str] = None,
     limit: int = 200,
     user=Depends(get_admin_user),
 ):
+    """Audit trail of what the enrichment changed.
+
+    The approval queue is gone: every proposal is applied automatically by
+    the scan, so this endpoint is a history view. Pass no status to get
+    everything, or 'applied' / 'no_change' / 'failed' to filter.
+    """
     return await MetadataProposals.get_proposals(
-        knowledge_id=knowledge_id, scan_id=scan_id, status=status_filter, limit=limit
+        knowledge_id=knowledge_id, scan_id=scan_id, status=status, limit=limit
     )
 
 
-@router.post('/proposals/{id}/apply')
-async def apply_proposal_by_id(id: str, request: Request, user=Depends(get_admin_user)):
-    proposal = await MetadataProposals.get_proposal(id)
-    if not proposal:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail='Proposal not found')
-    if proposal.status != 'pending':
-        raise HTTPException(status.HTTP_409_CONFLICT, detail=f'Proposal already {proposal.status}')
-    try:
-        await apply_proposal(proposal)
-    except ValueError as e:
-        raise HTTPException(status.HTTP_410_GONE, detail=str(e))
-    await MetadataProposals.set_status(id, 'applied', applied_by=user.id)
-    # Fire-and-forget re-embed so the applied metadata reaches the vectors.
-    from open_webui.models.files import Files as _Files
-    from open_webui.utils.metadata_suggest import reembed_file
+@router.get('/files')
+async def list_enrichment_files(
+    knowledge_id: str,
+    include_ignored: bool = True,
+    user=Depends(get_admin_user),
+):
+    """List the knowledge base files with their enrichment state.
 
-    file = await _Files.get_file_by_id(proposal.file_id)
-    if file:
-        asyncio.create_task(reembed_file(request.app, file, proposal.knowledge_id))
+    Used by the Metadata Enrichment panel to show which files are ignored
+    (and let the admin un-ignore them).
+    """
+    files = await Knowledges.get_files_by_id(knowledge_id)
+    out = []
+    for f in files:
+        meta = f.meta or {}
+        ignored = bool(meta.get('ignored'))
+        if ignored and not include_ignored:
+            continue
+        out.append(
+            {
+                'id': f.id,
+                'filename': f.filename,
+                'title': meta.get('title'),
+                'ignored': ignored,
+                'ignored_reason': meta.get('ignored_reason'),
+                'ignored_at': meta.get('ignored_at'),
+                'improved_at': meta.get('metadata_improved_at'),
+                'size': meta.get('size'),
+                'content_type': meta.get('content_type'),
+            }
+        )
+    return out
+
+
+@router.post('/files/{id}/ignore')
+async def ignore_file(
+    id: str,
+    body: Optional[dict] = Body(default=None),
+    user=Depends(get_admin_user),
+):
+    """Mark a file as ignored.
+
+    An ignored file is excluded from knowledge queries (its vectors are
+    removed) but stays in the knowledge base, so it can be un-ignored
+    later. Unlike a delete, a GitHub-synced file is not re-added by the
+    next sync - the flag travels with the file metadata.
+    """
+    from open_webui.models.files import Files as _Files
+    from open_webui.utils.metadata_suggest import set_file_ignored
+
+    file = await _Files.get_file_by_id(id)
+    if not file:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail='File not found')
+    reason = (body or {}).get('reason') or 'manual'
+    ok = await set_file_ignored(file, reason=reason)
+    if not ok:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Could not ignore file')
     return {'status': True}
 
 
-@router.post('/proposals/{id}/dismiss')
-async def dismiss_proposal_by_id(id: str, user=Depends(get_admin_user)):
-    proposal = await MetadataProposals.get_proposal(id)
-    if not proposal:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail='Proposal not found')
-    if proposal.status != 'pending':
-        raise HTTPException(status.HTTP_409_CONFLICT, detail=f'Proposal already {proposal.status}')
-    await MetadataProposals.set_status(id, 'dismissed')
-    return {'status': True}
-
-
-@router.post('/proposals/apply-all')
-async def apply_all_proposals(knowledge_id: str,
-    request: Request, scan_id: Optional[str] = None, user=Depends(get_admin_user)):
-    """Bulk-apply every pending proposal in a KB (optionally one scan)."""
-    pending = await MetadataProposals.get_proposals(
-        knowledge_id=knowledge_id, scan_id=scan_id, status='pending', limit=10000
-    )
+@router.post('/files/{id}/unignore')
+async def unignore_file(id: str, user=Depends(get_admin_user)):
+    """Un-ignore a file: it is re-embedded and becomes queryable again."""
     from open_webui.models.files import Files as _Files
-    from open_webui.utils.metadata_suggest import reembed_file
+    from open_webui.utils.metadata_suggest import clear_file_ignored
 
-    applied, skipped = 0, []
-    reembed_tasks = []
-    for proposal in pending:
-        try:
-            await apply_proposal(proposal)
-            await MetadataProposals.set_status(proposal.id, 'applied', applied_by=user.id)
-            file = await _Files.get_file_by_id(proposal.file_id)
-            if file:
-                reembed_tasks.append(reembed_file(request.app, file, proposal.knowledge_id))
-            applied += 1
-        except ValueError as e:
-            skipped.append(f'{proposal.id}: {e}')
-            await MetadataProposals.set_status(proposal.id, 'dismissed')
-    if reembed_tasks:
-        asyncio.gather(*reembed_tasks)  # fire-and-forget batch re-embed
-    return {'status': True, 'applied': applied, 'skipped': skipped}
+    file = await _Files.get_file_by_id(id)
+    if not file:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail='File not found')
+    ok = await clear_file_ignored(file)
+    if not ok:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Could not un-ignore file')
+    return {'status': True}

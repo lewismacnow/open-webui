@@ -5,17 +5,17 @@
 		cancelMetadataScan,
 		startMetadataScan,
 		getMetadataScans,
-		getMetadataProposals,
-		applyMetadataProposal,
-		dismissMetadataProposal,
-		applyAllMetadataProposals,
+		getEnrichmentFiles,
+		ignoreEnrichmentFile,
+		unignoreEnrichmentFile,
 		type MetadataScan,
-		type MetadataProposal
+		type KnowledgeEnrichmentFile
 	} from '$lib/apis/metadataSuggestions';
 	import { getKnowledgeBases } from '$lib/apis/knowledge';
 	import { getAllModels } from '$lib/apis/models';
 	import { getModels } from '$lib/apis';
 	import { getKnowledgeFiles } from '$lib/apis/knowledge';
+	import { formatFileSize } from '$lib/utils';
 
 	import Switch from '$lib/components/common/Switch.svelte';
 	import AdminSettingField from './AdminSettingField.svelte';
@@ -34,12 +34,16 @@
 		{ id: 'audience', label: 'Audience' }
 	];
 
+	const IGNORED_REASON_LABELS: Record<string, string> = {
+		low_value: 'Low value',
+		empty: 'Empty',
+		links_only: 'Links only',
+		manual: 'Manual'
+	};
+
 	let knowledgeBases: any[] = [];
 	let baseModels: any[] = [];
 	let workspaceModels: any[] = [];
-	// Proposal ids whose long-field (description/summary) diff is expanded.
-	let expandedProposals = new Set<string>();
-	let showNoChange: boolean = false;
 	let fileDropdownOpen: boolean = false;
 	// Single-file mode picker state.
 	let kbFiles: any[] = [];
@@ -59,11 +63,22 @@
 	let scanFileId = '';
 	let maxParallel = 1;
 	let acknowledgedCost = false;
+	// Scan behaviour flags (new automatic mode).
+	let improveContent = true;
+	let updateTitles = true;
+	let ignoreLowValue = true;
+	let forceReenrich = false;
+	let includeIgnored = false;
 
 	// Progress + results
 	let latestScan: MetadataScan | null = null;
-	let proposals: MetadataProposal[] = [];
 	let pollTimer: any = null;
+
+	// Ignored files section state.
+	let showIgnoredOnly = false;
+	let enrichmentFiles: KnowledgeEnrichmentFile[] = [];
+	let enrichmentFilesLoading = false;
+	let ignoreBusy: Record<string, boolean> = {};
 
 	// Friendly labels for common owned_by values; unknown providers fall
 	// back to titlecase so every group still reads cleanly.
@@ -77,7 +92,7 @@
 		groq: 'Groq',
 		mistral: 'Mistral',
 		cohere: 'Cohere',
-		'openrouter': 'OpenRouter',
+		openrouter: 'OpenRouter',
 		together: 'Together',
 		deepseek: 'DeepSeek',
 		xai: 'xAI',
@@ -105,17 +120,18 @@
 		const q = kbFileFilter.trim().toLowerCase();
 		if (!q) return kbFiles;
 		return kbFiles.filter(
-			(f) => (f?.filename ?? '').toLowerCase().includes(q) || (f?.id ?? '').toLowerCase().includes(q)
+			(f) =>
+				(f?.filename ?? '').toLowerCase().includes(q) || (f?.id ?? '').toLowerCase().includes(q)
 		);
 	})();
 	// Groups 2..N: base models grouped by owned_by, groups + items alphabetical.
 	$: baseGroups = Object.entries(
-			baseModels.reduce((acc: Record<string, any[]>, m) => {
-				const key = (m?.owned_by || 'unknown').toLowerCase();
-				(acc[key] ??= []).push(m);
-				return acc;
-			}, {})
-		)
+		baseModels.reduce((acc: Record<string, any[]>, m) => {
+			const key = (m?.owned_by || 'unknown').toLowerCase();
+			(acc[key] ??= []).push(m);
+			return acc;
+		}, {})
+	)
 		.map(([key, ms]) => [providerLabel(key), [...ms].sort(byName)] as [string, any[]])
 		.sort(([a], [b]) => a.localeCompare(b));
 
@@ -131,12 +147,28 @@
 		try {
 			const scans = await getMetadataScans(token, scanKnowledgeId || null, 5);
 			latestScan = scans[0] ?? null;
-			proposals = await getMetadataProposals(token, {
-				knowledgeId: scanKnowledgeId || null,
-				status: showNoChange ? null : 'pending'
-			});
 		} catch (e) {
 			console.error(e);
+		}
+	}
+
+	async function refreshIgnoredFiles() {
+		if (!scanKnowledgeId) {
+			enrichmentFiles = [];
+			return;
+		}
+		enrichmentFilesLoading = true;
+		try {
+			enrichmentFiles = await getEnrichmentFiles(
+				localStorage.token,
+				scanKnowledgeId,
+				showIgnoredOnly
+			);
+		} catch (e) {
+			console.error(e);
+			toast.error(String(e));
+		} finally {
+			enrichmentFilesLoading = false;
 		}
 	}
 
@@ -148,11 +180,13 @@
 				stopPolling();
 				if (latestScan.status === 'completed') {
 					toast.success(
-						$i18n.t('Scan complete: {p} proposals from {n} files', {
+						$i18n.t('Scan complete: {p} changes from {n} files', {
 							p: latestScan.proposals_created,
 							n: latestScan.processed_files
 						})
 					);
+					// Refresh ignored-files list after a successful scan.
+					refreshIgnoredFiles();
 				}
 			}
 		}, 3000);
@@ -181,7 +215,12 @@
 				model_id: scanModelId,
 				mode: 'all',
 				test_run: true,
-				max_parallel: 1
+				max_parallel: 1,
+				improve_content: improveContent,
+				update_titles: updateTitles,
+				ignore_low_value: ignoreLowValue,
+				include_ignored: includeIgnored,
+				force: forceReenrich
 			});
 			toast.info($i18n.t('Test run started - 1 file, preview only'));
 			startPolling();
@@ -217,9 +256,14 @@
 				mode: scanMode,
 				attributes: scanMode === 'attributes' ? selectedAttributes : null,
 				file_id: scanMode === 'file' ? scanFileId.trim() : null,
-				max_parallel: maxParallel
+				max_parallel: maxParallel,
+				improve_content: improveContent,
+				update_titles: updateTitles,
+				ignore_low_value: ignoreLowValue,
+				include_ignored: includeIgnored,
+				force: forceReenrich
 			});
-			toast.info($i18n.t('Scan started'));
+			toast.info($i18n.t('Enrichment started'));
 			startPolling();
 		} catch (e) {
 			toast.error(String(e));
@@ -239,60 +283,30 @@
 		}
 	}
 
-	async function applyOne(proposal: MetadataProposal) {
+	async function setFileIgnored(file: KnowledgeEnrichmentFile, ignored: boolean) {
+		ignoreBusy = { ...ignoreBusy, [file.id]: true };
 		try {
-			await applyMetadataProposal(localStorage.token, proposal.id);
-			proposals = proposals.filter((p) => p.id !== proposal.id);
+			if (ignored) {
+				await ignoreEnrichmentFile(localStorage.token, file.id);
+				toast.success(
+					$i18n.t('"{name}" is now ignored and excluded from knowledge queries.', {
+						name: file.title || file.filename || file.id
+					})
+				);
+			} else {
+				await unignoreEnrichmentFile(localStorage.token, file.id);
+				toast.success(
+					$i18n.t('"{name}" is restored and will be re-embedded.', {
+						name: file.title || file.filename || file.id
+					})
+				);
+			}
+			await refreshIgnoredFiles();
 		} catch (e) {
 			toast.error(String(e));
+		} finally {
+			ignoreBusy = { ...ignoreBusy, [file.id]: false };
 		}
-	}
-
-	async function dismissOne(proposal: MetadataProposal) {
-		try {
-			await dismissMetadataProposal(localStorage.token, proposal.id);
-			proposals = proposals.filter((p) => p.id !== proposal.id);
-		} catch (e) {
-			toast.error(String(e));
-		}
-	}
-
-	async function applyAll() {
-		if (!confirm($i18n.t('Apply all pending proposals? Existing metadata will be overwritten.')))
-			return;
-		try {
-			const res = await applyAllMetadataProposals(localStorage.token, scanKnowledgeId);
-			toast.success($i18n.t('{n} proposals applied', { n: res.applied }));
-			await refresh();
-		} catch (e) {
-			toast.error(String(e));
-		}
-	}
-
-	function tagsEqual(a: string[] | null, b: string[] | null): boolean {
-		const sa = [...(a ?? [])].sort();
-		const sb = [...(b ?? [])].sort();
-		return sa.length === sb.length && sa.every((v, i) => v === sb[i]);
-	}
-
-	function toggleExpanded(id: string) {
-		if (expandedProposals.has(id)) {
-			expandedProposals.delete(id);
-		} else {
-			expandedProposals.add(id);
-		}
-		expandedProposals = expandedProposals; // trigger reactivity
-	}
-
-	function attrOf(p: MetadataProposal): string {
-		const parts: string[] = [];
-		if (p.proposed_title) parts.push('title');
-		if (p.proposed_description) parts.push('description');
-		if (p.proposed_summary) parts.push('summary');
-		if (p.proposed_tags) parts.push('tags');
-		if (p.proposed_keywords) parts.push('keywords');
-		if (p.proposed_extra) parts.push(...Object.keys(p.proposed_extra));
-		return parts.join(', ');
 	}
 
 	async function loadKbFiles(knowledgeId: string) {
@@ -305,7 +319,7 @@
 		try {
 			const list = await getKnowledgeFiles(localStorage.token, knowledgeId, '', 1, 200);
 			if (myToken !== kbFilesFetchToken) return; // stale response
-			kbFiles = Array.isArray(list) ? list : (list?.items ?? []);
+			kbFiles = Array.isArray(list) ? list : ((list as any)?.items ?? []);
 		} catch (e) {
 			console.error('loadKbFiles failed:', e);
 			if (myToken === kbFilesFetchToken) kbFiles = [];
@@ -322,6 +336,18 @@
 	}
 	$: if (scanMode === 'file' && scanKnowledgeId && kbFiles.length === 0 && !kbFilesLoading) {
 		loadKbFiles(scanKnowledgeId);
+	}
+	// Reload the ignored-files list when KB changes or the "show ignored only" toggle flips.
+	let _ignoredReloadKb = '';
+	$: if (scanKnowledgeId) {
+		const key = `${scanKnowledgeId}|${showIgnoredOnly ? 1 : 0}`;
+		if (key !== _ignoredReloadKb) {
+			_ignoredReloadKb = key;
+			refreshIgnoredFiles();
+		}
+	} else if (_ignoredReloadKb !== '') {
+		_ignoredReloadKb = '';
+		enrichmentFiles = [];
 	}
 
 	onMount(async () => {
@@ -386,7 +412,7 @@
 					</optgroup>
 				{/if}
 				{#each baseGroups as [label, groupModels] (label)}
-					<optgroup label={label}>
+					<optgroup {label}>
 						{#each groupModels as model (model.id)}
 							<option value={model.id}>{model.name}</option>
 						{/each}
@@ -442,7 +468,9 @@
 				</button>
 				{#if fileDropdownOpen}
 					<div class="fixed inset-0 z-20" on:click={() => (fileDropdownOpen = false)}></div>
-					<div class="absolute left-0 right-0 top-full mt-1 z-30 max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-850 bg-white dark:bg-gray-950 shadow-lg divide-y divide-gray-100 dark:divide-gray-850">
+					<div
+						class="absolute left-0 right-0 top-full mt-1 z-30 max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-850 bg-white dark:bg-gray-950 shadow-lg divide-y divide-gray-100 dark:divide-gray-850"
+					>
 						{#if kbFilesLoading}
 							<div class="px-3 py-2 text-xs text-gray-400">{$i18n.t('Loading files…')}</div>
 						{:else if filteredKbFiles.length === 0}
@@ -455,7 +483,10 @@
 							{#each filteredKbFiles as file (file.id)}
 								<button
 									type="button"
-									class="w-full text-left px-3 py-2 text-xs bg-white dark:bg-gray-950 hover:bg-gray-50 dark:hover:bg-gray-850 flex items-center justify-between gap-2 {selectedKbFileId === file.id ? 'bg-blue-50 dark:bg-blue-950/30' : ''}"
+									class="w-full text-left px-3 py-2 text-xs bg-white dark:bg-gray-950 hover:bg-gray-50 dark:hover:bg-gray-850 flex items-center justify-between gap-2 {selectedKbFileId ===
+									file.id
+										? 'bg-blue-50 dark:bg-blue-950/30'
+										: ''}"
 									on:click={() => {
 										selectedKbFileId = file.id;
 										fileDropdownOpen = false;
@@ -482,6 +513,53 @@
 			{/if}
 		{/if}
 
+		<!-- New scan behaviour flags (automatic mode). -->
+		<div class="rounded-lg border border-gray-100 dark:border-gray-850 p-3 space-y-2">
+			<div class="text-xs text-gray-500 dark:text-gray-400 font-medium mb-1">
+				{$i18n.t('Options')}
+			</div>
+			<AdminSettingField
+				label={$i18n.t('Improve file content')}
+				description={$i18n.t(
+					'Let the model rewrite the file body to fix formatting, OCR artefacts, or short answers. PII is still redacted.'
+				)}
+			>
+				<Switch bind:state={improveContent} />
+			</AdminSettingField>
+			<AdminSettingField
+				label={$i18n.t('Improve titles')}
+				description={$i18n.t(
+					'Update the embedded title (meta.title) so queries match more precisely.'
+				)}
+			>
+				<Switch bind:state={updateTitles} />
+			</AdminSettingField>
+			<AdminSettingField
+				label={$i18n.t('Ignore low-value files')}
+				description={$i18n.t(
+					'Files the model marks as empty, link-only, or otherwise not worth indexing are flagged ignored automatically.'
+				)}
+			>
+				<Switch bind:state={ignoreLowValue} />
+			</AdminSettingField>
+			<AdminSettingField
+				label={$i18n.t('Re-enrich files already processed')}
+				description={$i18n.t(
+					'By default files enriched in a recent scan are skipped. Turn this on to force re-processing.'
+				)}
+			>
+				<Switch bind:state={forceReenrich} />
+			</AdminSettingField>
+			<AdminSettingField
+				label={$i18n.t('Include ignored files')}
+				description={$i18n.t(
+					'Re-run enrichment on files currently flagged ignored. Off by default; ignored files are excluded.'
+				)}
+			>
+				<Switch bind:state={includeIgnored} />
+			</AdminSettingField>
+		</div>
+
 		<AdminSettingField
 			label={$i18n.t('Max parallel inference requests')}
 			description={$i18n.t(
@@ -504,69 +582,93 @@
 			<Switch bind:state={acknowledgedCost} />
 		</AdminSettingField>
 
-		<button
-			type="button"
-			class="px-3.5 py-1.5 text-sm font-medium bg-black dark:bg-white text-white dark:text-black rounded-lg disabled:opacity-50"
-			disabled={busy}
-			on:click={runScan}
-		>
-			{$i18n.t('Enrich selected files')}
-		</button>
-		<button
-			type="button"
-			class="px-3.5 py-1.5 text-sm font-medium rounded-lg border border-gray-200 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-850 disabled:opacity-50"
-			disabled={busy}
-			on:click={runTest}
-		>
-			{$i18n.t('Test run (1 file)')}
-		</button>
+		<div class="flex flex-wrap gap-2 items-center">
+			<button
+				type="button"
+				class="px-3.5 py-1.5 text-sm font-medium bg-black dark:bg-white text-white dark:text-black rounded-lg disabled:opacity-50"
+				disabled={busy}
+				on:click={runScan}
+			>
+				{$i18n.t('Enrich')}
+			</button>
+			<button
+				type="button"
+				class="px-3.5 py-1.5 text-sm font-medium rounded-lg border border-gray-200 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-850 disabled:opacity-50"
+				disabled={busy}
+				on:click={runTest}
+			>
+				{$i18n.t('Test run (1 file)')}
+			</button>
+		</div>
 		<p class="text-xs text-gray-400 mt-2">
 			{$i18n.t(
-				'Enrichment updates each file and re-embeds it (like re-indexing) so knowledge queries match on the new metadata. This takes time per file but makes retrieval more precise.'
+				'Enrichment runs automatically: changes are applied directly without a review step, changed files are re-embedded (re-indexed), and the model may also improve file content. Ignored files are excluded from knowledge queries.'
 			)}
 		</p>
 
-	{#if latestScan}
-		<div class="mt-4 p-3 rounded-xl border border-gray-100 dark:border-gray-850 text-xs">
-			<div class="flex items-center justify-between mb-2">
-				<span class="font-medium">
-					{latestScan.test_run ? 'Test run (1 file) · ' : ''}{modeLabels[latestScan.mode] || latestScan.mode}
-					{#if latestScan.status === 'running'}
-						<span class="text-blue-500">· {$i18n.t('running')}</span>
-					{:else if latestScan.status === 'completed'}
-						<span class="text-green-500">· {$i18n.t('completed')}</span>
-					{:else}
-						<span class="text-red-500">· {latestScan.status}</span>
-					{/if}
-				</span>
-				<span class="text-gray-400">
-					{latestScan.processed_files}/{latestScan.total_files}
-					· {latestScan.proposals_created}
-					{$i18n.t('proposals')}
-					· {latestScan.redactions}
-					{$i18n.t('redacted')}
+		{#if latestScan}
+			<div class="mt-4 p-3 rounded-xl border border-gray-100 dark:border-gray-850 text-xs">
+				<div class="flex items-center justify-between mb-2">
+					<span class="font-medium">
+						{latestScan.test_run ? 'Test run (1 file) · ' : ''}{modeLabels[latestScan.mode] ||
+							latestScan.mode}
+						{#if latestScan.status === 'running'}
+							<span class="text-blue-500">· {$i18n.t('running')}</span>
+						{:else if latestScan.status === 'completed'}
+							<span class="text-green-500">· {$i18n.t('completed')}</span>
+						{:else}
+							<span class="text-red-500">· {latestScan.status}</span>
+						{/if}
+					</span>
+					<span class="text-gray-400">
+						{latestScan.processed_files}/{latestScan.total_files}
+						· {latestScan.proposals_created}
+						{$i18n.t('changed')}
+						· {latestScan.redactions}
+						{$i18n.t('redacted')}
 						· {latestScan.reembedded}
 						{$i18n.t('re-embedded')}
-				</span>
-			</div>
-			{#if latestScan.errors?.length}
-				<div class="mt-2 text-red-500 dark:text-red-400 space-y-0.5">
-					{#each latestScan.errors.slice(0, 5) as err}
-						<div class="truncate" title={err}>{err}</div>
-					{/each}
-					{#if latestScan.errors.length > 5}
-						<div class="text-gray-400">+{latestScan.errors.length - 5} more (see server log)</div>
-					{/if}
+					</span>
 				</div>
-			{/if}
-			<div class="h-1.5 rounded-full bg-gray-100 dark:bg-gray-850 overflow-hidden">
-				<div
-					class="h-full bg-black dark:bg-white transition-all"
-					style="width: {latestScan.total_files
-						? Math.round((latestScan.processed_files / latestScan.total_files) * 100)
-						: 0}%"
-				/>
-			</div>
+				<!-- New automatic-mode breakdown row. -->
+				<div class="flex flex-wrap gap-x-3 gap-y-0.5 text-gray-400 mb-2">
+					<span>
+						<span class="text-gray-700 dark:text-gray-200 font-medium"
+							>{latestScan.content_updated ?? 0}</span
+						>
+						{$i18n.t('content updated')}
+					</span>
+					<span>
+						<span class="text-gray-700 dark:text-gray-200 font-medium"
+							>{latestScan.titles_updated ?? 0}</span
+						>
+						{$i18n.t('titles updated')}
+					</span>
+					<span>
+						<span class="text-gray-700 dark:text-gray-200 font-medium"
+							>{latestScan.ignored ?? 0}</span
+						>
+						{$i18n.t('ignored')}
+					</span>
+				</div>
+				{#if latestScan.errors?.length}
+					<div class="mt-2 text-red-500 dark:text-red-400 space-y-0.5">
+						{#each latestScan.errors.slice(0, 5) as err}
+							<div class="truncate" title={err}>{err}</div>
+						{/each}
+						{#if latestScan.errors.length > 5}
+							<div class="text-gray-400">+{latestScan.errors.length - 5} more (see server log)</div>
+						{/if}
+					</div>
+				{/if}
+				<div class="h-1.5 rounded-full bg-gray-100 dark:bg-gray-850 overflow-hidden">
+					<div
+						class="h-full bg-black dark:bg-white transition-all"
+						style="width: {latestScan.total_files
+							? Math.round((latestScan.processed_files / latestScan.total_files) * 100)
+							: 0}%"
+					/>
+				</div>
 
 				{#if latestScan.status === 'running'}
 					<div class="mt-2 text-right">
@@ -579,11 +681,13 @@
 						</button>
 					</div>
 				{/if}
-		</div>
-	{/if}
-
-	</div>	{#if latestScan?.test_preview}
-		<div class="mt-3 p-3 rounded-xl border border-blue-200 dark:border-blue-900/50 bg-blue-50/50 dark:bg-blue-950/20 text-xs space-y-2">
+			</div>
+		{/if}
+	</div>
+	{#if latestScan?.test_preview}
+		<div
+			class="mt-3 p-3 rounded-xl border border-blue-200 dark:border-blue-900/50 bg-blue-50/50 dark:bg-blue-950/20 text-xs space-y-2"
+		>
 			<div class="font-medium">
 				{$i18n.t('Test run preview')} · {latestScan.test_preview.filename}
 			</div>
@@ -600,164 +704,116 @@
 				<div class="text-gray-400 mt-1.5 mb-0.5">{$i18n.t('Embedding header - after')}:</div>
 				<div class="font-mono text-[10px] break-all">{latestScan.test_preview.header_after}</div>
 			</div>
+			<!-- Content before/after, rendered defensively (keys may be absent). -->
+			{#if latestScan.test_preview.content_before != null || latestScan.test_preview.content_after != null}
+				<div class="pt-1 border-t border-blue-200 dark:border-blue-900/50">
+					<div class="text-gray-400 mb-0.5">{$i18n.t('Content - before')}:</div>
+					<div
+						class="font-mono text-[10px] whitespace-pre-wrap break-words max-h-40 overflow-y-auto"
+					>
+						{latestScan.test_preview.content_before ?? ''}
+					</div>
+					<div class="text-gray-400 mt-1.5 mb-0.5">{$i18n.t('Content - after')}:</div>
+					<div
+						class="font-mono text-[10px] whitespace-pre-wrap break-words max-h-40 overflow-y-auto"
+					>
+						{latestScan.test_preview.content_after ?? ''}
+					</div>
+				</div>
+			{/if}
 		</div>
 	{/if}
 </AdminSettingSection>
 
-<AdminSettingSection title={$i18n.t('Pending changes')}>
-	<div class="flex items-center gap-2 mb-3">
-		<label class="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer">
-			<input
-				type="checkbox"
-				bind:checked={showNoChange}
-				class="w-3.5 h-3.5 accent-blue-500"
-			/>
-			{$i18n.t('Include "looks complete" entries')}
-		</label>
-	</div>
-	<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+<AdminSettingSection title={$i18n.t('Ignored files')}>
+	<p class="text-xs text-gray-500 dark:text-gray-400">
 		{$i18n.t(
-			'When the model finds a missing field, the value is applied directly. Existing fields are queued for review. PII/secrets in proposals are redacted to [pii-redacted] automatically.'
+			'Ignored files stay in the knowledge base but are excluded from knowledge queries. Use this for empty documents, link-only pages, or other content that is not worth indexing. You can restore a file at any time.'
 		)}
 	</p>
 
-	{#if proposals.length}
-		<div class="flex justify-end mb-2">
-			<button
-				type="button"
-				class="text-xs px-3 py-1.5 rounded-lg bg-black dark:bg-white text-white dark:text-black"
-				on:click={applyAll}
-			>
-				{$i18n.t('Apply all')}
-			</button>
+	<div class="flex items-center gap-3 flex-wrap mt-1">
+		<label
+			class="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer"
+		>
+			<input type="checkbox" bind:checked={showIgnoredOnly} class="w-3.5 h-3.5 accent-blue-500" />
+			{$i18n.t('Show ignored files only')}
+		</label>
+		<button
+			type="button"
+			class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-850 disabled:opacity-50"
+			disabled={enrichmentFilesLoading || !scanKnowledgeId}
+			on:click={refreshIgnoredFiles}
+		>
+			{$i18n.t('Refresh')}
+		</button>
+	</div>
+
+	{#if !scanKnowledgeId}
+		<div class="text-xs text-gray-400">
+			{$i18n.t('Select a knowledge base above to see its files.')}
 		</div>
-		<div class="space-y-2">
-			{#each proposals as proposal (proposal.id)}
-				<div class="p-3 rounded-xl border border-gray-100 dark:border-gray-850">
-					<div class="flex items-center justify-between gap-3 mb-2">
-						<span class="text-xs font-mono text-gray-400 truncate">
-							{proposal.file_id.slice(0, 8)}…
-							<span class="ml-2 not-italic text-blue-500">{attrOf(proposal)}</span>
-							{#if proposal.redaction_count > 0}
-								<span class="ml-2 text-amber-500"
-									>· {proposal.redaction_count} {$i18n.t('redactions')}</span
-								>
-							{/if}
-						</span>
-						<div class="flex gap-1.5 shrink-0">
-							<button
-								type="button"
-								class="text-xs px-2.5 py-1 rounded-lg bg-black dark:bg-white text-white dark:text-black"
-								on:click={() => applyOne(proposal)}
-							>
-								{$i18n.t('Apply')}
-							</button>
-							<button
-								type="button"
-								class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-850"
-								on:click={() => dismissOne(proposal)}
-							>
-								{$i18n.t('Dismiss')}
-							</button>
-						</div>
-					</div>
-					<div class="text-xs space-y-1.5">
-						{#if proposal.proposed_title}
-							<div>
-								<span class="text-gray-400">{$i18n.t('Title')}:</span>
-								{#if proposal.previous_title && proposal.previous_title !== proposal.proposed_title}
-									<s class="text-gray-400 mr-1">{proposal.previous_title}</s>
-									<span class="text-gray-400 mr-1">→</span>
-								{/if}
-								<span class="font-medium">{proposal.proposed_title}</span>
-							</div>
-						{/if}
-
-						{#if proposal.proposed_description}
-							<div>
-								<span class="text-gray-400">{$i18n.t('Description')}:</span>
-								{#if proposal.previous_description && proposal.previous_description !== proposal.proposed_description}
-									<button
-										type="button"
-										class="ml-1 underline text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-										on:click={() => toggleExpanded(proposal.id)}
-									>
-										{expandedProposals.has(proposal.id)
-											? $i18n.t('hide before')
-											: $i18n.t('show before')}
-									</button>
-								{/if}
-								{#if proposal.previous_description && proposal.previous_description !== proposal.proposed_description && expandedProposals.has(proposal.id)}
-									<s class="block text-gray-400 line-clamp-3 mt-0.5">{proposal
-										.previous_description}</s>
-								{/if}
-								<span class="block mt-0.5">{proposal.proposed_description}</span>
-							</div>
-						{/if}
-
-						{#if proposal.proposed_summary}
-							<div>
-								<span class="text-gray-400">{$i18n.t('Summary')}:</span>
-								{#if proposal.previous_summary && proposal.previous_summary !== proposal.proposed_summary}
-									<button
-										type="button"
-										class="ml-1 underline text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-										on:click={() => toggleExpanded(proposal.id)}
-									>
-										{expandedProposals.has(proposal.id)
-											? $i18n.t('hide before')
-											: $i18n.t('show before')}
-									</button>
-								{/if}
-								{#if proposal.previous_summary && proposal.previous_summary !== proposal.proposed_summary && expandedProposals.has(proposal.id)}
-									<s class="block text-gray-400 line-clamp-3 mt-0.5">{proposal
-										.previous_summary}</s>
-								{/if}
-								<span class="block mt-0.5 line-clamp-3">{proposal.proposed_summary}</span>
-							</div>
-						{/if}
-
-						{#if proposal.proposed_tags && !tagsEqual(proposal.proposed_tags, proposal.previous_tags)}
-							<div class="flex flex-wrap gap-1 pt-0.5">
-								{#each proposal.previous_tags ?? [] as tag (tag)}
-									{#if !proposal.proposed_tags.includes(tag)}
-										<span class="px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-950/40 text-red-600 dark:text-red-300 text-[10px] line-through">{tag}</span>
-										{/if}
-								{/each}
-								{#each proposal.proposed_tags as tag (tag)}
-									{#if (proposal.previous_tags ?? []).includes(tag)}
-										<span class="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-gray-500 dark:text-gray-400 text-[10px]">{tag}</span>
-									{:else}
-										<span class="px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-950/40 text-green-700 dark:text-green-300 text-[10px]">+{tag}</span>
-									{/if}
-								{/each}
-							</div>
-						{:else if proposal.proposed_tags}
-							<div class="flex flex-wrap gap-1 pt-0.5">
-								{#each proposal.proposed_tags as tag (tag)}
-									<span class="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-[10px]">{tag}</span>
-								{/each}
-							</div>
-						{/if}
-						{#if proposal.proposed_keywords}
-							<div class="flex flex-wrap gap-1 pt-0.5">
-								{#each proposal.proposed_keywords as kw (kw)}
-									<span class="px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 text-[10px] font-mono">{kw}</span>
-								{/each}
-							</div>
-						{/if}
-						{#if proposal.proposed_extra}
-							<div class="flex flex-wrap gap-x-4 gap-y-0.5 pt-0.5 text-gray-500 dark:text-gray-400">
-								{#each Object.entries(proposal.proposed_extra) as [k, v] (k)}
-									<span>{k.replace('_', ' ')}: <span class="font-medium text-gray-700 dark:text-gray-200">{v}</span></span>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				</div>
-			{/each}
+	{:else if enrichmentFilesLoading}
+		<div class="text-xs text-gray-400">{$i18n.t('Loading files…')}</div>
+	{:else if enrichmentFiles.length === 0}
+		<div class="text-xs text-gray-400">
+			{showIgnoredOnly
+				? $i18n.t('No ignored files.')
+				: $i18n.t('No files in this knowledge base yet.')}
 		</div>
 	{:else}
-		<div class="text-xs text-gray-400">{$i18n.t('No pending changes. Run a scan to suggest enrichments.')}</div>
+		<div class="rounded-lg border border-gray-100 dark:border-gray-850 overflow-hidden">
+			<div
+				class="grid grid-cols-[1fr_auto_auto_auto] gap-2 px-3 py-1.5 text-[0.6875rem] uppercase tracking-wide text-gray-400 bg-gray-50 dark:bg-gray-900"
+			>
+				<span>{$i18n.t('File')}</span>
+				<span>{$i18n.t('Size')}</span>
+				<span>{$i18n.t('Reason')}</span>
+				<span>{$i18n.t('Action')}</span>
+			</div>
+			<div class="divide-y divide-gray-100 dark:divide-gray-850">
+				{#each enrichmentFiles as file (file.id)}
+					<div class="grid grid-cols-[1fr_auto_auto_auto] gap-2 px-3 py-1.5 text-xs items-center">
+						<span class="min-w-0 truncate" title={file.title || file.filename || file.id}>
+							<span class="font-medium">
+								{file.title || file.filename || $i18n.t('(untitled)')}
+							</span>
+							{#if file.title && file.filename}
+								<span class="ml-1 text-gray-400 truncate">{file.filename}</span>
+							{/if}
+						</span>
+						<span class="text-gray-400 tabular-nums">
+							{file.size != null ? formatFileSize(file.size) : '—'}
+						</span>
+						<span class="text-gray-400">
+							{file.ignored
+								? IGNORED_REASON_LABELS[file.ignored_reason ?? ''] || (file.ignored_reason ?? '—')
+								: '—'}
+						</span>
+						<span>
+							{#if file.ignored}
+								<button
+									type="button"
+									class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-850 disabled:opacity-50"
+									disabled={ignoreBusy[file.id]}
+									on:click={() => setFileIgnored(file, false)}
+								>
+									{$i18n.t('Unignore')}
+								</button>
+							{:else}
+								<button
+									type="button"
+									class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-850 disabled:opacity-50"
+									disabled={ignoreBusy[file.id]}
+									on:click={() => setFileIgnored(file, true)}
+								>
+									{$i18n.t('Ignore')}
+								</button>
+							{/if}
+						</span>
+					</div>
+				{/each}
+			</div>
+		</div>
 	{/if}
 </AdminSettingSection>
