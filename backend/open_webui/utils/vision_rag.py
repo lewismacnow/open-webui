@@ -263,9 +263,17 @@ async def process_image_rag(
     # Batch both config reads to avoid two sequential DB round-trips.
     vision_support_task = Config.get('rag.vision.support_model', '')
     system_prompt_task = Config.get('rag.vision.system_prompt', '')
-    vision_support_model_id_raw, admin_system_prompt_raw = await asyncio.gather(vision_support_task, system_prompt_task)
+    image_rag_prompt_task = Config.get('task.query.image_rag.prompt_template', '')
+    (
+        vision_support_model_id_raw,
+        admin_system_prompt_raw,
+        image_rag_prompt_raw,
+    ) = await asyncio.gather(vision_support_task, system_prompt_task, image_rag_prompt_task)
     vision_support_model_id = (vision_support_model_id_raw or '').strip()
     admin_system_prompt = (admin_system_prompt_raw or '').strip()
+    # An admin-configured "Image RAG Query Generation Prompt" overrides the
+    # built-in describe instruction; an empty value keeps DEFAULT_DESCRIBE_PROMPT.
+    image_rag_prompt = (image_rag_prompt_raw or '').strip()
 
     # Is there anything for the downstream RAG step to retrieve? Model-attached
     # and folder-attached knowledge are already moved from form_data['files']
@@ -379,13 +387,15 @@ async def process_image_rag(
             # user_text and image_parts, not the shared system prompt).
             if admin_system_prompt:
                 describe_messages = [{'role': 'system', 'content': admin_system_prompt}]
-                describe_user_content: list[dict] = [{'type': 'text', 'text': DEFAULT_DESCRIBE_PROMPT}]
+                describe_user_content: list[dict] = [
+                    {'type': 'text', 'text': image_rag_prompt or DEFAULT_DESCRIBE_PROMPT}
+                ]
                 if user_text:
                     describe_user_content.append({'type': 'text', 'text': f"User's message: {user_text}"})
                 describe_user_content.extend(image_parts)
                 describe_messages.append({'role': 'user', 'content': describe_user_content})
             else:
-                describe_instruction = DEFAULT_DESCRIBE_PROMPT
+                describe_instruction = image_rag_prompt or DEFAULT_DESCRIBE_PROMPT
                 if user_text:
                     describe_instruction = f"{describe_instruction}\n\nUser's message: {user_text}"
 

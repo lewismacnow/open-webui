@@ -365,6 +365,7 @@ RETRIEVAL_CONFIG_KEYS = {
     'RAG_RERANKING_ENGINE': 'rag.reranking_engine',
     'RAG_RERANKING_MODEL': 'rag.reranking_model',
     'RAG_TEMPLATE': 'rag.template',
+    'IMAGE_RAG_QUERY_GENERATION_PROMPT_TEMPLATE': 'task.query.image_rag.prompt_template',
     'RELEVANCE_THRESHOLD': 'rag.relevance_threshold',
     'SEARCHAPI_API_KEY': 'web.search.searchapi_api_key',
     'SEARCHAPI_ENGINE': 'web.search.searchapi_engine',
@@ -609,6 +610,7 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'status': True,
         # RAG settings
         'RAG_TEMPLATE': config['rag.template'],
+        'IMAGE_RAG_QUERY_GENERATION_PROMPT_TEMPLATE': config['task.query.image_rag.prompt_template'],
         'TOP_K': config['rag.top_k'],
         'BYPASS_EMBEDDING_AND_RETRIEVAL': config['rag.bypass_embedding_and_retrieval'],
         'RAG_FULL_CONTEXT': config['rag.full_context'],
@@ -1044,6 +1046,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'status': True,
         # RAG settings
         'RAG_TEMPLATE': config['rag.template'],
+        'IMAGE_RAG_QUERY_GENERATION_PROMPT_TEMPLATE': config['task.query.image_rag.prompt_template'],
         'TOP_K': config['rag.top_k'],
         'BYPASS_EMBEDDING_AND_RETRIEVAL': config['rag.bypass_embedding_and_retrieval'],
         'RAG_FULL_CONTEXT': config['rag.full_context'],

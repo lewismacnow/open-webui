@@ -2325,6 +2325,11 @@ VISION_SUPPORT_MODEL = os.getenv('VISION_SUPPORT_MODEL', '')
 
 VISION_SYSTEM_PROMPT = os.getenv('VISION_SYSTEM_PROMPT', '')
 
+# Admin-configurable override for the prompt that turns an image into text
+# for Vision Image RAG. Empty = use the built-in describe instruction
+# (DEFAULT_DESCRIBE_PROMPT in utils/vision_rag.py).
+IMAGE_RAG_QUERY_GENERATION_PROMPT_TEMPLATE = os.getenv('IMAGE_RAG_QUERY_GENERATION_PROMPT_TEMPLATE', '')
+
 try:
     task_model_params = JSONCodec.loads(os.getenv('TASK_MODEL_PARAMS', '{}'))
 except Exception as e:
@@ -3336,6 +3341,7 @@ DEFAULT_CONFIG = {
     'task.model.params': TASK_MODEL_PARAMS,
     'rag.vision.support_model': VISION_SUPPORT_MODEL,
     'rag.vision.system_prompt': VISION_SYSTEM_PROMPT,
+    'task.query.image_rag.prompt_template': IMAGE_RAG_QUERY_GENERATION_PROMPT_TEMPLATE,
     'chat.context_compaction.model': CONTEXT_COMPACTION_MODEL,
     'chat.context_compaction.enable': ENABLE_CONTEXT_COMPACTION,
     'chat.context_compaction.token_threshold': CONTEXT_COMPACTION_TOKEN_THRESHOLD,

@@ -57,6 +57,7 @@ type RAGConfigForm = {
 	ENABLE_ONEDRIVE_INTEGRATION?: boolean;
 	EXTERNAL_DOCUMENT_LOADER_HEADERS?: Record<string, string>;
 	TIKA_SERVER_VERSION?: string | null;
+	IMAGE_RAG_QUERY_GENERATION_PROMPT_TEMPLATE?: string | null;
 	chunk?: ChunkConfigForm;
 	content_extraction?: ContentExtractConfigForm;
 	web_loader_ssl_verification?: boolean;
