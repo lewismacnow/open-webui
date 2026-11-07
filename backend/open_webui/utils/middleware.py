@@ -2632,12 +2632,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         form_data['messages'].append({'role': 'user', 'content': regeneration_prompt})
 
     # Fork: lightweight deterministic context pruning (dedupe, prune, purge errors).
-    # Runs for ALL chats (UI + API) — no LLM cost, reduces token usage before
-    # the more expensive prefix-summarization compaction runs.
-    try:
-        form_data['messages'] = await prune_messages(form_data.get('messages') or [])
-    except Exception:
-        log.exception('Context pruning failed (continuing)')
+    # Runs further down, after process_messages_with_output() - see the comment
+    # at the call site for why the order matters.
 
     if is_saved_chat_id(chat_id) and user_message_id:
         system_message = get_system_message(form_data.get('messages', []))
@@ -2682,6 +2678,17 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         include_file_context=metadata['include_file_context'],
     )
     form_data['messages'] = sanitize_tool_pairs(form_data['messages'])
+
+    # Fork: lightweight deterministic context pruning (dedupe, prune, purge errors).
+    # Runs for ALL chats (UI + API) — no LLM cost. Must run after
+    # process_messages_with_output() because the pruning strategies key off
+    # role='tool' messages and assistant tool_calls arrays, which only exist
+    # once the Responses-API 'output' shape has been converted. Running it
+    # earlier found nothing to prune in the UI path and silently did nothing.
+    try:
+        form_data['messages'] = await prune_messages(form_data.get('messages') or [])
+    except Exception:
+        log.exception('Context pruning failed (continuing)')
 
     system_message = get_system_message(form_data.get('messages', []))
     if system_message:  # Chat Controls/User Settings

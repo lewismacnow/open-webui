@@ -50,6 +50,13 @@
 		CONTEXT_COMPACTION_TOKEN_CAP: 80000,
 		CONTEXT_COMPACTION_RETENTION_PERCENTAGE: 40,
 		CONTEXT_COMPACTION_PROMPT_TEMPLATE: '',
+		CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO: 0.7,
+		ENABLE_CONTEXT_PRUNING: true,
+		ENABLE_CONTEXT_PRUNING_TOOL_OUTPUT: true,
+		CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT: 3,
+		ENABLE_CONTEXT_PRUNING_DEDUPE: true,
+		ENABLE_CONTEXT_PRUNING_PURGE_ERRORS: true,
+		CONTEXT_PRUNING_PURGE_ERROR_TURNS: 2,
 		ENABLE_TOOL_PERMISSIONS: false,
 		ENABLE_TOOL_SEARCH: false,
 		TOOL_SEARCH_DEFER_THRESHOLD: 400,
@@ -381,6 +388,95 @@
 							<code>{'{{CURRENT_DATE}}'}</code>
 						</div>
 					</AdminSettingField>
+
+					<AdminSettingField
+						label={$i18n.t('settings.admin.interface.contextWindowRatio.label')}
+						description={$i18n.t('settings.admin.interface.contextWindowRatio.description')}
+					>
+						<input
+							type="number"
+							min="0.1"
+							max="0.95"
+							step="0.05"
+							class={inputClass}
+							bind:value={chatConfig.CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO}
+						/>
+					</AdminSettingField>
+				{/if}
+
+				<AdminSettingRow
+					label={$i18n.t('settings.admin.interface.contextPruning.label')}
+					description={$i18n.t('settings.admin.interface.contextPruning.description')}
+					let:labelId
+				>
+					<Switch bind:state={chatConfig.ENABLE_CONTEXT_PRUNING} ariaLabelledbyId={labelId} />
+				</AdminSettingRow>
+
+				{#if chatConfig.ENABLE_CONTEXT_PRUNING}
+					<AdminSettingRow
+						label={$i18n.t('settings.admin.interface.contextPruningToolOutput.label')}
+						description={$i18n.t('settings.admin.interface.contextPruningToolOutput.description')}
+						let:labelId
+					>
+						<Switch
+							bind:state={chatConfig.ENABLE_CONTEXT_PRUNING_TOOL_OUTPUT}
+							ariaLabelledbyId={labelId}
+						/>
+					</AdminSettingRow>
+
+					{#if chatConfig.ENABLE_CONTEXT_PRUNING_TOOL_OUTPUT}
+						<AdminSettingField
+							label={$i18n.t('settings.admin.interface.contextPruningKeepRecent.label')}
+							description={$i18n.t('settings.admin.interface.contextPruningKeepRecent.description')}
+						>
+							<input
+								type="number"
+								min="0"
+								max="50"
+								step="1"
+								class={inputClass}
+								bind:value={chatConfig.CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT}
+							/>
+						</AdminSettingField>
+					{/if}
+
+					<AdminSettingRow
+						label={$i18n.t('settings.admin.interface.contextPruningDedupe.label')}
+						description={$i18n.t('settings.admin.interface.contextPruningDedupe.description')}
+						let:labelId
+					>
+						<Switch
+							bind:state={chatConfig.ENABLE_CONTEXT_PRUNING_DEDUPE}
+							ariaLabelledbyId={labelId}
+						/>
+					</AdminSettingRow>
+
+					<AdminSettingRow
+						label={$i18n.t('settings.admin.interface.contextPruningPurgeErrors.label')}
+						description={$i18n.t('settings.admin.interface.contextPruningPurgeErrors.description')}
+						let:labelId
+					>
+						<Switch
+							bind:state={chatConfig.ENABLE_CONTEXT_PRUNING_PURGE_ERRORS}
+							ariaLabelledbyId={labelId}
+						/>
+					</AdminSettingRow>
+
+					{#if chatConfig.ENABLE_CONTEXT_PRUNING_PURGE_ERRORS}
+						<AdminSettingField
+							label={$i18n.t('settings.admin.interface.contextPruningPurgeTurns.label')}
+							description={$i18n.t('settings.admin.interface.contextPruningPurgeTurns.description')}
+						>
+							<input
+								type="number"
+								min="0"
+								max="50"
+								step="1"
+								class={inputClass}
+								bind:value={chatConfig.CONTEXT_PRUNING_PURGE_ERROR_TURNS}
+							/>
+						</AdminSettingField>
+					{/if}
 				{/if}
 
 				<AdminSettingRow

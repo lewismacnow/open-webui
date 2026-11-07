@@ -61,6 +61,13 @@ CHAT_CONFIG_KEYS = {
     'CONTEXT_COMPACTION_TOKEN_CAP': 'chat.context_compaction.token_cap',
     'CONTEXT_COMPACTION_RETENTION_PERCENTAGE': 'chat.context_compaction.retention_percentage',
     'CONTEXT_COMPACTION_PROMPT_TEMPLATE': 'chat.context_compaction.prompt_template',
+    'CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO': 'chat.context_compaction.context_window_ratio',
+    'ENABLE_CONTEXT_PRUNING': 'chat.context_pruning.enable',
+    'ENABLE_CONTEXT_PRUNING_TOOL_OUTPUT': 'chat.context_pruning.tool_output_pruning',
+    'CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT': 'chat.context_pruning.tool_output_keep_recent',
+    'ENABLE_CONTEXT_PRUNING_DEDUPE': 'chat.context_pruning.dedupe_tool_calls',
+    'ENABLE_CONTEXT_PRUNING_PURGE_ERRORS': 'chat.context_pruning.purge_errors',
+    'CONTEXT_PRUNING_PURGE_ERROR_TURNS': 'chat.context_pruning.purge_error_turns',
     'ENABLE_TOOL_PERMISSIONS': 'chat.tool_permissions.enable',
     'ENABLE_TOOL_SEARCH': 'chat.tool_search.enable',
     'TOOL_SEARCH_DEFER_THRESHOLD': 'chat.tool_search.defer_threshold',
@@ -205,6 +212,13 @@ class ChatConfigForm(BaseModel):
     CONTEXT_COMPACTION_TOKEN_CAP: int | None = None
     CONTEXT_COMPACTION_RETENTION_PERCENTAGE: int | None = None
     CONTEXT_COMPACTION_PROMPT_TEMPLATE: str
+    CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO: float | None = None
+    ENABLE_CONTEXT_PRUNING: bool = True
+    ENABLE_CONTEXT_PRUNING_TOOL_OUTPUT: bool = True
+    CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT: int = 3
+    ENABLE_CONTEXT_PRUNING_DEDUPE: bool = True
+    ENABLE_CONTEXT_PRUNING_PURGE_ERRORS: bool = True
+    CONTEXT_PRUNING_PURGE_ERROR_TURNS: int = 2
     ENABLE_TOOL_PERMISSIONS: bool = False
     ENABLE_TOOL_SEARCH: bool = False
     TOOL_SEARCH_DEFER_THRESHOLD: int = 400
@@ -900,6 +914,9 @@ async def set_chat_config(form_data: ChatConfigForm, user=Depends(get_admin_user
     if retention_percentage is None:
         retention_percentage = CONTEXT_COMPACTION_RETENTION_PERCENTAGE
     retention_percentage = min(50, max(10, int(retention_percentage)))
+    context_window_ratio = form_data.CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO
+    if context_window_ratio is not None:
+        context_window_ratio = min(0.95, max(0.1, float(context_window_ratio)))
     tool_search_defer_threshold = max(0, int(form_data.TOOL_SEARCH_DEFER_THRESHOLD))
     tool_search_always_loaded = [item.strip() for item in form_data.TOOL_SEARCH_ALWAYS_LOADED if item.strip()]
     await Config.upsert(
@@ -910,6 +927,11 @@ async def set_chat_config(form_data: ChatConfigForm, user=Depends(get_admin_user
                 'CONTEXT_COMPACTION_TOKEN_THRESHOLD': threshold,
                 'CONTEXT_COMPACTION_TOKEN_CAP': token_cap,
                 'CONTEXT_COMPACTION_RETENTION_PERCENTAGE': retention_percentage,
+                'CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO': context_window_ratio,
+                'CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT': max(
+                    0, int(form_data.CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT)
+                ),
+                'CONTEXT_PRUNING_PURGE_ERROR_TURNS': max(0, int(form_data.CONTEXT_PRUNING_PURGE_ERROR_TURNS)),
                 'TOOL_SEARCH_DEFER_THRESHOLD': tool_search_defer_threshold,
                 'TOOL_SEARCH_ALWAYS_LOADED': tool_search_always_loaded,
             }
@@ -1389,7 +1411,7 @@ async def compact_chat_by_id(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='No model found for context compaction.')
 
     result = await compact_chat_branch(request, user, chat, model_id, request.app.state.MODELS)
-    result['context_usage'] = await get_chat_context_usage(chat, model_id)
+    result['context_usage'] = await get_chat_context_usage(chat, model_id, request.app.state.MODELS)
     if result.get('compacted'):
         await publish_event(
             request,
@@ -1430,7 +1452,7 @@ async def get_chat_by_id(
             data,
             await get_response_streams_by_chat_id(request.app.state.redis, id),
         )
-        data['context_usage'] = await get_chat_context_usage(chat)
+        data['context_usage'] = await get_chat_context_usage(chat, None, request.app.state.MODELS)
         return data
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)

@@ -36,15 +36,14 @@ Summarize the conversation history that will be compacted out of the active chat
 - Preserve the current task state, unresolved questions, and next steps.
 - Be factual and specific. Do not invent details.
 - Keep the summary concise, but complete enough for the assistant to continue without the removed messages.
+- The recent messages that follow stay in the context verbatim. Summarize only the
+  history above; do not restate or duplicate the recent messages.
 
 ### Previous Summary:
 {{PREVIOUS_SUMMARY}}
 
 ### Messages Being Compacted:
-{{COMPACTED_MESSAGES}}
-
-### Recent Messages Kept In Context:
-{{RECENT_MESSAGES}}"""
+{{COMPACTED_MESSAGES}}"""
 
 
 async def compact_messages_for_request(
@@ -65,7 +64,12 @@ async def compact_messages_for_request(
 
     messages, previous_summary = _apply_latest_summary_checkpoint(messages)
     system_prompt = system_prompt or (get_content_from_message(system_messages[0]) if system_messages else '')
-    token_threshold = _resolve_token_threshold(config['token_threshold'], config['token_cap'], metadata)
+    token_threshold = _resolve_token_threshold(
+        config['token_threshold'],
+        config['token_cap'],
+        metadata,
+        config['context_window_ratio'],
+    )
     if not _exceeds_token_threshold(messages, system_prompt, previous_summary, token_threshold) or len(messages) <= 3:
         return [*system_messages, *messages], previous_summary, False
 
@@ -123,6 +127,41 @@ async def compact_messages_for_request(
     checkpoint_message_id = (
         recent_messages[0].get('id') or metadata.get('user_message_id') or metadata.get('message_id')
     )
+
+    # Did the compaction actually buy us anything? If the retained window plus
+    # the summary is no smaller than what we started with, compaction cannot
+    # rescue this conversation - it will keep re-triggering on every turn and
+    # each attempt costs a full-context LLM call. Say so explicitly, because
+    # the usual causes are a retention percentage that is too high or a handful
+    # of very large messages that survive the cut.
+    pre_tokens = (
+        _estimate_tokens(system_prompt)
+        + _estimate_tokens(previous_summary or '')
+        + _estimate_messages_tokens([*compacted_messages, *recent_messages])
+    )
+    post_tokens = (
+        _estimate_tokens(system_prompt) + _estimate_tokens(summary) + _estimate_messages_tokens(recent_messages)
+    )
+    if post_tokens >= pre_tokens:
+        log.warning(
+            'Context compaction did not reduce the context (chat=%s): ~%d tokens before, ~%d after '
+            '(threshold=%d, retention=%d%%). The retained window is already larger than the budget - '
+            'lower the retention percentage, lower the token threshold, or start a new chat.',
+            chat_id,
+            pre_tokens,
+            post_tokens,
+            token_threshold,
+            config['retention_percentage'],
+        )
+    elif post_tokens > token_threshold:
+        log.warning(
+            'Context compaction left the context above the threshold (chat=%s): ~%d tokens after '
+            'compaction, threshold=%d. Compaction will re-run on the next turn.',
+            chat_id,
+            post_tokens,
+            token_threshold,
+        )
+
     # Only whole-turn user boundaries correspond to persisted chat checkpoints.
     if recent_messages[0].get('role') == 'user' and is_saved_chat_id(chat_id) and checkpoint_message_id:
         await Chats.upsert_message_to_chat_by_id_and_message_id(
@@ -212,6 +251,7 @@ async def _load_config() -> dict:
         'chat.context_compaction.token_cap',
         'chat.context_compaction.retention_percentage',
         'chat.context_compaction.prompt_template',
+        'chat.context_compaction.context_window_ratio',
     )
     token_threshold = _parse_positive_int(values.get('chat.context_compaction.token_threshold')) or 80000
     return {
@@ -220,6 +260,7 @@ async def _load_config() -> dict:
         'token_cap': _parse_positive_int(values.get('chat.context_compaction.token_cap')) or token_threshold,
         'retention_percentage': _clamp_retention_percentage(values.get('chat.context_compaction.retention_percentage')),
         'prompt_template': values.get('chat.context_compaction.prompt_template', '') or '',
+        'context_window_ratio': _clamp_context_window_ratio(values.get('chat.context_compaction.context_window_ratio')),
     }
 
 
@@ -239,9 +280,67 @@ def _clamp_retention_percentage(value: Any) -> int:
     return min(50, max(10, parsed))
 
 
-def _resolve_token_threshold(global_threshold: int, global_cap: int, metadata: dict) -> int:
-    configured_threshold = _parse_positive_int((metadata.get('params') or {}).get('compact_token_threshold'))
-    return min(configured_threshold or global_threshold, global_cap)
+def _clamp_context_window_ratio(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = 0.7
+    return min(0.95, max(0.1, parsed))
+
+
+def _model_context_window(metadata: dict) -> int | None:
+    """The context window (in tokens) declared for the chatting model, if known.
+
+    Models may declare ``params.context_window`` (Admin > Workspace > Models >
+    Advanced Params). Nothing in Open WebUI knows a provider's real context
+    length, so this is the only way to tie the compaction threshold to the
+    window the model actually has.
+    """
+    model = metadata.get('model') or {}
+    if not isinstance(model, dict):
+        return None
+    info = model.get('info') or {}
+    if not isinstance(info, dict):
+        return None
+    params = info.get('params') or {}
+    if not isinstance(params, dict):
+        return None
+    return _parse_positive_int(params.get('context_window'))
+
+
+def _resolve_token_threshold(
+    global_threshold: int,
+    global_cap: int,
+    metadata: dict,
+    context_window_ratio: float = 0.7,
+) -> int:
+    """Resolve the token count at which compaction triggers.
+
+    Precedence:
+      1. An explicit threshold (chat params, else the model's
+         ``params.compact_token_threshold``) - always wins.
+      2. Otherwise, if the chatting model declares a context window, derive
+         the threshold from it (``window * ratio``). This is what keeps a
+         32k model from being compacted at 80k tokens.
+      3. Otherwise fall back to the global threshold.
+
+    Everything is clamped by the token cap, so a model-specific override can
+    never exceed the ceiling the admin set.
+    """
+    params = metadata.get('params') or {}
+    configured_threshold = _parse_positive_int(
+        params.get('compact_token_threshold') if isinstance(params, dict) else None
+    )
+    if configured_threshold:
+        return min(configured_threshold, global_cap)
+
+    window = _model_context_window(metadata)
+    if window:
+        derived = int(window * context_window_ratio)
+        if derived > 0:
+            return min(derived, global_cap)
+
+    return min(global_threshold, global_cap)
 
 
 def _usage_token_count(usage: dict) -> int:
@@ -261,7 +360,7 @@ def _usage_token_count(usage: dict) -> int:
     return prompt_tokens + completion_tokens
 
 
-async def get_chat_context_usage(chat: Any, model_id: str | None = None) -> dict | None:
+async def get_chat_context_usage(chat: Any, model_id: str | None = None, models: dict | None = None) -> dict | None:
     chat_data = chat.chat or {}
     history = chat_data.get('history') or {}
     current_id = getattr(chat, 'current_message_id', None) or history.get('currentId')
@@ -284,26 +383,35 @@ async def get_chat_context_usage(chat: Any, model_id: str | None = None) -> dict
     params = ((chat.chat or {}).get('params') or {}).copy()
     if model_id:
         params['model'] = model_id
-    threshold = _resolve_token_threshold(config['token_threshold'], config['token_cap'], {'params': params})
+    # Resolve the threshold exactly the way the request path does, so the
+    # percentage shown to the user is the number that actually triggers
+    # compaction (including a model-derived threshold from its context window).
+    model = (models or {}).get(model_id) if model_id else None
+    metadata = {'params': params, 'model': model or {}}
+    threshold = _resolve_token_threshold(
+        config['token_threshold'],
+        config['token_cap'],
+        metadata,
+        config['context_window_ratio'],
+    )
+
+    system_prompt = params.get('system') or ''
+    if not system_prompt:
+        system_message = next((m for m in messages if m.get('role') == 'system'), None)
+        system_prompt = get_content_from_message(system_message) if system_message else ''
+
     messages, previous_summary = _apply_latest_summary_checkpoint(messages)
-
-    for idx in range(len(messages) - 1, -1, -1):
-        usage = messages[idx].get('usage') or (messages[idx].get('info') or {}).get('usage')
-        if isinstance(usage, dict) and (tokens := _usage_token_count(usage)):
-            tokens += _estimate_messages_tokens(messages[idx + 1 :])
-            return _build_context_usage(tokens, threshold)
-
-    tokens = _estimate_tokens(previous_summary or '') + _estimate_messages_tokens(messages)
-    return _build_context_usage(tokens, threshold)
+    tokens, source = _estimate_context_tokens(messages, system_prompt, previous_summary)
+    return _build_context_usage(tokens, threshold, source)
 
 
-def _build_context_usage(tokens: int, threshold: int) -> dict:
+def _build_context_usage(tokens: int, threshold: int, source: str = 'estimated') -> dict:
     return {
         'tokens': tokens,
         'estimated_tokens': tokens,
         'threshold': threshold,
         'percent': round((tokens / threshold) * 100) if threshold > 0 else 0,
-        'source': 'estimated',
+        'source': source,
     }
 
 
@@ -353,17 +461,35 @@ def _apply_latest_summary_checkpoint(messages: list[dict]) -> tuple[list[dict], 
     return messages, None
 
 
+def _estimate_context_tokens(
+    messages: list[dict],
+    system_prompt: str,
+    summary: str | None,
+) -> tuple[int, str]:
+    """Estimate the context size and report how it was arrived at.
+
+    Prefers the last recorded provider ``usage`` (real numbers) and falls back
+    to a tiktoken estimate. Both the trigger and the context indicator use
+    this, so the percentage the admin sees always matches the number that
+    actually fires compaction.
+    """
+    for idx in range(len(messages) - 1, -1, -1):
+        usage = messages[idx].get('usage') or (messages[idx].get('info') or {}).get('usage')
+        if isinstance(usage, dict) and (tokens := _usage_token_count(usage)):
+            # The recorded usage already includes the system prompt and the
+            # previous summary - they were part of the request it measured.
+            return tokens + _estimate_messages_tokens(messages[idx + 1 :]), 'usage'
+
+    estimated = _estimate_tokens(system_prompt) + _estimate_tokens(summary or '') + _estimate_messages_tokens(messages)
+    return estimated, 'estimated'
+
+
 def _exceeds_token_threshold(messages: list[dict], system_prompt: str, summary: str | None, threshold: int) -> bool:
     if threshold <= 0:
         return False
 
-    for idx in range(len(messages) - 1, -1, -1):
-        usage = messages[idx].get('usage') or (messages[idx].get('info') or {}).get('usage')
-        if isinstance(usage, dict) and (tokens := _usage_token_count(usage)):
-            return tokens + _estimate_messages_tokens(messages[idx + 1 :]) > threshold
-
-    estimated = _estimate_tokens(system_prompt) + _estimate_tokens(summary or '') + _estimate_messages_tokens(messages)
-    return estimated > threshold
+    tokens, _ = _estimate_context_tokens(messages, system_prompt, summary)
+    return tokens > threshold
 
 
 def _find_compaction_boundary(messages: list[dict], retention_percentage: int = 40) -> int:
@@ -380,6 +506,47 @@ def _find_compaction_boundary(messages: list[dict], retention_percentage: int = 
     else:
         boundaries = [idx for idx, message in enumerate(messages) if message.get('role') == 'user'][1:]
     return next((idx for idx in reversed(boundaries) if idx <= target), 0)
+
+
+def _fit_messages_to_model_window(
+    compacted_messages: list[dict],
+    recent_messages: list[dict],
+    model_window: int | None,
+) -> list[dict]:
+    """Trim the oldest compacted messages so the summary prompt fits the model.
+
+    The summariser is frequently a smaller model than the chatting one. When
+    the history does not fit the summariser's window the summary call fails,
+    the failure is swallowed, and the full history is sent to the chat model
+    anyway - the exact overflow compaction was supposed to prevent. Dropping
+    the oldest compacted messages (the previous summary still carries that
+    ground forward) keeps the summary call inside the model.
+
+    Returns the messages unchanged when the window is unknown or the prompt
+    already fits.
+    """
+    if not model_window or model_window <= 0 or not compacted_messages:
+        return compacted_messages
+
+    # Leave headroom for the instruction template, the previous summary and
+    # the reply the summariser produces.
+    budget = int(model_window * 0.8)
+    fixed = _estimate_messages_tokens(recent_messages)
+
+    trimmed = list(compacted_messages)
+    while len(trimmed) > 1:
+        used = fixed + _estimate_messages_tokens(trimmed)
+        if used <= budget:
+            break
+        trimmed = trimmed[1:]
+
+    if len(trimmed) != len(compacted_messages):
+        log.warning(
+            'Trimmed %d message(s) from the compaction input to fit the summarisation model window (%d tokens).',
+            len(compacted_messages) - len(trimmed),
+            model_window,
+        )
+    return trimmed
 
 
 async def _generate_summary(
@@ -403,6 +570,15 @@ async def _generate_summary(
     )
     context_compaction_model = task_config.get('chat.context_compaction.model')
     task_model_id = context_compaction_model if context_compaction_model in models else model_id
+    if context_compaction_model and context_compaction_model not in models:
+        # Silently falling back to the chatting model means the summarisation
+        # runs on a big (and expensive) model - and on one that may not even
+        # be able to hold the history. Say so.
+        log.warning(
+            'Context compaction model %r is not available; falling back to the chat model %r.',
+            context_compaction_model,
+            model_id,
+        )
     if task_model_id not in models:
         raise ValueError('No available model for context compaction')
 
@@ -416,6 +592,18 @@ async def _generate_summary(
                     **message,
                     'content': f'{get_content_from_message(message) or ""}\n[TOOL CALLS] {JSONCodec.dumps(message["tool_calls"])}',
                 }
+
+    # The summariser may be a much smaller model than the chatting one (that
+    # is the usual reason to pick a dedicated one). If the history does not
+    # fit ITS window the summary call fails, the failure is swallowed and the
+    # full history is sent anyway - so trim the oldest compacted messages
+    # until the prompt fits.
+    compacted_messages = _fit_messages_to_model_window(
+        compacted_messages,
+        recent_messages,
+        _model_context_window({'model': models.get(task_model_id) or {}}),
+    )
+
     all_messages = [*compacted_messages, *recent_messages]
     prompt = replace_prompt_variable(summary_prompt_template, get_last_user_message(all_messages) or '')
     prompt = replace_messages_variable(prompt, all_messages)
