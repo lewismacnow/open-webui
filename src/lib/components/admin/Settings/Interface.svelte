@@ -45,7 +45,7 @@
 
 	let chatConfig = {
 		CONTEXT_COMPACTION_MODEL: '',
-		ENABLE_CONTEXT_COMPACTION: false,
+		ENABLE_CONTEXT_COMPACTION: true,
 		CONTEXT_COMPACTION_TOKEN_THRESHOLD: 80000,
 		// Empty = no ceiling. The cap is an absolute limit on any compaction
 		// threshold; it must not default to the threshold, or it would clamp
@@ -53,7 +53,7 @@
 		CONTEXT_COMPACTION_TOKEN_CAP: null as number | null,
 		CONTEXT_COMPACTION_RETENTION_PERCENTAGE: 40,
 		CONTEXT_COMPACTION_PROMPT_TEMPLATE: '',
-		CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO: 0.7,
+		CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO: 0.8,
 		ENABLE_CONTEXT_PRUNING: true,
 		ENABLE_CONTEXT_PRUNING_TOOL_OUTPUT: true,
 		CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT: 3,
@@ -69,9 +69,9 @@
 	let toolSearchAlwaysLoaded = '';
 	let showTaskParameters = false;
 	// The context window ratio is stored as a fraction (0.1 - 0.95) but shown
-	// as a percentage, which is how admins think about "compact at 75% of the
+	// as a percentage, which is how admins think about "compact at 80% of the
 	// model's context".
-	let contextWindowPercent = 70;
+	let contextWindowPercent = 80;
 
 	const configuredParams = (params: Record<string, any> = {}) =>
 		Object.fromEntries(
@@ -159,7 +159,7 @@
 			taskConfig.TASK_MODEL_PARAMS = taskConfig.TASK_MODEL_PARAMS ?? {};
 			toolSearchAlwaysLoaded = (chatConfig.TOOL_SEARCH_ALWAYS_LOADED ?? []).join(', ');
 			contextWindowPercent = Math.round(
-				(chatConfig.CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO ?? 0.7) * 100
+				(chatConfig.CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO ?? 0.8) * 100
 			);
 
 			workspaceModels = await getBaseModels(localStorage.token);

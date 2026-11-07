@@ -288,7 +288,7 @@ def _clamp_context_window_ratio(value: Any) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
-        parsed = 0.7
+        parsed = 0.8
     return min(0.95, max(0.1, parsed))
 
 
@@ -329,7 +329,7 @@ def _resolve_token_threshold(
     global_threshold: int,
     global_cap: int | None,
     metadata: dict,
-    context_window_ratio: float = 0.7,
+    context_window_ratio: float = 0.8,
 ) -> int:
     """Resolve the token count at which compaction triggers.
 

@@ -2340,7 +2340,7 @@ TASK_MODEL_PARAMS = task_model_params
 
 CONTEXT_COMPACTION_MODEL = os.getenv('CONTEXT_COMPACTION_MODEL', '')
 
-ENABLE_CONTEXT_COMPACTION = os.getenv('ENABLE_CONTEXT_COMPACTION', 'False').lower() == 'true'
+ENABLE_CONTEXT_COMPACTION = os.getenv('ENABLE_CONTEXT_COMPACTION', 'True').lower() == 'true'
 
 ENABLE_TOOL_PERMISSIONS = os.getenv('ENABLE_TOOL_PERMISSIONS', 'False').lower() == 'true'
 
@@ -2360,7 +2360,7 @@ CONTEXT_COMPACTION_PROMPT_TEMPLATE = os.getenv('CONTEXT_COMPACTION_PROMPT_TEMPLA
 # explicit threshold set. Kept below 1.0 so there is headroom for the
 # reply, the summary itself and any tool output that follows.
 CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO = min(
-    0.95, max(0.1, float(os.getenv('CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO', '0.7')))
+    0.95, max(0.1, float(os.getenv('CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO', '0.8')))
 )
 
 # Fork: lightweight context pruning (dedupe, prune, purge errors)
