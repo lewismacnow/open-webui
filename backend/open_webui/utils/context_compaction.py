@@ -295,17 +295,30 @@ def _model_context_window(metadata: dict) -> int | None:
     Advanced Params). Nothing in Open WebUI knows a provider's real context
     length, so this is the only way to tie the compaction threshold to the
     window the model actually has.
+
+    The value is read from ``metadata['params']`` first: the model registry
+    strips ``info.params`` down to ``model_controls`` (see
+    ``utils/models.public_model_params``), so the registry copy of the model
+    never carries it. The request path copies it out of the model row into
+    ``metadata['params']`` instead. The registry is still checked as a
+    fallback for callers that do not go through that path.
     """
+    params = metadata.get('params') or {}
+    if isinstance(params, dict):
+        window = _parse_positive_int(params.get('context_window'))
+        if window:
+            return window
+
     model = metadata.get('model') or {}
     if not isinstance(model, dict):
         return None
     info = model.get('info') or {}
     if not isinstance(info, dict):
         return None
-    params = info.get('params') or {}
-    if not isinstance(params, dict):
+    model_params = info.get('params') or {}
+    if not isinstance(model_params, dict):
         return None
-    return _parse_positive_int(params.get('context_window'))
+    return _parse_positive_int(model_params.get('context_window'))
 
 
 def _resolve_token_threshold(
@@ -636,6 +649,14 @@ async def _generate_summary(
     if summary:
         return summary
 
+    # The summariser came back empty. Rather than fail (which would send the
+    # full, uncompacted history and overflow the model), fall back to a crude
+    # digest - but say so, because a digest is a much weaker summary and the
+    # admin should know that is what the model is working from.
+    log.warning(
+        'The context compaction model %r returned an empty summary; falling back to a truncated digest.',
+        task_model_id,
+    )
     parts = [previous_summary] if previous_summary else []
     for message in compacted_messages:
         content = get_content_from_message(message)

@@ -34,7 +34,7 @@ BASE_MODELS_CACHE_KEY = f'{REDIS_KEY_PREFIX}:models:base'
 
 def public_model_params(params):
     controls = params.get('model_controls', {})
-    return (
+    public = (
         {
             'model_controls': {
                 key: {
@@ -51,6 +51,15 @@ def public_model_params(params):
         if controls
         else {}
     )
+    # Keep the context-management knobs. They are plain integers, not
+    # sensitive, and the context compaction code needs them: the model
+    # registry is the only place the compaction model list is available from,
+    # and the admin UI reads them to show the effective threshold.
+    for key in ('context_window', 'compact_token_threshold'):
+        value = params.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            public[key] = value
+    return public
 
 
 async def fetch_ollama_models(request: Request, user: UserModel = None):

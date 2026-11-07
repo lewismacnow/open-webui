@@ -2278,6 +2278,11 @@ async def chat_completion(
                 'stream_delta_chunk_size': stream_delta_chunk_size,
                 'reasoning_tags': reasoning_tags,
                 'compact_token_threshold': compact_token_threshold,
+                # The model's declared context window. The model registry strips
+                # info.params (public_model_params), so this has to be copied
+                # out of the model row here for the context compaction code to
+                # be able to derive a threshold from the real window.
+                'context_window': model_info_params.get('context_window'),
                 'function_calling': (
                     form_data.get('params', {}).get('function_calling')
                     or model_info_params.get('function_calling')
