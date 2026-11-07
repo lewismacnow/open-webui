@@ -32,30 +32,71 @@ log = logging.getLogger(__name__)
 BASE_MODELS_CACHE_KEY = f'{REDIS_KEY_PREFIX}:models:base'
 
 
-def resolve_context_window(model_info, model_info_params: dict, models: dict) -> int | None:
-    """The context window (in tokens) that applies to the model being used.
+def resolve_context_window(
+    *,
+    requested_model_id: str,
+    model_info,
+    own_context_window: int | None = None,
+    chain_model_ids: list[str] | None = None,
+    base_windows: dict | None = None,
+    models: dict | None = None,
+    default_window: int = 256000,
+) -> int:
+    """The maximum context (in tokens) that applies to a request.
 
-    A model declares its own window in Admin > Workspace > Models > Advanced
-    Params. A model that wraps another one (a custom model with a base model
-    set) inherits the base model's window when it does not declare one - the
-    base model is what actually determines how much context the provider
-    accepts.
+    A BASE model's window is, in order of precedence:
+      1. the admin's per-base-model override
+         (``models.base_model_context_windows``)
+      2. the value set on the model row's Advanced Params
+      3. the global default (256K)
+
+    A WRAPPER model is only an overlay on a base model: it inherits the base
+    model's window and may only LOWER it - never raise it, and never raise it
+    above the smallest window among the models that could actually serve the
+    request.
+
+    That last rule is what makes a failover chain safe. If a chain holds
+    three base models - two at 1M and one at 256K - then every wrapper on
+    that chain is capped at 256K, because the request may be retried
+    against the 256K model at any moment.
+
+    The chain is resolved per request, so a chain edited while the server
+    is running takes effect immediately.
     """
-    own = (model_info_params or {}).get('context_window')
-    if isinstance(own, int) and not isinstance(own, bool) and own > 0:
-        return own
+    base_windows = base_windows or {}
+    models = models or {}
 
-    base_model_id = getattr(model_info, 'base_model_id', None)
-    if not base_model_id:
+    def _positive(value) -> int | None:
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
         return None
 
-    base = (models or {}).get(base_model_id) or (models or {}).get(str(base_model_id).split(':')[0])
-    if not base:
-        return None
-    inherited = (((base.get('info') or {}).get('params') or {}) or {}).get('context_window')
-    if isinstance(inherited, int) and not isinstance(inherited, bool) and inherited > 0:
-        return inherited
-    return None
+    def _limit_for(model_id: str) -> int:
+        override = _positive(base_windows.get(model_id))
+        if override:
+            return override
+        entry = models.get(model_id) or {}
+        params = ((entry.get('info') or {}).get('params') or {}) if isinstance(entry, dict) else {}
+        declared = _positive(params.get('context_window'))
+        if declared:
+            return declared
+        return default_window
+
+    base_id = getattr(model_info, 'base_model_id', None) or requested_model_id
+    base_limit = _limit_for(base_id)
+
+    # Every model that could serve the request constrains it. The base model
+    # is always included: a wrapper must never exceed the model it overlays.
+    chain = {base_id}
+    chain.update(chain_model_ids or [])
+    chain_limit = min((_limit_for(mid) for mid in chain if mid), default=base_limit)
+
+    effective = min(base_limit, chain_limit)
+    own = _positive(own_context_window)
+    if own:
+        # A wrapper may only lower the limit.
+        effective = min(effective, own)
+    return effective
 
 
 def public_model_params(params):

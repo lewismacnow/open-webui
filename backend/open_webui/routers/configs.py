@@ -263,6 +263,59 @@ def _to_raw_tokens(cap: TokenCapForm) -> dict:
     }
 
 
+class BaseModelContextWindowsConfigForm(BaseModel):
+    """The maximum context window of every base model."""
+
+    default: int = 256000
+    windows: dict[str, int] = {}
+
+
+@router.get('/base-model-context-windows', response_model=BaseModelContextWindowsConfigForm)
+async def get_base_model_context_windows(request: Request, user=Depends(get_admin_user)):
+    """Return the per-base-model maximum context windows. Admin-only."""
+    stored = await Config.get_many(
+        'models.base_model_context_window_default',
+        'models.base_model_context_windows',
+    )
+    default = stored.get('models.base_model_context_window_default') or 256000
+    windows = stored.get('models.base_model_context_windows') or {}
+    if not isinstance(windows, dict):
+        windows = {}
+    cleaned = {
+        str(model_id): int(value)
+        for model_id, value in windows.items()
+        if isinstance(value, (int, float)) and int(value) > 0
+    }
+    return BaseModelContextWindowsConfigForm(default=int(default), windows=cleaned)
+
+
+@router.post('/base-model-context-windows', response_model=BaseModelContextWindowsConfigForm)
+async def set_base_model_context_windows(
+    request: Request,
+    form_data: BaseModelContextWindowsConfigForm,
+    user=Depends(get_admin_user),
+):
+    """Replace the per-base-model maximum context windows.
+
+    The default applies to every base model that has no explicit entry.
+    A wrapper model is never listed here - it inherits its base model's
+    window and may only lower it.
+    """
+    default = max(1, int(form_data.default or 256000))
+    windows = {
+        str(model_id): max(1, int(value))
+        for model_id, value in (form_data.windows or {}).items()
+        if str(model_id).strip() and isinstance(value, (int, float)) and int(value) > 0
+    }
+    await Config.upsert(
+        {
+            'models.base_model_context_window_default': default,
+            'models.base_model_context_windows': windows,
+        }
+    )
+    return await get_base_model_context_windows(request, user)
+
+
 @router.get('/token-caps', response_model=TokenCapsConfigForm)
 async def get_token_caps_config(request: Request, user=Depends(get_admin_user)):
     """Return the global per-target token-usage caps. Admin-only."""

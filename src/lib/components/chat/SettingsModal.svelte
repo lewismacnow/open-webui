@@ -56,6 +56,7 @@
 	import AdminDocuments from '$lib/components/admin/Settings/Documents.svelte';
 	import AdminApiTools from '$lib/components/admin/Settings/ApiTools.svelte';
 	import WrapperModelProviders from '$lib/components/admin/Settings/WrapperModelProviders.svelte';
+	import BaseModelContextWindows from '$lib/components/admin/Settings/BaseModelContextWindows.svelte';
 	import ToolsConfig from '$lib/components/admin/Settings/ToolsConfig.svelte';
 	import TokenCaps from '$lib/components/admin/Settings/TokenCaps.svelte';
 	import FailoverQueue from '$lib/components/admin/Settings/FailoverQueue.svelte';
@@ -1011,6 +1012,7 @@
 				<ServiceKeys />
 			{:else if selectedTab === 'admin:wrapper-model-providers'}
 				<WrapperModelProviders />
+				<BaseModelContextWindows />
 			{:else if selectedTab === 'admin:failover-queue'}
 				<FailoverQueue />
 			{:else if selectedTab === 'admin:tools-config'}

@@ -106,6 +106,61 @@ def _health_status(health_cache: Optional[dict], url: str) -> str:
     return status
 
 
+async def resolve_failover_chain_model_ids(model_info, requested_model_id: str) -> list[str]:
+    """The ordered base-model ids a request may be served by.
+
+    Mirrors the chain selection in ``resolve_failover_candidates()`` - same
+    precedence, same config sources:
+
+    1. a workspace model with ``meta.failover_source == 'global'`` uses the
+       admin's global chain for that wrapper id
+       (``models.wrapper_provider_chains``)
+    2. otherwise a workspace model with its own ``meta.failover_providers``
+    3. otherwise the requested model is the implicit primary and
+       ``models.failover_map`` supplies the backups
+
+    Kept separate from the candidate resolution because that one also applies
+    the skip list and the health cache, while the context-window calculation
+    needs the WHOLE chain - including providers that are unhealthy right now,
+    since a request may still be retried against them later.
+    """
+    chain_ids: list[str] = []
+    failover = None
+
+    if model_info and model_info.meta:
+        if getattr(model_info.meta, 'failover_source', None) == 'global':
+            chains_data = await Config.get('models.wrapper_provider_chains') or []
+            if isinstance(chains_data, dict):
+                this_wrapper = chains_data.get(getattr(model_info, 'id', None))
+                if this_wrapper:
+                    chains_data = this_wrapper
+                else:
+                    chains_data = next((v for v in chains_data.values() if v), [])
+            if not isinstance(chains_data, list):
+                chains_data = []
+            failover = [
+                entry.get('model_id') if isinstance(entry, dict) else getattr(entry, 'model_id', None)
+                for entry in chains_data
+            ]
+        elif getattr(model_info.meta, 'failover_providers', None):
+            failover = [
+                getattr(entry, 'model_id', None) if not isinstance(entry, dict) else entry.get('model_id')
+                for entry in model_info.meta.failover_providers
+            ]
+
+    if failover:
+        return [model_id for model_id in failover if model_id]
+
+    global_map = (await Config.get('models.failover_map')) or {}
+    chain_ids = [requested_model_id] if requested_model_id else []
+    for raw_entry in global_map.get(requested_model_id) or []:
+        entry = raw_entry if isinstance(raw_entry, dict) else getattr(raw_entry, '__dict__', {})
+        target_id = entry.get('model_id')
+        if target_id:
+            chain_ids.append(target_id)
+    return chain_ids
+
+
 async def resolve_failover_candidates(
     request: Request,
     model_info,
