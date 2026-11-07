@@ -32,6 +32,32 @@ log = logging.getLogger(__name__)
 BASE_MODELS_CACHE_KEY = f'{REDIS_KEY_PREFIX}:models:base'
 
 
+def resolve_context_window(model_info, model_info_params: dict, models: dict) -> int | None:
+    """The context window (in tokens) that applies to the model being used.
+
+    A model declares its own window in Admin > Workspace > Models > Advanced
+    Params. A model that wraps another one (a custom model with a base model
+    set) inherits the base model's window when it does not declare one - the
+    base model is what actually determines how much context the provider
+    accepts.
+    """
+    own = (model_info_params or {}).get('context_window')
+    if isinstance(own, int) and not isinstance(own, bool) and own > 0:
+        return own
+
+    base_model_id = getattr(model_info, 'base_model_id', None)
+    if not base_model_id:
+        return None
+
+    base = (models or {}).get(base_model_id) or (models or {}).get(str(base_model_id).split(':')[0])
+    if not base:
+        return None
+    inherited = (((base.get('info') or {}).get('params') or {}) or {}).get('context_window')
+    if isinstance(inherited, int) and not isinstance(inherited, bool) and inherited > 0:
+        return inherited
+    return None
+
+
 def public_model_params(params):
     controls = params.get('model_controls', {})
     public = (

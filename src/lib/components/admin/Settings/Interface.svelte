@@ -47,7 +47,10 @@
 		CONTEXT_COMPACTION_MODEL: '',
 		ENABLE_CONTEXT_COMPACTION: false,
 		CONTEXT_COMPACTION_TOKEN_THRESHOLD: 80000,
-		CONTEXT_COMPACTION_TOKEN_CAP: 80000,
+		// Empty = no ceiling. The cap is an absolute limit on any compaction
+		// threshold; it must not default to the threshold, or it would clamp
+		// the window-derived threshold back down to the global guess.
+		CONTEXT_COMPACTION_TOKEN_CAP: null as number | null,
 		CONTEXT_COMPACTION_RETENTION_PERCENTAGE: 40,
 		CONTEXT_COMPACTION_PROMPT_TEMPLATE: '',
 		CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO: 0.7,
@@ -65,6 +68,10 @@
 	};
 	let toolSearchAlwaysLoaded = '';
 	let showTaskParameters = false;
+	// The context window ratio is stored as a fraction (0.1 - 0.95) but shown
+	// as a percentage, which is how admins think about "compact at 75% of the
+	// model's context".
+	let contextWindowPercent = 70;
 
 	const configuredParams = (params: Record<string, any> = {}) =>
 		Object.fromEntries(
@@ -151,6 +158,9 @@
 			]);
 			taskConfig.TASK_MODEL_PARAMS = taskConfig.TASK_MODEL_PARAMS ?? {};
 			toolSearchAlwaysLoaded = (chatConfig.TOOL_SEARCH_ALWAYS_LOADED ?? []).join(', ');
+			contextWindowPercent = Math.round(
+				(chatConfig.CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO ?? 0.7) * 100
+			);
 
 			workspaceModels = await getBaseModels(localStorage.token);
 			baseModels = await getModels(localStorage.token, null, false);
@@ -350,6 +360,7 @@
 							min="1"
 							step="1"
 							class={inputClass}
+							placeholder={$i18n.t('No limit')}
 							bind:value={chatConfig.CONTEXT_COMPACTION_TOKEN_CAP}
 						/>
 					</AdminSettingField>
@@ -393,14 +404,23 @@
 						label={$i18n.t('settings.admin.interface.contextWindowRatio.label')}
 						description={$i18n.t('settings.admin.interface.contextWindowRatio.description')}
 					>
-						<input
-							type="number"
-							min="0.1"
-							max="0.95"
-							step="0.05"
-							class={inputClass}
-							bind:value={chatConfig.CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO}
-						/>
+						<div class="flex items-center gap-2">
+							<input
+								type="number"
+								min="10"
+								max="95"
+								step="1"
+								class={inputClass}
+								bind:value={contextWindowPercent}
+								on:input={() => {
+									chatConfig.CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO = Math.min(
+										0.95,
+										Math.max(0.1, (contextWindowPercent || 0) / 100)
+									);
+								}}
+							/>
+							<span class="text-xs text-gray-500 dark:text-gray-400">%</span>
+						</div>
 					</AdminSettingField>
 				{/if}
 

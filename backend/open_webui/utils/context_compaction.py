@@ -257,7 +257,11 @@ async def _load_config() -> dict:
     return {
         'enable': bool(values.get('chat.context_compaction.enable', False)),
         'token_threshold': token_threshold,
-        'token_cap': _parse_positive_int(values.get('chat.context_compaction.token_cap')) or token_threshold,
+        # An independent absolute ceiling. Unset means "no ceiling" - it must
+        # not default to the threshold, or it would clamp the window-derived
+        # value back down to the global guess and defeat the whole point of
+        # deriving a threshold from the model's real context window.
+        'token_cap': _parse_positive_int(values.get('chat.context_compaction.token_cap')),
         'retention_percentage': _clamp_retention_percentage(values.get('chat.context_compaction.retention_percentage')),
         'prompt_template': values.get('chat.context_compaction.prompt_template', '') or '',
         'context_window_ratio': _clamp_context_window_ratio(values.get('chat.context_compaction.context_window_ratio')),
@@ -323,7 +327,7 @@ def _model_context_window(metadata: dict) -> int | None:
 
 def _resolve_token_threshold(
     global_threshold: int,
-    global_cap: int,
+    global_cap: int | None,
     metadata: dict,
     context_window_ratio: float = 0.7,
 ) -> int:
@@ -334,26 +338,33 @@ def _resolve_token_threshold(
          ``params.compact_token_threshold``) - always wins.
       2. Otherwise, if the chatting model declares a context window, derive
          the threshold from it (``window * ratio``). This is what keeps a
-         32k model from being compacted at 80k tokens.
+         32k model from being compacted at 80k tokens, and what makes
+         "compact at 75% of the model's context" work.
       3. Otherwise fall back to the global threshold.
 
-    Everything is clamped by the token cap, so a model-specific override can
-    never exceed the ceiling the admin set.
+    The token cap is an absolute ceiling applied to whichever rule won. It is
+    unset by default (no ceiling) so it never silently clamps the
+    window-derived value back to the global guess.
     """
+    cap = global_cap if isinstance(global_cap, int) and global_cap > 0 else None
+
+    def _apply(value: int) -> int:
+        return min(value, cap) if cap else value
+
     params = metadata.get('params') or {}
     configured_threshold = _parse_positive_int(
         params.get('compact_token_threshold') if isinstance(params, dict) else None
     )
     if configured_threshold:
-        return min(configured_threshold, global_cap)
+        return _apply(configured_threshold)
 
     window = _model_context_window(metadata)
     if window:
         derived = int(window * context_window_ratio)
         if derived > 0:
-            return min(derived, global_cap)
+            return _apply(derived)
 
-    return min(global_threshold, global_cap)
+    return _apply(global_threshold)
 
 
 def _usage_token_count(usage: dict) -> int:
@@ -485,13 +496,23 @@ def _estimate_context_tokens(
     to a tiktoken estimate. Both the trigger and the context indicator use
     this, so the percentage the admin sees always matches the number that
     actually fires compaction.
+
+    Once a compaction summary exists the usage checkpoints are NOT used. A
+    usage block records the context size as it was when that message was
+    sent - and the assistant messages kept in the retained window were sent
+    BEFORE the compaction, when the history was still much larger. Trusting
+    one of those reports the pre-compaction size, so the context appears
+    never to shrink. After a compaction the context is exactly the system
+    prompt + the summary + the retained window, which is what is measured
+    here.
     """
-    for idx in range(len(messages) - 1, -1, -1):
-        usage = messages[idx].get('usage') or (messages[idx].get('info') or {}).get('usage')
-        if isinstance(usage, dict) and (tokens := _usage_token_count(usage)):
-            # The recorded usage already includes the system prompt and the
-            # previous summary - they were part of the request it measured.
-            return tokens + _estimate_messages_tokens(messages[idx + 1 :]), 'usage'
+    if not summary:
+        for idx in range(len(messages) - 1, -1, -1):
+            usage = messages[idx].get('usage') or (messages[idx].get('info') or {}).get('usage')
+            if isinstance(usage, dict) and (tokens := _usage_token_count(usage)):
+                # The recorded usage already includes the system prompt and the
+                # previous summary - they were part of the request it measured.
+                return tokens + _estimate_messages_tokens(messages[idx + 1 :]), 'usage'
 
     estimated = _estimate_tokens(system_prompt) + _estimate_tokens(summary or '') + _estimate_messages_tokens(messages)
     return estimated, 'estimated'

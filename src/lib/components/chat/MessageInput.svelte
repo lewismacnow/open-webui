@@ -518,13 +518,21 @@
 		let estimatedTokens = estimateTokens($settings?.system ?? '');
 		let hasUsageCheckpoint = false;
 
-		for (let idx = activeMessages.length - 1; idx >= 0; idx -= 1) {
-			const usage = activeMessages[idx]?.usage ?? activeMessages[idx]?.info?.usage;
-			const usageTokens = getUsageTokenCount(usage);
-			if (usageTokens) {
-				hasUsageCheckpoint = true;
-				estimatedTokens = usageTokens + estimateMessagesTokens(activeMessages.slice(idx + 1));
-				break;
+		// Once a compaction summary exists the usage checkpoints are stale: a
+		// usage block records the context size at the time that message was
+		// sent, and the assistant messages in the retained window were sent
+		// BEFORE the compaction, when the history was still much larger.
+		// Trusting one of them makes the context look like it never shrank, so
+		// measure the compacted context directly instead.
+		if (!summary) {
+			for (let idx = activeMessages.length - 1; idx >= 0; idx -= 1) {
+				const usage = activeMessages[idx]?.usage ?? activeMessages[idx]?.info?.usage;
+				const usageTokens = getUsageTokenCount(usage);
+				if (usageTokens) {
+					hasUsageCheckpoint = true;
+					estimatedTokens = usageTokens + estimateMessagesTokens(activeMessages.slice(idx + 1));
+					break;
+				}
 			}
 		}
 

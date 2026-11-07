@@ -267,6 +267,7 @@ from open_webui.utils.models import (
     get_all_base_models,
     get_all_models,
     get_filtered_models,
+    resolve_context_window,
 )
 from open_webui.utils.payload import apply_model_controls
 from open_webui.utils.oauth import (
@@ -2282,7 +2283,11 @@ async def chat_completion(
                 # info.params (public_model_params), so this has to be copied
                 # out of the model row here for the context compaction code to
                 # be able to derive a threshold from the real window.
-                'context_window': model_info_params.get('context_window'),
+                'context_window': resolve_context_window(
+                    model_info,
+                    model_info_params,
+                    request.app.state.MODELS,
+                ),
                 'function_calling': (
                     form_data.get('params', {}).get('function_calling')
                     or model_info_params.get('function_calling')

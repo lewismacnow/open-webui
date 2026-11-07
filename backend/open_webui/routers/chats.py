@@ -276,8 +276,7 @@ async def get_chat_config_values() -> dict:
     config = {field: values[storage_key] for field, storage_key in CHAT_CONFIG_KEYS.items() if storage_key in values}
     if config.get('CONTEXT_COMPACTION_MODEL') is None:
         config['CONTEXT_COMPACTION_MODEL'] = ''
-    if config.get('CONTEXT_COMPACTION_TOKEN_CAP') is None:
-        config['CONTEXT_COMPACTION_TOKEN_CAP'] = config.get('CONTEXT_COMPACTION_TOKEN_THRESHOLD', 80000)
+    # An unset cap stays unset - it means "no ceiling", not "the threshold".
     if config.get('CONTEXT_COMPACTION_RETENTION_PERCENTAGE') is None:
         config['CONTEXT_COMPACTION_RETENTION_PERCENTAGE'] = 40
     return config
@@ -909,7 +908,11 @@ async def set_chat_config(form_data: ChatConfigForm, user=Depends(get_admin_user
     if threshold is None:
         threshold = CONTEXT_COMPACTION_TOKEN_THRESHOLD
     threshold = max(1, int(threshold))
-    token_cap = max(1, int(form_data.CONTEXT_COMPACTION_TOKEN_CAP or threshold))
+    # The token cap is an independent absolute ceiling. Leaving it empty means
+    # "no ceiling" - it must not default to the threshold, or it would clamp
+    # the window-derived threshold back down to the global guess.
+    token_cap = form_data.CONTEXT_COMPACTION_TOKEN_CAP
+    token_cap = int(token_cap) if token_cap is not None and int(token_cap) > 0 else None
     retention_percentage = form_data.CONTEXT_COMPACTION_RETENTION_PERCENTAGE
     if retention_percentage is None:
         retention_percentage = CONTEXT_COMPACTION_RETENTION_PERCENTAGE
