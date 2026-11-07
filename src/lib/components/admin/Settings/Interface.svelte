@@ -45,11 +45,21 @@
 
 	let chatConfig = {
 		CONTEXT_COMPACTION_MODEL: '',
-		ENABLE_CONTEXT_COMPACTION: false,
+		ENABLE_CONTEXT_COMPACTION: true,
 		CONTEXT_COMPACTION_TOKEN_THRESHOLD: 80000,
-		CONTEXT_COMPACTION_TOKEN_CAP: 80000,
+		// Empty = no ceiling. The cap is an absolute limit on any compaction
+		// threshold; it must not default to the threshold, or it would clamp
+		// the window-derived threshold back down to the global guess.
+		CONTEXT_COMPACTION_TOKEN_CAP: null as number | null,
 		CONTEXT_COMPACTION_RETENTION_PERCENTAGE: 40,
 		CONTEXT_COMPACTION_PROMPT_TEMPLATE: '',
+		CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO: 0.8,
+		ENABLE_CONTEXT_PRUNING: true,
+		ENABLE_CONTEXT_PRUNING_TOOL_OUTPUT: true,
+		CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT: 3,
+		ENABLE_CONTEXT_PRUNING_DEDUPE: true,
+		ENABLE_CONTEXT_PRUNING_PURGE_ERRORS: true,
+		CONTEXT_PRUNING_PURGE_ERROR_TURNS: 2,
 		ENABLE_TOOL_PERMISSIONS: false,
 		ENABLE_TOOL_SEARCH: false,
 		TOOL_SEARCH_DEFER_THRESHOLD: 400,
@@ -58,6 +68,10 @@
 	};
 	let toolSearchAlwaysLoaded = '';
 	let showTaskParameters = false;
+	// The context window ratio is stored as a fraction (0.1 - 0.95) but shown
+	// as a percentage, which is how admins think about "compact at 80% of the
+	// model's context".
+	let contextWindowPercent = 80;
 
 	const configuredParams = (params: Record<string, any> = {}) =>
 		Object.fromEntries(
@@ -144,6 +158,9 @@
 			]);
 			taskConfig.TASK_MODEL_PARAMS = taskConfig.TASK_MODEL_PARAMS ?? {};
 			toolSearchAlwaysLoaded = (chatConfig.TOOL_SEARCH_ALWAYS_LOADED ?? []).join(', ');
+			contextWindowPercent = Math.round(
+				(chatConfig.CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO ?? 0.8) * 100
+			);
 
 			workspaceModels = await getBaseModels(localStorage.token);
 			baseModels = await getModels(localStorage.token, null, false);
@@ -343,6 +360,7 @@
 							min="1"
 							step="1"
 							class={inputClass}
+							placeholder={$i18n.t('No limit')}
 							bind:value={chatConfig.CONTEXT_COMPACTION_TOKEN_CAP}
 						/>
 					</AdminSettingField>
@@ -381,6 +399,104 @@
 							<code>{'{{CURRENT_DATE}}'}</code>
 						</div>
 					</AdminSettingField>
+
+					<AdminSettingField
+						label={$i18n.t('settings.admin.interface.contextWindowRatio.label')}
+						description={$i18n.t('settings.admin.interface.contextWindowRatio.description')}
+					>
+						<div class="flex items-center gap-2">
+							<input
+								type="number"
+								min="10"
+								max="95"
+								step="1"
+								class={inputClass}
+								bind:value={contextWindowPercent}
+								on:input={() => {
+									chatConfig.CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO = Math.min(
+										0.95,
+										Math.max(0.1, (contextWindowPercent || 0) / 100)
+									);
+								}}
+							/>
+							<span class="text-xs text-gray-500 dark:text-gray-400">%</span>
+						</div>
+					</AdminSettingField>
+				{/if}
+
+				<AdminSettingRow
+					label={$i18n.t('settings.admin.interface.contextPruning.label')}
+					description={$i18n.t('settings.admin.interface.contextPruning.description')}
+					let:labelId
+				>
+					<Switch bind:state={chatConfig.ENABLE_CONTEXT_PRUNING} ariaLabelledbyId={labelId} />
+				</AdminSettingRow>
+
+				{#if chatConfig.ENABLE_CONTEXT_PRUNING}
+					<AdminSettingRow
+						label={$i18n.t('settings.admin.interface.contextPruningToolOutput.label')}
+						description={$i18n.t('settings.admin.interface.contextPruningToolOutput.description')}
+						let:labelId
+					>
+						<Switch
+							bind:state={chatConfig.ENABLE_CONTEXT_PRUNING_TOOL_OUTPUT}
+							ariaLabelledbyId={labelId}
+						/>
+					</AdminSettingRow>
+
+					{#if chatConfig.ENABLE_CONTEXT_PRUNING_TOOL_OUTPUT}
+						<AdminSettingField
+							label={$i18n.t('settings.admin.interface.contextPruningKeepRecent.label')}
+							description={$i18n.t('settings.admin.interface.contextPruningKeepRecent.description')}
+						>
+							<input
+								type="number"
+								min="0"
+								max="50"
+								step="1"
+								class={inputClass}
+								bind:value={chatConfig.CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT}
+							/>
+						</AdminSettingField>
+					{/if}
+
+					<AdminSettingRow
+						label={$i18n.t('settings.admin.interface.contextPruningDedupe.label')}
+						description={$i18n.t('settings.admin.interface.contextPruningDedupe.description')}
+						let:labelId
+					>
+						<Switch
+							bind:state={chatConfig.ENABLE_CONTEXT_PRUNING_DEDUPE}
+							ariaLabelledbyId={labelId}
+						/>
+					</AdminSettingRow>
+
+					<AdminSettingRow
+						label={$i18n.t('settings.admin.interface.contextPruningPurgeErrors.label')}
+						description={$i18n.t('settings.admin.interface.contextPruningPurgeErrors.description')}
+						let:labelId
+					>
+						<Switch
+							bind:state={chatConfig.ENABLE_CONTEXT_PRUNING_PURGE_ERRORS}
+							ariaLabelledbyId={labelId}
+						/>
+					</AdminSettingRow>
+
+					{#if chatConfig.ENABLE_CONTEXT_PRUNING_PURGE_ERRORS}
+						<AdminSettingField
+							label={$i18n.t('settings.admin.interface.contextPruningPurgeTurns.label')}
+							description={$i18n.t('settings.admin.interface.contextPruningPurgeTurns.description')}
+						>
+							<input
+								type="number"
+								min="0"
+								max="50"
+								step="1"
+								class={inputClass}
+								bind:value={chatConfig.CONTEXT_PRUNING_PURGE_ERROR_TURNS}
+							/>
+						</AdminSettingField>
+					{/if}
 				{/if}
 
 				<AdminSettingRow

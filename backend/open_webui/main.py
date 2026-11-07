@@ -46,6 +46,7 @@ from open_webui.config import (
     BYPASS_ADMIN_ACCESS_CONTROL,
     CACHE_DIR,
     CORS_ALLOW_ORIGIN,
+    DEFAULT_BASE_MODEL_CONTEXT_WINDOW,
     DEFAULT_LOCALE,
     ENABLE_ADMIN_ANALYTICS,
     # Admin
@@ -239,7 +240,10 @@ from open_webui.utils.chat import (
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
-from open_webui.utils.failover import resolve_failover_candidates
+from open_webui.utils.failover import (
+    resolve_failover_candidates,
+    resolve_failover_chain_model_ids,
+)
 from open_webui.utils.chat_id import (
     get_temporary_chat_session_id,
     is_saved_chat_id,
@@ -267,6 +271,7 @@ from open_webui.utils.models import (
     get_all_base_models,
     get_all_models,
     get_filtered_models,
+    resolve_context_window,
 )
 from open_webui.utils.payload import apply_model_controls
 from open_webui.utils.oauth import (
@@ -2003,6 +2008,31 @@ async def chat_completion(
             model_info.params.model_dump() if model_info and model_info.params else {},
         )
         model_info_params.pop('model_controls', None)
+
+        # Effective context window for this request. The model registry strips
+        # info.params (public_model_params), so the window has to be resolved
+        # here and carried in metadata['params'] for the context compaction
+        # code. A base model uses its own configured window (default 256K); a
+        # wrapper inherits its base model's and may only lower it - and never
+        # exceed the smallest window in the failover chain that could serve
+        # the request.
+        _window_cfg = await Config.get_many(
+            'models.base_model_context_window_default',
+            'models.base_model_context_windows',
+        )
+        _base_model_id = (model_info.base_model_id if model_info and model_info.base_model_id else model_id) or ''
+        _chain_model_ids = await resolve_failover_chain_model_ids(model_info, _base_model_id)
+        context_window = resolve_context_window(
+            requested_model_id=_base_model_id,
+            model_info=model_info,
+            own_context_window=model_info_params.get('context_window'),
+            chain_model_ids=_chain_model_ids,
+            base_windows=_window_cfg.get('models.base_model_context_windows') or {},
+            models=request.app.state.MODELS,
+            default_window=_window_cfg.get('models.base_model_context_window_default')
+            or DEFAULT_BASE_MODEL_CONTEXT_WINDOW,
+        )
+
         request_params = {key: value for key, value in (form_data.get('params') or {}).items() if value is not None}
         model_controls = request_params.pop('model_controls', {})
         if not isinstance(model_controls, dict):
@@ -2278,6 +2308,13 @@ async def chat_completion(
                 'stream_delta_chunk_size': stream_delta_chunk_size,
                 'reasoning_tags': reasoning_tags,
                 'compact_token_threshold': compact_token_threshold,
+                # The effective context window for this request: the base
+                # model's window, capped by the smallest window among the
+                # models that could serve it (the failover chain), and by the
+                # workspace model's own limit - which may only lower it.
+                # Resolved per request so a chain edited at runtime takes
+                # effect immediately.
+                'context_window': context_window,
                 'function_calling': (
                     form_data.get('params', {}).get('function_calling')
                     or model_info_params.get('function_calling')

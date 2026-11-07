@@ -2340,7 +2340,7 @@ TASK_MODEL_PARAMS = task_model_params
 
 CONTEXT_COMPACTION_MODEL = os.getenv('CONTEXT_COMPACTION_MODEL', '')
 
-ENABLE_CONTEXT_COMPACTION = os.getenv('ENABLE_CONTEXT_COMPACTION', 'False').lower() == 'true'
+ENABLE_CONTEXT_COMPACTION = os.getenv('ENABLE_CONTEXT_COMPACTION', 'True').lower() == 'true'
 
 ENABLE_TOOL_PERMISSIONS = os.getenv('ENABLE_TOOL_PERMISSIONS', 'False').lower() == 'true'
 
@@ -2354,6 +2354,21 @@ CONTEXT_COMPACTION_RETENTION_PERCENTAGE = min(
 )
 
 CONTEXT_COMPACTION_PROMPT_TEMPLATE = os.getenv('CONTEXT_COMPACTION_PROMPT_TEMPLATE', '')
+
+# Fraction of a model's declared context window at which compaction triggers.
+# Only used for models that declare a 'context_window' param and have no
+# explicit threshold set. Kept below 1.0 so there is headroom for the
+# reply, the summary itself and any tool output that follows.
+CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO = min(
+    0.95, max(0.1, float(os.getenv('CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO', '0.8')))
+)
+
+# Fork: the maximum context window of a BASE model. Every base model gets
+# this unless the admin overrides it in
+# 'models.base_model_context_windows'. Wrapper models inherit their base
+# model's window and may only lower it - never raise it, and never raise it
+# above the smallest window in the failover chain that could serve them.
+DEFAULT_BASE_MODEL_CONTEXT_WINDOW = int(os.getenv('DEFAULT_BASE_MODEL_CONTEXT_WINDOW', '256000'))
 
 # Fork: lightweight context pruning (dedupe, prune, purge errors)
 # Runs on every chat (UI + API) before prefix-summarization compaction.
@@ -3348,6 +3363,9 @@ DEFAULT_CONFIG = {
     'chat.context_compaction.token_cap': CONTEXT_COMPACTION_TOKEN_CAP,
     'chat.context_compaction.retention_percentage': CONTEXT_COMPACTION_RETENTION_PERCENTAGE,
     'chat.context_compaction.prompt_template': CONTEXT_COMPACTION_PROMPT_TEMPLATE,
+    'chat.context_compaction.context_window_ratio': CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO,
+    'models.base_model_context_window_default': DEFAULT_BASE_MODEL_CONTEXT_WINDOW,
+    'models.base_model_context_windows': {},
     'chat.context_pruning.enable': ENABLE_CONTEXT_PRUNING,
     'chat.context_pruning.tool_output_pruning': ENABLE_CONTEXT_PRUNING_TOOL_OUTPUT,
     'chat.context_pruning.tool_output_keep_recent': CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT,

@@ -881,11 +881,11 @@ export const setApiToolsConfig = async (
 		opt_out_models?: string[];
 	}
 ): Promise<{
-		enabled: boolean;
-		allowed_categories: string[];
-		allow_tool_servers: boolean;
-		opt_out_models: string[];
-	}> => {
+	enabled: boolean;
+	allowed_categories: string[];
+	allow_tool_servers: boolean;
+	opt_out_models: string[];
+}> => {
 	let error = null;
 	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/api-tools`, {
 		method: 'POST',
@@ -1245,6 +1245,74 @@ export const setFailoverQueueConfig = async (
 };
 
 // --- Token Caps ---
+
+export type BaseModelContextWindowsConfig = {
+	// The window every base model gets unless it has its own entry.
+	default: number;
+	// Per-base-model windows, keyed by base model id.
+	windows: Record<string, number>;
+};
+
+export const getBaseModelContextWindows = async (
+	token: string
+): Promise<BaseModelContextWindowsConfig> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/base-model-context-windows`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return { default: res?.default ?? 256000, windows: res?.windows ?? {} };
+};
+
+export const setBaseModelContextWindows = async (
+	token: string,
+	config: BaseModelContextWindowsConfig
+): Promise<BaseModelContextWindowsConfig> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/base-model-context-windows`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			default: config.default,
+			windows: config.windows
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return { default: res?.default ?? 256000, windows: res?.windows ?? {} };
+};
 
 export type TokenCap = {
 	target_type: 'user' | 'group' | 'model' | 'api_key';

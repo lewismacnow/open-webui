@@ -234,6 +234,50 @@
 				</div>
 			{/if}
 		</div>
+
+		<div>
+			<Tooltip
+				content={$i18n.t('settings.personal.general.parameters.contextWindow.description')}
+				placement="top-start"
+				className="inline-tooltip"
+			>
+				<div class="flex w-full justify-between">
+					<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+						{$i18n.t('settings.personal.general.parameters.contextWindow.label')}
+					</div>
+					<button
+						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+						type="button"
+						on:click={() => {
+							params.context_window = (params?.context_window ?? null) === null ? 128000 : null;
+						}}
+					>
+						{#if (params?.context_window ?? null) === null}
+							<span class="ml-2 self-center"> {$i18n.t('Default')} </span>
+						{:else}
+							<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
+						{/if}
+					</button>
+				</div>
+			</Tooltip>
+
+			{#if (params?.context_window ?? null) !== null}
+				<div class="flex mt-0.5 space-x-2">
+					<div class=" flex-1">
+						<input
+							class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-gray-900 dark:text-gray-100"
+							type="number"
+							aria-label={$i18n.t('settings.personal.general.parameters.contextWindow.label')}
+							placeholder={$i18n.t('Enter the context window in tokens')}
+							bind:value={params.context_window}
+							autocomplete="off"
+							min="1"
+							step="1"
+						/>
+					</div>
+				</div>
+			{/if}
+		</div>
 	{/if}
 
 	<div>

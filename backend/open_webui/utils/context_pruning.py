@@ -47,6 +47,20 @@ def _approx_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+# Markers written by the pruning strategies themselves. A tool result whose
+# content starts with one of these has already been replaced and must not be
+# re-wrapped (which would report the placeholder's size as the original).
+_PRUNING_PLACEHOLDER_PREFIXES = (
+    '[Tool result omitted to save context',
+    '[Duplicate tool call',
+)
+
+
+def _is_pruning_placeholder(content: str) -> bool:
+    stripped = content.strip()
+    return any(stripped.startswith(prefix) for prefix in _PRUNING_PLACEHOLDER_PREFIXES)
+
+
 def _parse_tool_call_key(tool_call: dict) -> tuple[str, str] | None:
     """
     Extract a stable (tool_name, arguments_canonical) key from a tool_call dict.
@@ -104,6 +118,10 @@ async def prune_tool_outputs(
     for i in to_compact:
         msg = result[i]
         original_content = msg.get('content', '')
+        if isinstance(original_content, str) and _is_pruning_placeholder(original_content):
+            # Already replaced by another strategy. Re-wrapping it would
+            # report the placeholder's size as the original result's size.
+            continue
         original_tokens = _approx_tokens(original_content) if isinstance(original_content, str) else 0
         tool_call_id = msg.get('tool_call_id', '?')
         # Preserve message structure; just replace content
