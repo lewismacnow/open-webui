@@ -310,6 +310,57 @@ The branch is byte-identical in the fork's pre-merge tree
 own `fb4d350ba` ("feat(server): API Tools, response summaries, context pruning"). The
 v0.13.2 sync did not touch it.
 
+### 9.5 The tiktoken token estimator was lost — `utils/context_compaction.py`
+
+**Introduced by this merge** — the only genuinely fork-authored loss found by the
+provenance sweep.
+
+The sync rewrote `context_compaction.py` on top of upstream's file and re-applied the fork's
+features, but the fork's **tiktoken-based estimator** was missed and the merge shipped the
+bare `len(text) // 4` heuristic.
+
+The heuristic is not a rough approximation of tiktoken — it is wrong in the direction that
+matters:
+
+| content           | `len//4` | tiktoken | error |
+| ----------------- | -------: | -------: | ----: |
+| English prose     |      225 |      201 |  −11% |
+| JSON tool payload |       95 |  **369** |  −74% |
+| non-ASCII text    |       40 |  **160** |  −75% |
+
+A tool-heavy chat was counted at roughly a quarter of its real size, so **compaction fired
+several turns later than configured** — on exactly the content the fork's compaction work
+exists to bound. The module's own docstring still claimed _"falls back to a tiktoken
+estimate"_ while the code did no such thing, and `tiktoken==0.13.0` is a hard dependency in
+both `requirements.txt` and `requirements-slim.txt`.
+
+Restored verbatim from the fork's pre-merge tree:
+
+- `_get_tiktoken_encoder()` — lazily loads and caches `cl100k_base`, with a char-heuristic
+  fallback when tiktoken cannot be loaded;
+- the tiktoken branch in `_estimate_tokens()`;
+- the **"compaction did not reduce the context"** diagnostic — it reports when a compaction
+  cannot shrink the context and will therefore re-trigger every turn at the cost of a
+  full-context LLM call each time. That is the exact failure mode the fork's budget
+  enforcement targets, and it was silent;
+- the "summariser model is unavailable, falling back to the chat model" warning.
+
+`backend/open_webui/test/test_context_compaction.py` pins the estimator: it fails on the
+heuristic-only file (5 failures) and passes on this one.
+
+### 9.6 Two cosmetic losses
+
+- **`Models.svelte` — the global-failover wrapper label.** The fork's `modelBaseLabel()`
+  helper was lost, so a global-failover wrapper now shows "No description" where it used to
+  show "Global failover chain". The backend support is intact (`meta.failover_source` is
+  still modelled and still set by the Model Editor) — only the label was lost. Restored, with
+  the translation string added to `en-US` (it was never in the catalogue, so the fork was
+  showing the raw key).
+- **`utils/middleware.py` — a dead import.** Two `from open_webui.utils.payload import ...`
+  lines were kept: the fork's, which named `resolve_system_prompt`, and upstream's. Upstream
+  removed the `resolve_system_prompt()` call site in its own refactor (`8e2ba2937`), so the
+  name was dead. The fork's line is removed; upstream's line is left as the single import.
+
 ## 10. Known follow-ups
 
 - The fork's note-files injection in `process_chat_payload` was **not** restored — upstream
