@@ -2353,6 +2353,14 @@ CONTEXT_COMPACTION_RETENTION_PERCENTAGE = min(
     50, max(10, int(os.getenv('CONTEXT_COMPACTION_RETENTION_PERCENTAGE', '40')))
 )
 
+# Fork: retention after compaction is expressed as COUNTS, not as a
+# percentage of the history. Compaction keeps the last N messages, keeps the
+# reasoning/thought of the last N assistant messages, and keeps the details of
+# the last N tool calls; everything older is summarised away.
+CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES = max(2, int(os.getenv('CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES', '12')))
+CONTEXT_COMPACTION_KEEP_RECENT_REASONING = max(0, int(os.getenv('CONTEXT_COMPACTION_KEEP_RECENT_REASONING', '3')))
+CONTEXT_COMPACTION_KEEP_RECENT_TOOL_CALLS = max(0, int(os.getenv('CONTEXT_COMPACTION_KEEP_RECENT_TOOL_CALLS', '5')))
+
 CONTEXT_COMPACTION_PROMPT_TEMPLATE = os.getenv('CONTEXT_COMPACTION_PROMPT_TEMPLATE', '')
 
 # Fraction of a model's declared context window at which compaction triggers.
@@ -3362,6 +3370,9 @@ DEFAULT_CONFIG = {
     'chat.context_compaction.token_threshold': CONTEXT_COMPACTION_TOKEN_THRESHOLD,
     'chat.context_compaction.token_cap': CONTEXT_COMPACTION_TOKEN_CAP,
     'chat.context_compaction.retention_percentage': CONTEXT_COMPACTION_RETENTION_PERCENTAGE,
+    'chat.context_compaction.keep_recent_messages': CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES,
+    'chat.context_compaction.keep_recent_reasoning': CONTEXT_COMPACTION_KEEP_RECENT_REASONING,
+    'chat.context_compaction.keep_recent_tool_calls': CONTEXT_COMPACTION_KEEP_RECENT_TOOL_CALLS,
     'chat.context_compaction.prompt_template': CONTEXT_COMPACTION_PROMPT_TEMPLATE,
     'chat.context_compaction.context_window_ratio': CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO,
     'models.base_model_context_window_default': DEFAULT_BASE_MODEL_CONTEXT_WINDOW,

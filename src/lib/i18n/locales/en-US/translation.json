@@ -2881,8 +2881,6 @@
 	"settings.admin.interface.promptTemplate.label": "Prompt Template",
 	"settings.admin.interface.queryGenerationPrompt.description": "Shared prompt for retrieval and web-search query rewriting.",
 	"settings.admin.interface.queryGenerationPrompt.label": "Query Generation Prompt",
-	"settings.admin.interface.retainedMessages.description": "Percentage of recent messages to keep after older messages are summarized.",
-	"settings.admin.interface.retainedMessages.label": "Retained Messages",
 	"settings.admin.interface.retrievalQueryGeneration.description": "Rewrite user requests for knowledge retrieval.",
 	"settings.admin.interface.retrievalQueryGeneration.label": "Retrieval Query Generation",
 	"settings.admin.interface.sections.chat.title": "Chat",
@@ -4024,5 +4022,11 @@
 	"YouTube": "",
 	"YouTube video player": "",
 	"Zoom in": "",
-	"Zoom out": ""
+	"Zoom out": "",
+	"settings.admin.interface.retainedMessages.label": "Recent Messages Kept",
+	"settings.admin.interface.retainedMessages.description": "How many of the most recent messages are kept verbatim after a compaction. Everything older is summarised.",
+	"settings.admin.interface.retainedReasoning.label": "Recent Reasoning Kept",
+	"settings.admin.interface.retainedReasoning.description": "How many of the most recent assistant messages keep their reasoning/thought. Reasoning from older messages is purged.",
+	"settings.admin.interface.retainedToolCalls.label": "Recent Tool Calls Kept",
+	"settings.admin.interface.retainedToolCalls.description": "How many of the most recent tool calls keep their inputs and outputs. Older tool details are purged."
 }

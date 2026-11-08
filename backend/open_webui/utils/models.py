@@ -273,6 +273,23 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
     existing_ids = {m['id'] for m in models}
 
     for custom_model in custom_models:
+        # Fork: a row whose id belongs to a CONNECTION model is a base model -
+        # it overrides that connection model in place. It must not point at
+        # another model: the Model Editor used to force a base selection on
+        # every model it saved, which turned base models into wrappers and
+        # rerouted their requests somewhere else entirely. Detect that and
+        # fall back to the override behaviour, and repair the stored row so
+        # the confusion does not come back.
+        if custom_model.base_model_id and custom_model.id in base_model_lookup:
+            log.warning(
+                'Model %r is a base model (its id belongs to a connection model) but had '
+                'base_model_id=%r set. Clearing it - a base model cannot wrap another model.',
+                custom_model.id,
+                custom_model.base_model_id,
+            )
+            await Models.clear_base_model_id(custom_model.id)
+            custom_model.base_model_id = None
+
         if custom_model.base_model_id is None:
             # Override applied directly to a base model (shares the same ID)
             model = base_model_lookup.get(custom_model.id)

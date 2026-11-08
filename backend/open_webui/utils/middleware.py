@@ -7548,18 +7548,28 @@ async def streaming_chat_response_handler(response, ctx):
                                         idx for idx, message in enumerate(messages) if message.get('role') != 'system'
                                     )
                                     messages[checkpoint] = {**messages[checkpoint], 'contextSummary': context_summary}
-                                    output.append(
-                                        {
-                                            'type': 'open_webui:context_compaction',
-                                            'id': output_id('cc'),
-                                            'call_id': next(
-                                                message['tool_calls'][0]['id']
-                                                for message in messages
-                                                if message.get('tool_calls')
-                                            ),
-                                            'summary': context_summary,
-                                        }
+                                    # The marker anchors the summary to the tool
+                                    # call it replaced. If there is no tool call
+                                    # left to anchor to, do NOT throw the
+                                    # compaction away - the contextSummary on
+                                    # the message is enough to replay from.
+                                    call_id = next(
+                                        (
+                                            message['tool_calls'][0]['id']
+                                            for message in messages
+                                            if message.get('tool_calls')
+                                        ),
+                                        None,
                                     )
+                                    if call_id:
+                                        output.append(
+                                            {
+                                                'type': 'open_webui:context_compaction',
+                                                'id': output_id('cc'),
+                                                'call_id': call_id,
+                                                'summary': context_summary,
+                                            }
+                                        )
                                     await emit_output()
                             except Exception:
                                 log.exception('Tool loop context compaction failed; keeping the current context')

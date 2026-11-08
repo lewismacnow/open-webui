@@ -777,6 +777,27 @@ class ModelsTable:
                 await session.rollback()
                 raise
 
+    async def clear_base_model_id(self, id: str, db: AsyncSession | None = None) -> bool:
+        """Clear a stored ``base_model_id`` on a model row.
+
+        Used to repair a base model that was mistakenly turned into a
+        wrapper (its id belongs to a connection model, so it must not
+        point at another model).
+        """
+        async with get_async_db_context(db) as session:
+            try:
+                model = await session.get(Model, id, populate_existing=True)
+                if model is None or model.base_model_id is None:
+                    return False
+                model.base_model_id = None
+                model.updated_at = int(time.time())
+                await session.commit()
+                return True
+            except Exception as e:
+                log.error(f'Error clearing base_model_id for model {id}: {e}')
+                await session.rollback()
+                return False
+
     async def update_model_updated_at_by_id(self, id: str, db: AsyncSession | None = None) -> ModelModel | None:
         try:
             async with get_async_db_context(db) as db:

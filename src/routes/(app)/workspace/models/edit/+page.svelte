@@ -15,6 +15,13 @@
 
 	let model = null;
 
+	// A WRAPPER model is a custom model with a base model of its own; the
+	// model registry marks those with `preset: true`. A base model (its id
+	// belongs to a connection model) is NOT a wrapper and must not be given
+	// a base model of its own. Deriving this from the registry stops a base
+	// model from being edited as if it were a wrapper.
+	$: isPresetModel = !!$models?.find((m) => m.id === model?.id)?.preset;
+
 	onMount(async () => {
 		const _id = $page.url.searchParams.get('id');
 		if (_id) {
@@ -64,6 +71,7 @@
 	<ModelEditor
 		edit={true}
 		{model}
+		preset={isPresetModel}
 		{onSubmit}
 		onBack={async () => {
 			await goto('/workspace/models');

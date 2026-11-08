@@ -60,6 +60,9 @@ CHAT_CONFIG_KEYS = {
     'CONTEXT_COMPACTION_TOKEN_THRESHOLD': 'chat.context_compaction.token_threshold',
     'CONTEXT_COMPACTION_TOKEN_CAP': 'chat.context_compaction.token_cap',
     'CONTEXT_COMPACTION_RETENTION_PERCENTAGE': 'chat.context_compaction.retention_percentage',
+    'CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES': 'chat.context_compaction.keep_recent_messages',
+    'CONTEXT_COMPACTION_KEEP_RECENT_REASONING': 'chat.context_compaction.keep_recent_reasoning',
+    'CONTEXT_COMPACTION_KEEP_RECENT_TOOL_CALLS': 'chat.context_compaction.keep_recent_tool_calls',
     'CONTEXT_COMPACTION_PROMPT_TEMPLATE': 'chat.context_compaction.prompt_template',
     'CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO': 'chat.context_compaction.context_window_ratio',
     'ENABLE_CONTEXT_PRUNING': 'chat.context_pruning.enable',
@@ -211,6 +214,9 @@ class ChatConfigForm(BaseModel):
     CONTEXT_COMPACTION_TOKEN_THRESHOLD: int | None = None
     CONTEXT_COMPACTION_TOKEN_CAP: int | None = None
     CONTEXT_COMPACTION_RETENTION_PERCENTAGE: int | None = None
+    CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES: int | None = None
+    CONTEXT_COMPACTION_KEEP_RECENT_REASONING: int | None = None
+    CONTEXT_COMPACTION_KEEP_RECENT_TOOL_CALLS: int | None = None
     CONTEXT_COMPACTION_PROMPT_TEMPLATE: str
     CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO: float | None = None
     ENABLE_CONTEXT_PRUNING: bool = True
@@ -917,6 +923,13 @@ async def set_chat_config(form_data: ChatConfigForm, user=Depends(get_admin_user
     if retention_percentage is None:
         retention_percentage = CONTEXT_COMPACTION_RETENTION_PERCENTAGE
     retention_percentage = min(50, max(10, int(retention_percentage)))
+    # Retention after compaction is a COUNT of recent items.
+    keep_recent_messages = form_data.CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES
+    keep_recent_messages = 12 if keep_recent_messages is None else max(2, int(keep_recent_messages))
+    keep_recent_reasoning = form_data.CONTEXT_COMPACTION_KEEP_RECENT_REASONING
+    keep_recent_reasoning = 3 if keep_recent_reasoning is None else max(0, int(keep_recent_reasoning))
+    keep_recent_tool_calls = form_data.CONTEXT_COMPACTION_KEEP_RECENT_TOOL_CALLS
+    keep_recent_tool_calls = 5 if keep_recent_tool_calls is None else max(0, int(keep_recent_tool_calls))
     context_window_ratio = form_data.CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO
     if context_window_ratio is not None:
         context_window_ratio = min(0.95, max(0.1, float(context_window_ratio)))
@@ -930,6 +943,9 @@ async def set_chat_config(form_data: ChatConfigForm, user=Depends(get_admin_user
                 'CONTEXT_COMPACTION_TOKEN_THRESHOLD': threshold,
                 'CONTEXT_COMPACTION_TOKEN_CAP': token_cap,
                 'CONTEXT_COMPACTION_RETENTION_PERCENTAGE': retention_percentage,
+                'CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES': keep_recent_messages,
+                'CONTEXT_COMPACTION_KEEP_RECENT_REASONING': keep_recent_reasoning,
+                'CONTEXT_COMPACTION_KEEP_RECENT_TOOL_CALLS': keep_recent_tool_calls,
                 'CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO': context_window_ratio,
                 'CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT': max(
                     0, int(form_data.CONTEXT_PRUNING_TOOL_OUTPUT_KEEP_RECENT)
