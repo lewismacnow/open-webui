@@ -228,9 +228,63 @@ Deliberately **not** worked around: suppressing the GET would disable server→c
 notifications for _every_ server, including the ones that do support it. The cost of the
 noise is lower than the cost of that.
 
+### 9.3 The API Tools block was dropped by the sync — `utils/middleware.py`
+
+**Introduced by this merge.**
+
+The `utils/middleware.py` conflict was resolved by taking upstream's shape, and the fork's
+API Tools block went with it. It sat between upstream's `if api_tools_active:` feature
+block and the fork's `tool_ids` block, so nothing marked it as a conflict. Three lines
+were lost from `process_chat_payload`:
+
+```python
+metadata['api_tools_active'] = api_tools_active
+metadata['ask_user_answers'] = form_data.get('ask_user_answers')
+use_builtin_tools = (
+    (internal_note or bool(metadata.get('session_id')) or api_tools_active)
+    and (metadata.get('params', {}).get('function_calling') != 'legacy')
+    and bool(model_capabilities.get('builtin_tools', True))
+)
+```
+
+Every **reader** of those keys survived the merge — the Path C branch in
+`non_streaming_chat_response_handler`, the Path C branch in `streaming_chat_response_handler`,
+the ask_user answers lookup in `api_tool_stream_wrapper`, and the `answers=` argument in the
+tool-call dispatch. Only the **writes** went missing, so:
+
+- `metadata['api_tools_active']` was always falsy → the API Tools path never ran. A
+  stateless API call returned the provider's `tool_calls` unexecuted, with no
+  `x_open_webui.tool_events`.
+- `metadata['ask_user_answers']` was always `None` → ask_user Pattern B (an API caller
+  supplying the answers) could never resolve, and the `answers=` argument restored in
+  §9.1 was correct but inert.
+
+The block is re-applied verbatim, in the position it held before the sync. The ordering
+relative to upstream's early `use_builtin_tools` definition is unchanged: the early uses
+(`include_file_context`, the memory branch, `can_author_skills`) keep upstream's value, and
+the later uses (the skills block, the tool filter) get the fork's superset — exactly as
+before the merge.
+
+**Not restored:** upstream's `b34885efc` deliberately removed the fork's note-files
+injection from the same region and replaced it with the `view_note` builtin tool. Re-adding
+it would double-inject note content, so it stays out. Flagged for a decision: if you want a
+note chat to auto-include the note's attached files again, that needs a deliberate design
+call, not a merge resolution.
+
+**Verified against a running container** with a mock OpenAI-compatible provider:
+
+| check                                            | result                                                                                                                                                                           |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| API Tools, stateless request, `stream:false`     | tools execute server-side; `x_open_webui.tool_events` carries `tool_call_start`/`tool_call_end` per tool; `tools_used` populated; final message built on the real tool output    |
+| ask_user Pattern B (`ask_user_answers` supplied) | the question resolves server-side (`{"status":"ok","answers":{"q1":"Blue"},"responder":"api-supplied"}`) and the resolved answer is fed back to the model on the next round trip |
+| UI/streaming tool path                           | unchanged — tools execute, container log free of `pop from empty list`                                                                                                           |
+
 ## 10. Known follow-ups
 
-- Re-check upstream's intent on the two restored blocks (note-files injection, `ast` fallback).
+- The fork's note-files injection in `process_chat_payload` was **not** restored — upstream
+  replaced it with the `view_note` builtin tool (§9.3). Decide whether a note chat should
+  auto-include the note's attached files again.
+- Upstream's intent on the restored `ast.literal_eval` tool-arg fallback.
 - Upstream's ModelEditor / ToolkitEditor deltas still to be ported.
 - `mcp==2.3.0` must be installed on the deployment (the merged `backend/requirements.txt` pins it).
 - The fork's MCP cleanup filter is gone from `utils/mcp/client.py`; confirm the ASGI-level suppression is sufficient.
