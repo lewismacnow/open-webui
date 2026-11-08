@@ -279,6 +279,37 @@ call, not a merge resolution.
 | ask_user Pattern B (`ask_user_answers` supplied) | the question resolves server-side (`{"status":"ok","answers":{"q1":"Blue"},"responder":"api-supplied"}`) and the resolved answer is fed back to the model on the next round trip |
 | UI/streaming tool path                           | unchanged — tools execute, container log free of `pop from empty list`                                                                                                           |
 
+### 9.4 The API Tools loop dropped the model's final text — `utils/middleware.py`
+
+**Pre-existing fork bug** (not merge-introduced), but only reachable once §9.3 restored the
+API Tools path.
+
+The tool loop asks the provider for `stream=true` on the follow-up round trip that carries
+the tool result back to the model. A provider — or an OpenAI-compatible proxy — may answer
+with a plain `chat.completion` body instead. `api_tool_stream_wrapper` then took the
+"not a `StreamingResponse`" branch, emitted a synthetic stop chunk and **never read the
+body**, so the model's final answer was thrown away: the client got an empty assistant
+message with `finish_reason: stop`, even though the tool had run and the provider had
+answered with text.
+
+The body is now parsed and the assistant text is emitted as a regular content chunk before
+the stop chunk, with the usage carried over when the body has it.
+
+This is tool-agnostic and was never specific to `ask_user`. Measured on the running
+container:
+
+| case                                 | before            | after      |
+| ------------------------------------ | ----------------- | ---------- |
+| `ask_user`, streaming follow-up      | content OK        | content OK |
+| `ask_user`, non-streaming follow-up  | content **empty** | content OK |
+| normal tool, streaming follow-up     | content OK        | content OK |
+| normal tool, non-streaming follow-up | content **empty** | content OK |
+
+The branch is byte-identical in the fork's pre-merge tree
+(`8b8d2527d:backend/open_webui/utils/middleware.py:5695-5710`) and came in with the fork's
+own `fb4d350ba` ("feat(server): API Tools, response summaries, context pruning"). The
+v0.13.2 sync did not touch it.
+
 ## 10. Known follow-ups
 
 - The fork's note-files injection in `process_chat_payload` was **not** restored — upstream
