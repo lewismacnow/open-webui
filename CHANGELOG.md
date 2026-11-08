@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-11-08
+
+### Fork sync: upstream v0.12.2 -> v0.13.2
+
+Merges upstream open-webui/open-webui v0.13.2 (1066 commits, 789 files) into the fork's
+feat/new_features branch. 31 textual conflicts, each resolved by hand: upstream's change
+taken as the base where it is a refactor or a fix, the fork's features layered back on
+top. Full conflict-by-conflict report: docs/sync-v0.13.2.md.
+
+Added from upstream:
+
+- **Context compaction fixes** - compaction now runs on chats with few messages that are
+  over the threshold; the summary is no longer cut off at 1000 tokens; /compact no longer
+  makes the next message larger after a long tool-calling reply; the summary prompt
+  replays the original chat request so the provider's prompt cache covers the history;
+  new shared context-usage estimators.
+- **MCP client** rewritten on the mcp 2.3.0 / httpx2 stack and the new session API.
+- **Knowledge file linking** claims upload capacity before linking and rolls the link
+  back if indexing fails.
+- **Temporary-chat session ownership** - a temporary chat can only be driven from the
+  session that created it.
+- **Model skill tools**, **admin-configurable embedding prefixes**, **interface
+  visibility config**, the **crypto/encryption** Rust crate, channel message/reaction
+  lookup indexes, and upstream's Svelte 5 frontend port.
+
+Kept from the fork: provider failover chains, global wrapper provider chains, GitHub
+knowledge sync, metadata enrichment, the durable embedding worker, ask_user Pattern B,
+ServiceKeys, API Tools, Vision RAG, context pruning, webhook custom headers, the Tool
+Generator, token caps, context-window inheritance, and the Base model chip.
+
+Migrations: c4d5e6f7a8b9 (compaction defaults), d5e6f7a8b9c0 (base model context
+windows), e7f8a9b0c1d2 (repair base models that were turned into wrappers), upstream's
+9f6c2a8d1b43, and kb06mergeheads (topology-only join, single alembic head).
+
 ## [0.12.2-fork] - 2026-10-15
 
 ### Fork sync: upstream v0.11.3 -> v0.12.2
