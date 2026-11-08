@@ -56,6 +56,16 @@
 		return model?.base_model_id ?? '';
 	}
 
+	// A BASE model shares its id with a connection model, so it has no
+	// base_model_id of its own. The model registry marks custom wrappers
+	// with `preset: true` and leaves connection models unmarked, so an
+	// unmarked id in the registry is a base model.
+	function isBaseModel(model: any): boolean {
+		if (!model?.id) return false;
+		const entry = ($_models ?? []).find((m: any) => m.id === model.id);
+		return !!entry && !entry.preset;
+	}
+
 	import EllipsisHorizontal from '../icons/EllipsisHorizontal.svelte';
 	import ArrowRight from '../icons/ArrowRight.svelte';
 	import CheckCircle from '../icons/CheckCircle.svelte';
@@ -858,6 +868,20 @@
 															class="hidden shrink-0 rounded-full bg-blue-500/10 px-1.5 py-0.5 text-[0.625rem] font-medium text-blue-600 dark:text-blue-400 sm:inline"
 														>
 															{$i18n.t('Global chain')}
+														</span>
+													</Tooltip>
+												{/if}
+
+												{#if isBaseModel(model)}
+													<Tooltip
+														content={$i18n.t(
+															'A base model provided by a connection. It has no wrapper of its own.'
+														)}
+													>
+														<span
+															class="hidden shrink-0 rounded-full bg-gray-500/10 px-1.5 py-0.5 text-[0.625rem] font-medium text-gray-600 dark:text-gray-400 sm:inline"
+														>
+															{$i18n.t('Base model')}
 														</span>
 													</Tooltip>
 												{/if}

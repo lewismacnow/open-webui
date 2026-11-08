@@ -51,7 +51,9 @@
 		// threshold; it must not default to the threshold, or it would clamp
 		// the window-derived threshold back down to the global guess.
 		CONTEXT_COMPACTION_TOKEN_CAP: null as number | null,
-		CONTEXT_COMPACTION_RETENTION_PERCENTAGE: 40,
+		CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES: 12,
+		CONTEXT_COMPACTION_KEEP_RECENT_REASONING: 3,
+		CONTEXT_COMPACTION_KEEP_RECENT_TOOL_CALLS: 5,
 		CONTEXT_COMPACTION_PROMPT_TEMPLATE: '',
 		CONTEXT_COMPACTION_CONTEXT_WINDOW_RATIO: 0.8,
 		ENABLE_CONTEXT_PRUNING: true,
@@ -371,11 +373,39 @@
 					>
 						<input
 							type="number"
-							min="10"
+							min="2"
+							max="200"
+							step="1"
+							class={inputClass}
+							bind:value={chatConfig.CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES}
+						/>
+					</AdminSettingField>
+
+					<AdminSettingField
+						label={$i18n.t('settings.admin.interface.retainedReasoning.label')}
+						description={$i18n.t('settings.admin.interface.retainedReasoning.description')}
+					>
+						<input
+							type="number"
+							min="0"
 							max="50"
 							step="1"
 							class={inputClass}
-							bind:value={chatConfig.CONTEXT_COMPACTION_RETENTION_PERCENTAGE}
+							bind:value={chatConfig.CONTEXT_COMPACTION_KEEP_RECENT_REASONING}
+						/>
+					</AdminSettingField>
+
+					<AdminSettingField
+						label={$i18n.t('settings.admin.interface.retainedToolCalls.label')}
+						description={$i18n.t('settings.admin.interface.retainedToolCalls.description')}
+					>
+						<input
+							type="number"
+							min="0"
+							max="100"
+							step="1"
+							class={inputClass}
+							bind:value={chatConfig.CONTEXT_COMPACTION_KEEP_RECENT_TOOL_CALLS}
 						/>
 					</AdminSettingField>
 

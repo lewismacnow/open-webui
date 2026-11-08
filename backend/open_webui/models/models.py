@@ -534,12 +534,20 @@ class ModelsTable:
     ) -> ModelListResponse:
         async with get_async_db_context(db) as db:
             stmt = select(Model, User).outerjoin(User, User.id == Model.user_id)
-            # Workspace models are wrappers: they have a legacy base_model_id
-            # OR a failover chain configuration. A wrapper set to the GLOBAL
-            # failover chain (meta.failover_source == 'global') legitimately
-            # has base_model_id == null - filtering on base_model_id alone
-            # made those models vanish from the workspace list (they saved
-            # fine and then hit 'model id already registered' on retry).
+            # Workspace models are wrappers: they have a base_model_id, OR they
+            # are set to the GLOBAL failover chain (meta.failover_source ==
+            # 'global'), which legitimately has base_model_id == null.
+            # Filtering on base_model_id alone made those global-chain wrappers
+            # vanish from the workspace list (they saved fine and then hit
+            # 'model id already registered' on retry).
+            #
+            # 'custom' must NOT qualify on its own. The Model Editor stamps
+            # failover_source='custom' onto EVERY model it saves - including
+            # base models, which have base_model_id == null - so matching it
+            # leaked base models into the workspace list. A wrapper with a
+            # custom chain always has base_model_id set (the editor assigns
+            # the first provider as the base), so the base_model_id branch
+            # already covers it.
             #
             # Model.meta is a JSONField (TypeDecorator over UnicodeText) so
             # SQL JSON operators like `meta['failover_source'].as_string()`
@@ -547,15 +555,18 @@ class ModelsTable:
             # the same cast-to-text + LIKE pattern the tag filter below
             # already uses (cross-dialect on SQLite + PostgreSQL), and
             # reuse json_text_variants for the ASCII/unicode encoding
-            # ambiguity. failover_source only takes 'global' or 'custom';
-            # a missing key or explicit null serialises as
-            # '"failover_source":null' which neither pattern matches.
+            # ambiguity. A missing key or explicit null serialises as
+            # '"failover_source":null' which the pattern does not match.
             meta_text = cast(Model.meta, String)
-            failover_variants = [v for raw in ('global', 'custom') for v in json_text_variants(raw)]
+            # Only 'global' qualifies a row with no base_model_id. See the
+            # comment above: 'custom' is stamped on every model the Model
+            # Editor saves, so matching it leaked base models into the
+            # workspace list.
+            global_variants = json_text_variants('global')
             stmt = stmt.filter(
                 or_(
                     Model.base_model_id != None,
-                    *(meta_text.like(f'%"{v}"%', escape='\\') for v in failover_variants),
+                    *(meta_text.like(f'%"{v}"%', escape='\\') for v in global_variants),
                 )
             )
 
@@ -765,6 +776,27 @@ class ModelsTable:
             except Exception:
                 await session.rollback()
                 raise
+
+    async def clear_base_model_id(self, id: str, db: AsyncSession | None = None) -> bool:
+        """Clear a stored ``base_model_id`` on a model row.
+
+        Used to repair a base model that was mistakenly turned into a
+        wrapper (its id belongs to a connection model, so it must not
+        point at another model).
+        """
+        async with get_async_db_context(db) as session:
+            try:
+                model = await session.get(Model, id, populate_existing=True)
+                if model is None or model.base_model_id is None:
+                    return False
+                model.base_model_id = None
+                model.updated_at = int(time.time())
+                await session.commit()
+                return True
+            except Exception as e:
+                log.error(f'Error clearing base_model_id for model {id}: {e}')
+                await session.rollback()
+                return False
 
     async def update_model_updated_at_by_id(self, id: str, db: AsyncSession | None = None) -> ModelModel | None:
         try:

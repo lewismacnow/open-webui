@@ -73,11 +73,35 @@ async def compact_messages_for_request(
     if not _exceeds_token_threshold(messages, system_prompt, previous_summary, token_threshold) or len(messages) <= 3:
         return [*system_messages, *messages], previous_summary, False
 
-    boundary = _find_compaction_boundary(messages, config['retention_percentage'])
+    boundary = _find_compaction_boundary(messages, config['keep_recent_messages'])
     compacted_messages = messages[:boundary]
     recent_messages = messages[boundary:]
-    if not compacted_messages or not recent_messages:
+    if not compacted_messages:
+        # Over budget, but there is nothing older to summarise away (the
+        # history is still inside the retention window). Trim the expensive
+        # parts of the window instead of shipping an over-budget request -
+        # this is what keeps a long agent turn inside its budget.
+        trimmed, dropped = _enforce_context_budget(
+            messages,
+            system_prompt,
+            previous_summary,
+            token_threshold,
+        )
+        if not dropped:
+            return [*system_messages, *messages], previous_summary, False
+        return [*system_messages, *trimmed], previous_summary, False
+    if not recent_messages:
         return [*system_messages, *messages], previous_summary, False
+
+    # The retained window keeps the last N messages, but the expensive parts
+    # inside it - the model's reasoning and the verbose tool payloads - are
+    # only kept for the most recent few. Everything else was summarised into
+    # the summary above.
+    recent_messages = _strip_old_details(
+        recent_messages,
+        config['keep_recent_reasoning'],
+        config['keep_recent_tool_calls'],
+    )
 
     event_emitter = None
     if metadata.get('chat_id') and metadata.get('message_id'):
@@ -145,13 +169,14 @@ async def compact_messages_for_request(
     if post_tokens >= pre_tokens:
         log.warning(
             'Context compaction did not reduce the context (chat=%s): ~%d tokens before, ~%d after '
-            '(threshold=%d, retention=%d%%). The retained window is already larger than the budget - '
-            'lower the retention percentage, lower the token threshold, or start a new chat.',
+            '(threshold=%d, keeping the last %d messages). The retained window is already larger '
+            'than the budget - keep fewer recent messages, lower the token threshold, or start a '
+            'new chat.',
             chat_id,
             pre_tokens,
             post_tokens,
             token_threshold,
-            config['retention_percentage'],
+            config['keep_recent_messages'],
         )
     elif post_tokens > token_threshold:
         log.warning(
@@ -170,6 +195,17 @@ async def compact_messages_for_request(
             {'contextSummary': summary},
             touch=False,
         )
+    elif recent_messages[0].get('role') != 'user':
+        # The summary is persisted ON the first retained message, and the
+        # checkpoint is only written for a user turn. If the boundary ever
+        # lands mid-turn the summary is thrown away and the context never
+        # shrinks - so make that failure loud instead of silent.
+        log.warning(
+            'Context compaction produced a summary but the first retained message '
+            'is not a user turn (role=%r); the summary was not checkpointed and '
+            'the context will not shrink.',
+            recent_messages[0].get('role'),
+        )
 
     log.info(
         'Compacted chat context for chat=%s checkpoint=%s response=%s dropped=%d kept=%d summary_chars=%d',
@@ -179,6 +215,17 @@ async def compact_messages_for_request(
         len(compacted_messages),
         len(recent_messages),
         len(summary),
+    )
+
+    # The compaction must leave the context INSIDE the budget - if the
+    # retained window alone is still too big, trim it. Otherwise the request
+    # goes out oversized and the provider rejects it, which is exactly the
+    # "ran out of context" failure this is meant to prevent.
+    recent_messages, _dropped = _enforce_context_budget(
+        recent_messages,
+        system_prompt,
+        summary,
+        token_threshold,
     )
 
     if event_emitter:
@@ -250,6 +297,9 @@ async def _load_config() -> dict:
         'chat.context_compaction.token_threshold',
         'chat.context_compaction.token_cap',
         'chat.context_compaction.retention_percentage',
+        'chat.context_compaction.keep_recent_messages',
+        'chat.context_compaction.keep_recent_reasoning',
+        'chat.context_compaction.keep_recent_tool_calls',
         'chat.context_compaction.prompt_template',
         'chat.context_compaction.context_window_ratio',
     )
@@ -263,6 +313,11 @@ async def _load_config() -> dict:
         # deriving a threshold from the model's real context window.
         'token_cap': _parse_positive_int(values.get('chat.context_compaction.token_cap')),
         'retention_percentage': _clamp_retention_percentage(values.get('chat.context_compaction.retention_percentage')),
+        # Retention is expressed as counts of recent items, not as a
+        # percentage of the history.
+        'keep_recent_messages': _parse_positive_int(values.get('chat.context_compaction.keep_recent_messages')) or 12,
+        'keep_recent_reasoning': _clamp_keep_count(values.get('chat.context_compaction.keep_recent_reasoning'), 3),
+        'keep_recent_tool_calls': _clamp_keep_count(values.get('chat.context_compaction.keep_recent_tool_calls'), 5),
         'prompt_template': values.get('chat.context_compaction.prompt_template', '') or '',
         'context_window_ratio': _clamp_context_window_ratio(values.get('chat.context_compaction.context_window_ratio')),
     }
@@ -290,6 +345,17 @@ def _clamp_context_window_ratio(value: Any) -> float:
     except (TypeError, ValueError):
         parsed = 0.8
     return min(0.95, max(0.1, parsed))
+
+
+def _clamp_keep_count(value: Any, default: int) -> int:
+    """A retention count: 0 is meaningful (keep none), so only negatives clamp."""
+    parsed = _parse_positive_int(value)
+    if parsed is None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+    return max(0, parsed)
 
 
 def _model_context_window(metadata: dict) -> int | None:
@@ -526,20 +592,179 @@ def _exceeds_token_threshold(messages: list[dict], system_prompt: str, summary: 
     return tokens > threshold
 
 
-def _find_compaction_boundary(messages: list[dict], retention_percentage: int = 40) -> int:
-    retention_percentage = _clamp_retention_percentage(retention_percentage)
-    keep_count = max(2, len(messages) * retention_percentage // 100)
-    target = max(1, len(messages) - keep_count)
-    if any(message.get('role') == 'tool' for message in messages):
-        # Keep each call/result batch and its following image messages together.
-        boundaries = [
-            idx
-            for idx, message in enumerate(messages)
-            if message.get('role') == 'assistant' and message.get('tool_calls')
-        ][1:]
-    else:
-        boundaries = [idx for idx, message in enumerate(messages) if message.get('role') == 'user'][1:]
-    return next((idx for idx in reversed(boundaries) if idx <= target), 0)
+def _enforce_context_budget(
+    messages: list[dict],
+    system_prompt: str,
+    summary: str | None,
+    threshold: int,
+) -> tuple[list[dict], int]:
+    """Trim the retained window until the context fits the budget.
+
+    Compaction can still leave the context over the limit - the retained
+    messages alone may be bigger than the budget. Rather than shipping an
+    over-budget request (which the provider rejects), the expensive parts
+    are dropped progressively:
+
+    1. all reasoning and tool details
+    2. then the oldest retained messages, one at a time
+
+    Returns the trimmed messages and how many were dropped.
+    """
+    if threshold <= 0:
+        return messages, 0
+
+    def _size(msgs: list[dict]) -> int:
+        tokens, _ = _estimate_context_tokens(msgs, system_prompt, summary)
+        return tokens
+
+    result = list(messages)
+    dropped = 0
+
+    if _size(result) > threshold:
+        stripped = _strip_old_details(result, 0, 0)
+        if _size(stripped) < _size(result):
+            result = stripped
+
+    while len(result) > 2 and _size(result) > threshold:
+        result = result[1:]
+        dropped += 1
+
+    if dropped:
+        log.warning(
+            'Dropped %d retained message(s) to fit the context budget (~%d tokens > threshold %d).',
+            dropped,
+            _size(result),
+            threshold,
+        )
+    return result, dropped
+
+
+def _find_compaction_boundary(messages: list[dict], keep_recent_messages: int = 12) -> int:
+    """Index where the retained (verbatim) window starts.
+
+    Retention is a COUNT of recent messages, not a percentage of the history:
+    the last ``keep_recent_messages`` messages are kept, everything before is
+    summarised away.
+
+    The boundary always lands on a USER turn. That is not cosmetic: the
+    summary is persisted as a checkpoint on the FIRST RETAINED message, and
+    the checkpoint is only written when that message is a user message (a
+    whole-turn boundary). A boundary in the middle of a turn would produce
+    a summary that was silently thrown away - the compaction would run, the
+    context would not shrink, and the status indicator would sit at the same
+    percentage forever.
+    """
+    keep = max(2, keep_recent_messages)
+    target = max(1, len(messages) - keep)
+    if target >= len(messages):
+        return 0
+
+    # The first user turn is excluded: compacting up to it would compact
+    # nothing, so there is no point.
+    user_turns = [idx for idx, message in enumerate(messages) if message.get('role') == 'user'][1:]
+    candidates = [idx for idx in user_turns if idx <= target]
+    return candidates[-1] if candidates else 0
+
+
+def _has_tool_output(message: dict) -> bool:
+    output = message.get('output')
+    if not isinstance(output, list):
+        return False
+    return any(isinstance(item, dict) and item.get('type') == 'function_call_output' for item in output)
+
+
+def _has_reasoning(message: dict) -> bool:
+    output = message.get('output')
+    if not isinstance(output, list):
+        return False
+    return any(isinstance(item, dict) and item.get('type') == 'reasoning' for item in output)
+
+
+def _strip_old_details(
+    messages: list[dict],
+    keep_recent_reasoning: int = 3,
+    keep_recent_tool_calls: int = 5,
+) -> list[dict]:
+    """Drop expensive reasoning and tool details from all but the most recent few.
+
+    A long agent turn accumulates a lot of hidden thinking and verbose tool
+    output. Those are the biggest contributors to the context size and the
+    least useful to keep, so:
+
+    - reasoning/thought is kept only for the last ``keep_recent_reasoning``
+      assistant messages that have any
+    - tool call details (the call AND its result) are kept only for the last
+      ``keep_recent_tool_calls`` calls
+
+    Both the call and its result are removed together: leaving an assistant
+    message with a tool call but no matching tool result is a protocol error.
+    """
+    if keep_recent_reasoning <= 0 and keep_recent_tool_calls <= 0:
+        return messages
+
+    reasoning_idx = [idx for idx, m in enumerate(messages) if m.get('role') == 'assistant' and _has_reasoning(m)]
+    keep_reasoning_from = reasoning_idx[-keep_recent_reasoning] if len(reasoning_idx) > keep_recent_reasoning else -1
+
+    # Tool calls, in order, with the message they live in.
+    call_order: list[tuple[int, str]] = []
+    for idx, message in enumerate(messages):
+        output = message.get('output')
+        if not isinstance(output, list):
+            continue
+        for item in output:
+            if isinstance(item, dict) and item.get('type') == 'function_call':
+                call_id = item.get('call_id') or item.get('id')
+                if call_id:
+                    call_order.append((idx, call_id))
+    keep_calls_from = (
+        call_order[-keep_recent_tool_calls][1]
+        if len(call_order) > keep_recent_tool_calls and keep_recent_tool_calls > 0
+        else None
+    )
+
+    result: list[dict] = []
+    for idx, message in enumerate(messages):
+        output = message.get('output')
+        if not isinstance(output, list) or not output:
+            result.append(message)
+            continue
+
+        new_output = []
+        changed = False
+        for item in output:
+            if not isinstance(item, dict):
+                new_output.append(item)
+                continue
+            item_type = item.get('type')
+            if item_type == 'reasoning' and idx < keep_reasoning_from:
+                changed = True
+                continue
+            if item_type in ('function_call', 'function_call_output') and keep_calls_from is not None:
+                call_id = item.get('call_id') or item.get('id')
+                if call_id and call_id != keep_calls_from and _is_old_call(call_id, call_order, keep_calls_from):
+                    changed = True
+                    continue
+            new_output.append(item)
+
+        if changed:
+            result.append({**message, 'output': new_output})
+        else:
+            result.append(message)
+
+    return result
+
+
+def _is_old_call(call_id: str, call_order: list[tuple[int, str]], keep_calls_from: str) -> bool:
+    """True when the call sits before the newest kept call in the chain."""
+    try:
+        keep_index = [cid for _, cid in call_order].index(keep_calls_from)
+    except ValueError:
+        return False
+    try:
+        this_index = [cid for _, cid in call_order].index(call_id)
+    except ValueError:
+        return False
+    return this_index < keep_index
 
 
 def _fit_messages_to_model_window(

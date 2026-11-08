@@ -343,18 +343,34 @@
 		const currentModelId = (model as any)?.id;
 
 		return models
-			.filter(
-				(baseModel) =>
-					(!currentModelId ||
-						baseModel.id !== currentModelId ||
-						(edit && baseModel.id === info.base_model_id)) &&
-					(!baseModel?.preset || (edit && baseModel.id === info.base_model_id)) &&
-					baseModel?.owned_by !== 'arena' &&
-					!(baseModel?.direct ?? false) &&
-					($user?.role === 'admin' ||
-						!(baseModel?.info?.meta?.hidden ?? false) ||
-						baseModel.id === info.base_model_id)
-			)
+			.filter((baseModel) => {
+				// The model itself must be selectable while editing: a base
+				// model IS its own base, and the editor has to be able to say
+				// so. Excluding it forced base models to point at some OTHER
+				// model, which turned them into wrappers and rerouted their
+				// requests elsewhere.
+				if (currentModelId && baseModel.id === currentModelId) {
+					return edit;
+				}
+				if (baseModel?.preset) {
+					// Only the currently selected base may be a wrapper.
+					return !!(edit && baseModel.id === info.base_model_id);
+				}
+				if (baseModel?.owned_by === 'arena') {
+					return false;
+				}
+				if (baseModel?.direct ?? false) {
+					return false;
+				}
+				if (
+					$user?.role !== 'admin' &&
+					(baseModel?.info?.meta?.hidden ?? false) &&
+					baseModel.id !== info.base_model_id
+				) {
+					return false;
+				}
+				return true;
+			})
 			.map((baseModel) => ({
 				value: baseModel.id,
 				label: baseModel.name,
@@ -582,9 +598,14 @@
 		// the global chain is selected (the global chain lives in admin
 		// config and is applied at request time, so the per-model list is
 		// empty by design - which the previous guard treated as invalid).
+		//
+		// A BASE model (one whose id belongs to a connection model) is not a
+		// wrapper: it IS the base model and must not be made to point at
+		// another one, so it is never asked for a base.
 		const hasFailoverChain = (failoverProviders ?? []).some((p) => p?.model_id);
 		const hasGlobalChain = failoverSource === 'global';
-		if (preset && !info.base_model_id && !hasFailoverChain && !hasGlobalChain) {
+		const isBaseModelRow = !!$models?.find((m: any) => m.id === info?.id && !m?.preset);
+		if (preset && !isBaseModelRow && !info.base_model_id && !hasFailoverChain && !hasGlobalChain) {
 			toast.error($i18n.t('Base Model is required.'));
 			loading = false;
 
@@ -1728,21 +1749,21 @@
 										defaultTopK={ragTopK}
 									/>
 
-								{#if knowledge.length > 0}
-									<div class="my-2 flex items-center gap-2 px-1">
-										<label class="text-xs text-gray-500 dark:text-gray-400" for="model-rag-top-k">
-											{$i18n.t('Document Snippets Returned')}
-										</label>
-										<input
-											id="model-rag-top-k"
-											type="number"
-											class="w-20 rounded border border-gray-200 bg-transparent px-1.5 py-0.5 text-right text-xs outline-hidden dark:border-gray-700"
-											placeholder={$i18n.t('Global')}
-											bind:value={ragTopK}
-											min="1"
-										/>
-									</div>
-								{/if}
+									{#if knowledge.length > 0}
+										<div class="my-2 flex items-center gap-2 px-1">
+											<label class="text-xs text-gray-500 dark:text-gray-400" for="model-rag-top-k">
+												{$i18n.t('Document Snippets Returned')}
+											</label>
+											<input
+												id="model-rag-top-k"
+												type="number"
+												class="w-20 rounded border border-gray-200 bg-transparent px-1.5 py-0.5 text-right text-xs outline-hidden dark:border-gray-700"
+												placeholder={$i18n.t('Global')}
+												bind:value={ragTopK}
+												min="1"
+											/>
+										</div>
+									{/if}
 									<ToolsSelector
 										bind:selectedToolIds={toolIds}
 										tools={$tools ?? []}
