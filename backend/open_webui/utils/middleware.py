@@ -107,6 +107,7 @@ from open_webui.utils.filter import (
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.memory import add_memory_context, review_memory_after_turn
 from open_webui.utils.misc import (
+    _answer_unanswered_tool_calls,
     add_or_update_system_message,
     add_or_update_user_message,
     convert_output_to_messages,
@@ -2421,8 +2422,30 @@ def sanitize_tool_pairs(messages: list[dict]) -> list[dict]:
     paired_ids_by_message = get_paired_tool_call_ids(messages)
 
     sanitized = []
-    for message, paired_ids in zip(messages, paired_ids_by_message):
+    index = 0
+    total = len(messages)
+    while index < total:
+        message = messages[index]
+        paired_ids = paired_ids_by_message[index]
         if message.get('role') == 'assistant' and message.get('tool_calls'):
+            # The tool block: the contiguous run of tool messages that follows.
+            block_end = index + 1
+            while block_end < total and messages[block_end].get('role') == 'tool':
+                block_end += 1
+            block = messages[index + 1 : block_end]
+
+            # A tool call that never got a result (the request was cancelled
+            # while the tool was still running) is answered explicitly
+            # instead of being dropped, so the model learns the tool was
+            # attempted rather than seeing it silently vanish.
+            answered = _answer_unanswered_tool_calls(message, block)
+            if answered is not None:
+                assistant_message, results = answered
+                sanitized.append(assistant_message)
+                sanitized.extend(results)
+                index = block_end
+                continue
+
             kept = [tool_call for tool_call in message.get('tool_calls') or [] if tool_call.get('id') in paired_ids]
             if kept:
                 sanitized.append({**message, 'tool_calls': kept})
@@ -2432,8 +2455,12 @@ def sanitize_tool_pairs(messages: list[dict]) -> list[dict]:
                 clean.pop('reasoning_items', None)
                 if clean.get('content'):
                     sanitized.append(clean)
+            index += 1
         elif message.get('role') != 'tool' or message.get('tool_call_id') in paired_ids:
             sanitized.append(message)
+            index += 1
+        else:
+            index += 1
 
     return sanitized
 

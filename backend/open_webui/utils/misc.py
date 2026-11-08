@@ -285,29 +285,106 @@ def get_paired_tool_call_ids(messages: list[dict]) -> list[set[str]]:
     return paired_ids_by_message
 
 
+INTERRUPTED_TOOL_RESULT = (
+    'Error: the tool call was interrupted before it returned a result '
+    '(the request was cancelled or the tool did not finish).'
+)
+
+
+def _answer_unanswered_tool_calls(
+    assistant_message: dict,
+    tool_results: list[dict],
+) -> tuple[dict, list[dict]] | None:
+    """Answer any tool call that never got a result.
+
+    Returns the (possibly rewritten) assistant message and the tool messages
+    that should follow it, or None when every call is already answered.
+
+    An unpaired tool CALL used to be dropped silently. That is exactly what
+    happens when a request is cancelled while a tool is still running (a
+    client disconnect, a proxy timeout): the assistant message is persisted
+    with the tool call, the result never arrives, and on the next turn the
+    call disappears without the model ever learning the tool was attempted.
+
+    The call is kept and answered explicitly instead. The assistant's
+    tool_calls are re-ordered to match the order the results are emitted in,
+    because strict providers (Anthropic, AWS Bedrock Converse) require the
+    results to follow the calls in the same order.
+    """
+    tool_calls = assistant_message.get('tool_calls') or []
+    if not tool_calls:
+        return None
+
+    result_by_id = {message.get('tool_call_id'): message for message in tool_results if message.get('tool_call_id')}
+    unanswered = [tc for tc in tool_calls if tc.get('id') not in result_by_id]
+    if not unanswered:
+        return None
+
+    ordered_calls: list[dict] = []
+    ordered_results: list[dict] = []
+    for tool_call in tool_calls:
+        call_id = tool_call.get('id')
+        ordered_calls.append(tool_call)
+        result = result_by_id.get(call_id)
+        if result is None:
+            result = {
+                'role': 'tool',
+                'tool_call_id': call_id,
+                'content': INTERRUPTED_TOOL_RESULT,
+            }
+        ordered_results.append(result)
+
+    return {**assistant_message, 'tool_calls': ordered_calls}, ordered_results
+
+
 def reconcile_tool_pairs(messages: list[dict]) -> list[dict]:
-    """Drop unpaired tool_use / tool_result from a reconstructed conversation.
+    """Pair up tool_use / tool_result from a reconstructed conversation.
 
     Stored output can be incomplete — a tool result may be missing (e.g. the
     knowledge base was updated mid-chat, or the call was interrupted), or a
     tool call may be missing while its result survived.  Strict providers
     (Anthropic, AWS Bedrock Converse) reject either direction of mismatch.
 
-    Well-formed output is unaffected: every id pairs, so nothing is stripped.
+    A tool call that never got a result is ANSWERED with an explicit
+    "interrupted" result rather than dropped silently, so the model learns the
+    tool was attempted.
+
+    Well-formed output is unaffected: every id pairs, so nothing is stripped
+    or added.
     """
     paired_ids_by_message = get_paired_tool_call_ids(messages)
 
     reconciled_messages = []
-    for message, paired_ids in zip(messages, paired_ids_by_message):
+    index = 0
+    total = len(messages)
+    while index < total:
+        message = messages[index]
+        paired_ids = paired_ids_by_message[index]
         role = message.get('role')
 
         # Orphan tool result: not claimed by the assistant heading its tool block.
         if role == 'tool' and message.get('tool_call_id') not in paired_ids:
+            index += 1
             continue
 
         # Non-assistant or no tool_calls — pass through unchanged.
         if role != 'assistant' or not message.get('tool_calls'):
             reconciled_messages.append(message)
+            index += 1
+            continue
+
+        # The tool block: the contiguous run of tool messages that follows.
+        block_end = index + 1
+        while block_end < total and messages[block_end].get('role') == 'tool':
+            block_end += 1
+        block = messages[index + 1 : block_end]
+
+        answered = _answer_unanswered_tool_calls(message, block)
+        if answered is not None:
+            assistant_message, results = answered
+            reconciled_messages.append(assistant_message)
+            reconciled_messages.extend(results)
+            index = block_end
             continue
 
         # Keep only tool_calls whose id received an adjacent tool-role response.
@@ -315,6 +392,7 @@ def reconcile_tool_pairs(messages: list[dict]) -> list[dict]:
 
         if valid_tool_calls:
             reconciled_messages.append({**message, 'tool_calls': valid_tool_calls})
+            index += 1
             continue
 
         # All tool_calls were orphans — keep the message only if it
@@ -323,6 +401,8 @@ def reconcile_tool_pairs(messages: list[dict]) -> list[dict]:
         has_meaningful_content = content.strip() if isinstance(content, str) else content
         if has_meaningful_content or message.get('reasoning_content'):
             reconciled_messages.append({key: value for key, value in message.items() if key != 'tool_calls'})
+
+        index += 1
 
     return reconciled_messages
 
