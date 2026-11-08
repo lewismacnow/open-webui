@@ -41,6 +41,7 @@ def normalize_ask_user_request(arguments: dict) -> dict:
         log.warning('ask_user: model sent %d questions, truncating to 5', len(questions))
         questions = questions[:5]
 
+
     normalized_questions = []
     seen_ids = set()
     allow_other = bool(arguments.get('allow_other', True))
