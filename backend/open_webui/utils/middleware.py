@@ -7094,13 +7094,6 @@ async def streaming_chat_response_handler(response, ctx):
                     if not round_error:
                         tool_call_iterations += 1
 
-                    response_tool_calls = tool_calls.pop(0)
-                    ask_user_staged, ask_user_error = stage_ask_user_tool_calls(
-                        response_tool_calls,
-                        output,
-                        output_id,
-                        answers=metadata.get('ask_user_answers'),
-                    )
                     # Resolve dispatch before approvals and special handling such as ask_user.
                     response_tool_calls = []
                     output_by_call_id = {
@@ -7163,7 +7156,14 @@ async def streaming_chat_response_handler(response, ctx):
                         else:
                             response_tool_calls.append(tool_call)
 
-                    ask_user_staged, ask_user_error = stage_ask_user_tool_calls(response_tool_calls, output, output_id)
+                    # Fork: stage the ask_user tool call (Pattern B) once the
+                    # dispatch has resolved the individual calls.
+                    ask_user_staged, ask_user_error = stage_ask_user_tool_calls(
+                        response_tool_calls,
+                        output,
+                        output_id,
+                        answers=metadata.get('ask_user_answers'),
+                    )
                     if ask_user_error:
                         response_tool_calls = [
                             tool_call
