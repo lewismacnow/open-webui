@@ -4858,6 +4858,43 @@ def build_x_open_webui_summary(rag_sources, tool_events):
     return {'sources': all_sources, 'tools_used': tools_used}
 
 
+async def _extract_non_stream_content(response):
+    """Pull the assistant text (and usage) out of a non-streaming provider response.
+
+    The tool loop's follow-up round trip asks the provider for ``stream=True``,
+    but a provider (or an OpenAI-compatible proxy) may answer with a plain
+    ``chat.completion`` body instead.  That body still carries the model's
+    final answer, so it must not be thrown away.
+
+    Accepts a plain dict or a starlette ``Response`` (JSONResponse).  Returns
+    ``(text, usage)``; ``text`` is ``''`` when nothing usable was found.
+    """
+    data = response
+    if isinstance(response, Response):
+        try:
+            body = response.body
+            if isinstance(body, (bytes, bytearray)):
+                body = body.decode('utf-8', 'replace')
+            data = json.loads(body)
+        except Exception:
+            # Not a JSON payload (e.g. a provider error string) — nothing to surface.
+            return '', None
+    if not isinstance(data, dict):
+        return '', None
+
+    choices = data.get('choices') or []
+    if not choices:
+        return '', None
+
+    message = choices[0].get('message') or {}
+    content = message.get('content')
+    if isinstance(content, list):
+        content = ''.join(part.get('text', '') or '' for part in content if isinstance(part, dict))
+    if not isinstance(content, str):
+        content = ''
+    return content, data.get('usage')
+
+
 async def api_tool_stream_wrapper(response, ctx, events):
     """Path C — server-side tool execution loop for API callers with the
     ``api_tools`` capability.
@@ -5509,6 +5546,25 @@ async def api_tool_stream_wrapper(response, ctx, events):
             # Provider returned a non-streaming response — can't continue the
             # loop cleanly. Surface a stop, break to the terminal summary.
             log.warning('api_tool_stream_wrapper: next response was not a StreamingResponse; ending tool loop.')
+            # Fork: the follow-up round trip can come back as a plain
+            # chat.completion body (a provider/proxy that ignores
+            # stream=true).  That body carries the model's final answer —
+            # emitting only the synthetic stop chunk dropped it on the floor,
+            # so the client saw an empty assistant message.  Surface the text
+            # as a regular content chunk before the stop chunk.
+            final_text, final_usage = await _extract_non_stream_content(new_response)
+            if final_text:
+                final_chunk = base_chunk(
+                    upstream_id,
+                    upstream_created,
+                    upstream_model,
+                    upstream_system_fingerprint,
+                    finish_reason=None,
+                )
+                final_chunk['choices'][0]['delta'] = {'role': 'assistant', 'content': final_text}
+                if final_usage:
+                    final_chunk['usage'] = final_usage
+                yield wrap_item(json.dumps(final_chunk))
             yield wrap_item(
                 json.dumps(
                     base_chunk(
