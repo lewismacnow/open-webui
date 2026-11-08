@@ -108,6 +108,7 @@ defects that **the merge did not introduce** — both pre-date the v0.13.2 sync 
 the fork's own code. They are fixed here. Neither exists in upstream v0.13.2.
 
 ### 8.1 Duplicated `get_file_content_by_id` endpoint — `routers/files.py`
+
 **Pre-existing fork bug** — the fork's `routers/files.py` already carried two
 definitions of the same route before this sync. Python kept the second, so the first
 was dead code: the `?attachment=` parameter never had any effect and the
@@ -119,6 +120,7 @@ Merged into one endpoint carrying upstream's `attachment` parameter and
 stored path has gone missing serve their indexed text instead of 404).
 
 ### 8.2 `UnboundLocalError` on every chat request — `main.py`
+
 **Pre-existing fork bug** — `main.py`'s `chat_completion()` has a local
 `from open_webui.routers.models import get_all_models` inside a try block. A local
 import makes the name local for the **whole** function, so the earlier
@@ -132,13 +134,101 @@ refresh block and predates this sync; **upstream's v0.13.2 has a single module-l
 import and is not affected**. The local import was pointless (`routers.models`
 re-exports the same function from `utils.models`) and has been removed.
 
-*Found by the test deployment:* `POST /api/v1/chat/completions` returned
+_Found by the test deployment:_ `POST /api/v1/chat/completions` returned
 `500 UnboundLocalError`; it now returns a clean `400 Model not found`.
 
 A scan for the same pattern — a local import shadowing a module-level name that is
 used earlier in the same function — now reports **zero** hazards across the backend.
 
-## 9. Known follow-ups
+## 9. Production errors found after the release
+
+### 9.1 `pop from empty list` on every tool call — `utils/middleware.py`
+
+**Introduced by this merge** (unlike §8, which was pre-existing).
+
+The `utils/middleware.py` conflict was resolved by keeping both sides, and the two sides
+each consumed the tool-call list:
+
+```python
+response_tool_calls = tool_calls.pop(0)                              # the fork's ask_user block
+...
+for tool_call in split_tool_call_batches(tool_calls.pop(0), ...):    # upstream's dispatch
+```
+
+The first pop removed the batch; the second popped from an empty list. Every tool call
+raised `IndexError: pop from empty list` before a single tool ran, which surfaced in the
+log as `Error processing chat payload: pop from empty list`.
+
+The keep-both also left `response_tool_calls = []` between the two blocks — discarding the
+ask_user staging the fork's block had just produced — and dropped the
+`answers=metadata.get('ask_user_answers')` argument that the API Tools path (ask_user
+Pattern B) depends on. Without `answers=` a staged question waits on a socket that never
+answers and the request deadlocks.
+
+The dispatch now matches upstream v0.13.2's structure — one pop, then the dispatch loop,
+then the fork's ask_user staging — with the fork's `answers=` argument restored:
+
+```python
+for tool_call in split_tool_call_batches(tool_calls.pop(0), metadata.get('tools', {})):
+    ...
+ask_user_staged, ask_user_error = stage_ask_user_tool_calls(
+    response_tool_calls,
+    output,
+    output_id,
+    answers=metadata.get('ask_user_answers'),
+)
+```
+
+Upstream's ordering (resolve the dispatch before approvals and special handling) is kept.
+The fork's lenient ask_user validation still applies: upstream's `prepare_tool_call` only
+_coerces_ arguments against the tool schema, it does not validate them, so a malformed
+ask_user payload still reaches the fork's validator instead of being rejected outright.
+
+**Regression guard:** `backend/open_webui/test/test_tool_call_dispatch.py` asserts that a
+dispatch function index-pops the tool-call list exactly once, that
+`stage_ask_user_tool_calls()` is called exactly once and with `answers=`, and — repo-wide —
+that no function index-pops the same name twice. Against the pre-fix file the guard fails
+with the exact diagnosis (`pops 'tool_calls' at lines [7097, 7109]`); against the fixed file
+it passes.
+
+### 9.2 `405 Method Not Allowed` on the MCP GET stream — expected, not a defect
+
+```
+INFO | httpx2._client - HTTP Request: GET https://api.z.ai/api/mcp/web_reader/mcp "HTTP/1.1 405 Method Not Allowed"
+```
+
+The MCP Streamable HTTP transport opens a **GET** SSE stream alongside the POST channel so
+the server can push messages to the client. The GET stream is optional in the spec, and
+`api.z.ai` does not implement it: once the request is authenticated it reaches the MCP
+route, which only handles POST and answers `405`.
+
+Confirmed directly against the endpoint:
+
+| Request                      | Result                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| `GET` without credentials    | `200` + `{"code":1001,"msg":"Authentication parameter not received in Header"}` |
+| `GET` with an invalid token  | `200` + `{"code":401,"msg":"token expired or incorrect"}`                       |
+| `GET` with valid credentials | `405 Method Not Allowed`                                                        |
+
+The gateway answers `GET` before routing while unauthenticated; with valid credentials the
+request reaches the MCP handler, which only implements POST.
+
+**Impact: none on tool calls.** All client→server traffic — including every tool call —
+goes over POST, which the server accepts; the session initialises, tools list, tools run,
+and the session terminates cleanly with `DELETE`. What is lost is server→client
+notification delivery for such servers (e.g. `notifications/tools/list_changed`).
+
+**This is not a regression from the sync.** The MCP SDK's `handle_get_stream()` behaves
+identically in `mcp==1.27.2` (the version the fork used before the sync) and
+`mcp==2.3.0`: a failed GET is caught, logged at DEBUG and retried once, then the SDK gives
+up. It costs two extra GET requests per session and one INFO log line each. `mcp==2.3.0`
+is the latest release, so there is no upstream SDK fix to pull in.
+
+Deliberately **not** worked around: suppressing the GET would disable server→client
+notifications for _every_ server, including the ones that do support it. The cost of the
+noise is lower than the cost of that.
+
+## 10. Known follow-ups
 
 - Re-check upstream's intent on the two restored blocks (note-files injection, `ast` fallback).
 - Upstream's ModelEditor / ToolkitEditor deltas still to be ported.
