@@ -864,12 +864,9 @@ async def get_file_content_by_id(
                 # Handle Unicode filenames
                 filename = file.meta.get('name', file.filename)
                 encoded_filename = quote(filename)  # RFC5987 encoding
-
-                content_type = file.meta.get('content_type')
-                filename = file.meta.get('name', file.filename)
-                encoded_filename = quote(filename)
                 headers = {}
 
+                content_type = file.meta.get('content_type')
                 if attachment:
                     headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
                 else:
@@ -881,11 +878,19 @@ async def get_file_content_by_id(
 
                 return FileResponse(file_path, headers=headers, media_type=content_type)
 
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=ERROR_MESSAGES.NOT_FOUND,
-                )
+            # Legacy records can retain a path after their original upload has
+            # disappeared. Preserve their indexed text as the download fallback.
+            file_content = file.data.get('content', '')
+            file_name = file.filename
+
+            def generator():
+                yield file_content.encode('utf-8')
+
+            return StreamingResponse(
+                generator(),
+                media_type='text/plain',
+                headers={'Content-Disposition': f"attachment; filename*=UTF-8''{quote(file_name)}"},
+            )
         except HTTPException as e:
             raise e
         except Exception as e:
@@ -952,56 +957,6 @@ async def get_html_file_content_by_id(
 
 
 @router.get('/{id}/content/{file_name}')
-async def get_file_content_by_id(
-    id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
-):
-    file = await Files.get_file_by_id(id, db=db)
-
-    if not file:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=ERROR_MESSAGES.NOT_FOUND,
-        )
-
-    if file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'read', user, db=db):
-        file_path = file.path
-
-        # Handle Unicode filenames
-        filename = file.meta.get('name', file.filename)
-        encoded_filename = quote(filename)  # RFC5987 encoding
-        headers = {'Content-Disposition': f"attachment; filename*=UTF-8''{encoded_filename}"}
-
-        if file_path:
-            file_path = await asyncio.to_thread(Storage.get_file, file_path)
-            file_path = Path(file_path)
-
-            # Check if the file already exists in the cache
-            if file_path.is_file():
-                return FileResponse(file_path, headers=headers)
-
-        # Legacy records can retain a path after their original upload has disappeared.
-        # Preserve their indexed text as the download fallback.
-        if not file_path or not file_path.is_file():
-            # File path doesn’t exist, return the content as .txt if possible
-            file_content = file.data.get('content', '')
-            file_name = file.filename
-
-            # Create a generator that encodes the file content
-            def generator():
-                yield file_content.encode('utf-8')
-
-            return StreamingResponse(
-                generator(),
-                media_type='text/plain',
-                headers=headers,
-            )
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=ERROR_MESSAGES.NOT_FOUND,
-        )
-
-
 # Rename File By Id
 
 
