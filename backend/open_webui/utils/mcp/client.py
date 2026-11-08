@@ -77,8 +77,10 @@ _install_mcp_cleanup_filter()
 def _build_httpx_client(headers=None, timeout=None, auth=None, verify=True):
     """Create an httpx AsyncClient for MCP transport.
 
-    Falls back to AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER when the caller
-    (i.e. the MCP SDK) does not supply an explicit timeout.
+    Uses the caller's timeout when one is supplied (the MCP SDK always
+    supplies one, which is why connect() now passes the configured
+    AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER explicitly) and falls back to
+    AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER otherwise.
 
     Note: verify must be passed at construction time because httpx
     configures the SSL context during __init__. Setting client.verify = False
@@ -155,12 +157,32 @@ class MCPClient:
         # loop as 'Task exception was never retrieved' warnings. Catch them
         # both here AND in disconnect() so the user never sees them.
         exit_stack = AsyncExitStack()
+        # The transport's own timeouts (connect / write / pool / SSE read).
+        # Same knob as the tool-call timeout so there is one thing to tune.
+        transport_timeout = (
+            float(AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER)
+            if AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER is not None and AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER > 0
+            else None
+        )
         try:
             try:
                 self._streams_context = streamablehttp_client(
                     url,
                     headers=headers,
                     auth=auth,
+                    # The MCP SDK's own defaults are timeout=30s and
+                    # sse_read_timeout=300s, and it ALWAYS hands that
+                    # timeout to the client factory - which is why
+                    # AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER never reached the
+                    # transport: the fallback in _build_httpx_client was
+                    # dead code. Pass the configured timeout explicitly so
+                    # connect / write / pool follow it instead of the SDK's
+                    # hardcoded 30s.
+                    **(
+                        {'timeout': transport_timeout, 'sse_read_timeout': transport_timeout}
+                        if transport_timeout
+                        else {}
+                    ),
                     httpx_client_factory=create_httpx_client
                     if AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL
                     else create_insecure_httpx_client,
