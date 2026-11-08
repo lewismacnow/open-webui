@@ -4013,6 +4013,8 @@
 	"Your unsaved changes will be lost.": "",
 	"Your usage stats have been successfully synced.": "",
 	"Base Model Context Window": "",
+	"Base model": "",
+	"A base model provided by a connection. It has no wrapper of its own.": "",
 	"Base model context windows": "",
 	"Base model context windows saved": "",
 	"Default maximum context": "",

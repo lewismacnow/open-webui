@@ -198,6 +198,10 @@ type BaseModel = {
 	name: string;
 	info?: ModelConfig;
 	owned_by: 'ollama' | 'openai' | 'arena';
+	// Fork: the model registry marks custom wrapper models with
+	// preset: true. Connection (base) models are left unmarked, which is
+	// how the UI tells a wrapper from a base model.
+	preset?: boolean;
 };
 
 export interface OpenAIModel extends BaseModel {
