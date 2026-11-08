@@ -1,4 +1,5 @@
 <script lang="ts">
+	import UserSettingRow from '../UserSettingRow.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
@@ -6,10 +7,12 @@
 	import type { i18n as i18nType } from 'i18next';
 	import { getContext } from 'svelte';
 	import type { Writable } from 'svelte/store';
+	import { config } from '$lib/stores';
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
 	export let onChange: (params: any) => void = () => {};
+	export let onParamChange: (key: string, value: unknown) => void = () => {};
 
 	export let admin = false;
 	export let custom = false;
@@ -89,12 +92,14 @@
 				{max}
 				step={rangeStep}
 				bind:value={params[key]}
+				on:change={() => onParamChange(key, params[key] ?? null)}
 				class="w-full h-2 rounded-lg appearance-none cursor-pointer dark:bg-gray-700"
 			/>
 		</div>
 		<div>
 			<input
 				bind:value={params[key]}
+				on:change={() => onParamChange(key, params[key] ?? null)}
 				type="number"
 				aria-label={label}
 				class=" bg-transparent text-center w-14"
@@ -117,11 +122,16 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class=" py-0.5 flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.streamChatResponse.label')}
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-gray-900 dark:text-gray-100"
 					on:click={() => {
 						params.stream_response =
@@ -130,6 +140,7 @@
 								: params.stream_response
 									? false
 									: null;
+						onParamChange('stream_response', params.stream_response);
 					}}
 					type="button"
 				>
@@ -141,7 +152,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Default')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 	</div>
 
@@ -152,16 +163,22 @@
 				placement="top-start"
 				className="inline-tooltip"
 			>
-				<div class="flex w-full justify-between">
-					<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+				<UserSettingRow
+					let:labelId
+					className="w-full py-0.5"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				>
+					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.streamDeltaChunkSize.label')}
-					</div>
+					</span>
 					<button
+						id={`${labelId}-control`}
 						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 						type="button"
 						on:click={() => {
 							params.stream_delta_chunk_size =
 								(params?.stream_delta_chunk_size ?? null) === null ? 1 : null;
+							onParamChange('stream_delta_chunk_size', params.stream_delta_chunk_size);
 						}}
 					>
 						{#if (params?.stream_delta_chunk_size ?? null) === null}
@@ -170,7 +187,7 @@
 							<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
 						{/if}
 					</button>
-				</div>
+				</UserSettingRow>
 			</Tooltip>
 
 			{#if (params?.stream_delta_chunk_size ?? null) !== null}
@@ -185,7 +202,9 @@
 				)}
 			{/if}
 		</div>
+	{/if}
 
+	{#if admin && $config?.features?.enable_context_compaction}
 		<div>
 			<Tooltip
 				content={$i18n.t(
@@ -194,16 +213,22 @@
 				placement="top-start"
 				className="inline-tooltip"
 			>
-				<div class="flex w-full justify-between">
-					<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+				<UserSettingRow
+					let:labelId
+					className="w-full py-0.5"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				>
+					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.contextCompactionThreshold.label')}
-					</div>
+					</span>
 					<button
+						id={`${labelId}-control`}
 						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 						type="button"
 						on:click={() => {
 							params.compact_token_threshold =
 								(params?.compact_token_threshold ?? null) === null ? 80000 : null;
+							onParamChange('compact_token_threshold', params.compact_token_threshold);
 						}}
 					>
 						{#if (params?.compact_token_threshold ?? null) === null}
@@ -212,7 +237,7 @@
 							<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
 						{/if}
 					</button>
-				</div>
+				</UserSettingRow>
 			</Tooltip>
 
 			{#if (params?.compact_token_threshold ?? null) !== null}
@@ -226,6 +251,8 @@
 							)}
 							placeholder={$i18n.t('Enter token threshold')}
 							bind:value={params.compact_token_threshold}
+							on:change={() =>
+								onParamChange('compact_token_threshold', params.compact_token_threshold ?? null)}
 							autocomplete="off"
 							min="1"
 							step="1"
@@ -286,11 +313,16 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class=" py-0.5 flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.functionCalling.label')}
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-gray-900 dark:text-gray-100"
 					on:click={() => {
 						if ((params?.function_calling ?? null) === null) {
@@ -300,6 +332,7 @@
 						} else {
 							params.function_calling = null;
 						}
+						onParamChange('function_calling', params.function_calling);
 					}}
 					type="button"
 				>
@@ -311,7 +344,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Default')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 	</div>
 
@@ -321,11 +354,16 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.reasoningTags.label')}
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
@@ -338,6 +376,7 @@
 						} else {
 							params.reasoning_tags = null;
 						}
+						onParamChange('reasoning_tags', params.reasoning_tags);
 					}}
 				>
 					{#if (params?.reasoning_tags ?? null) === null}
@@ -350,7 +389,7 @@
 						<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if ![true, false, null].includes(params?.reasoning_tags ?? null) && (params?.reasoning_tags ?? []).length === 2}
@@ -362,6 +401,7 @@
 						aria-label={$i18n.t('Start Tag')}
 						placeholder={$i18n.t('Start Tag')}
 						bind:value={params.reasoning_tags[0]}
+						on:change={() => onParamChange('reasoning_tags', params.reasoning_tags ?? null)}
 						autocomplete="off"
 					/>
 				</div>
@@ -373,6 +413,7 @@
 						aria-label={$i18n.t('End Tag')}
 						placeholder={$i18n.t('End Tag')}
 						bind:value={params.reasoning_tags[1]}
+						on:change={() => onParamChange('reasoning_tags', params.reasoning_tags ?? null)}
 						autocomplete="off"
 					/>
 				</div>
@@ -386,16 +427,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.seed.label')}
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.seed = (params?.seed ?? null) === null ? 0 : null;
+						onParamChange('seed', params.seed);
 					}}
 				>
 					{#if (params?.seed ?? null) === null}
@@ -404,7 +451,7 @@
 						<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.seed ?? null) !== null}
@@ -416,6 +463,7 @@
 						aria-label={$i18n.t('settings.personal.general.parameters.seed.label')}
 						placeholder={$i18n.t('Enter Seed')}
 						bind:value={params.seed}
+						on:change={() => onParamChange('seed', params.seed ?? null)}
 						autocomplete="off"
 						min="0"
 					/>
@@ -430,16 +478,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.stopSequence.label')}
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.stop = (params?.stop ?? null) === null ? '' : null;
+						onParamChange('stop', params.stop);
 					}}
 				>
 					{#if (params?.stop ?? null) === null}
@@ -448,7 +502,7 @@
 						<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.stop ?? null) !== null}
@@ -460,6 +514,7 @@
 						aria-label={$i18n.t('settings.personal.general.parameters.stopSequence.label')}
 						placeholder={$i18n.t('Enter stop sequence')}
 						bind:value={params.stop}
+						on:change={() => onParamChange('stop', params.stop ?? null)}
 						autocomplete="off"
 					/>
 				</div>
@@ -473,15 +528,21 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.temperature.label')}
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.temperature = (params?.temperature ?? null) === null ? 0.8 : null;
+						onParamChange('temperature', params.temperature);
 					}}
 				>
 					{#if (params?.temperature ?? null) === null}
@@ -490,7 +551,7 @@
 						<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.temperature ?? null) !== null}
@@ -510,15 +571,21 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.reasoningEffort.label')}
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.reasoning_effort = (params?.reasoning_effort ?? null) === null ? 'medium' : null;
+						onParamChange('reasoning_effort', params.reasoning_effort);
 					}}
 				>
 					{#if (params?.reasoning_effort ?? null) === null}
@@ -527,7 +594,7 @@
 						<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.reasoning_effort ?? null) !== null}
@@ -539,6 +606,7 @@
 						aria-label={$i18n.t('settings.personal.general.parameters.reasoningEffort.label')}
 						placeholder={$i18n.t('Enter reasoning effort')}
 						bind:value={params.reasoning_effort}
+						on:change={() => onParamChange('reasoning_effort', params.reasoning_effort ?? null)}
 						autocomplete="off"
 					/>
 				</div>
@@ -554,15 +622,21 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.logitBias.label')}
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.logit_bias = (params?.logit_bias ?? null) === null ? '' : null;
+						onParamChange('logit_bias', params.logit_bias);
 					}}
 				>
 					{#if (params?.logit_bias ?? null) === null}
@@ -571,7 +645,7 @@
 						<span class="ml-2 self-center"> {$i18n.t('Custom')} </span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.logit_bias ?? null) !== null}
@@ -585,6 +659,7 @@
 							'Enter comma-separated "token:bias_value" pairs (example: 5432:100, 413:-100)'
 						)}
 						bind:value={params.logit_bias}
+						on:change={() => onParamChange('logit_bias', params.logit_bias ?? null)}
 						autocomplete="off"
 					/>
 				</div>
@@ -600,16 +675,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.maxTokens.label')}
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.max_tokens = (params?.max_tokens ?? null) === null ? 128 : null;
+						onParamChange('max_tokens', params.max_tokens);
 					}}
 				>
 					{#if (params?.max_tokens ?? null) === null}
@@ -618,7 +699,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.max_tokens ?? null) !== null}
@@ -642,15 +723,21 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.topK.label')}
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.top_k = (params?.top_k ?? null) === null ? 40 : null;
+						onParamChange('top_k', params.top_k);
 					}}
 				>
 					{#if (params?.top_k ?? null) === null}
@@ -659,7 +746,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.top_k ?? null) !== null}
@@ -673,6 +760,7 @@
 						step="1"
 						value={params.top_k}
 						on:input={setTopK}
+						on:change={() => onParamChange('top_k', params.top_k ?? null)}
 						class="w-full h-2 rounded-lg appearance-none cursor-pointer dark:bg-gray-700"
 					/>
 				</div>
@@ -686,6 +774,7 @@
 						max="1000"
 						step="1"
 						on:input={setTopK}
+						on:change={() => onParamChange('top_k', params.top_k ?? null)}
 					/>
 				</div>
 			</div>
@@ -700,16 +789,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.topP.label')}
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.top_p = (params?.top_p ?? null) === null ? 0.9 : null;
+						onParamChange('top_p', params.top_p);
 					}}
 				>
 					{#if (params?.top_p ?? null) === null}
@@ -718,7 +813,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.top_p ?? null) !== null}
@@ -740,15 +835,21 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.minP.label')}
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.min_p = (params?.min_p ?? null) === null ? 0.0 : null;
+						onParamChange('min_p', params.min_p);
 					}}
 				>
 					{#if (params?.min_p ?? null) === null}
@@ -757,7 +858,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.min_p ?? null) !== null}
@@ -779,16 +880,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.frequencyPenalty.label')}
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.frequency_penalty = (params?.frequency_penalty ?? null) === null ? 1.1 : null;
+						onParamChange('frequency_penalty', params.frequency_penalty);
 					}}
 				>
 					{#if (params?.frequency_penalty ?? null) === null}
@@ -797,7 +904,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.frequency_penalty ?? null) !== null}
@@ -819,16 +926,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.presencePenalty.label')}
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded transition flex-shrink-0 outline-none font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.presence_penalty = (params?.presence_penalty ?? null) === null ? 0.0 : null;
+						onParamChange('presence_penalty', params.presence_penalty);
 					}}
 				>
 					{#if (params?.presence_penalty ?? null) === null}
@@ -837,7 +950,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.presence_penalty ?? null) !== null}
@@ -857,15 +970,21 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.mirostat.label')}
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.mirostat = (params?.mirostat ?? null) === null ? 0 : null;
+						onParamChange('mirostat', params.mirostat);
 					}}
 				>
 					{#if (params?.mirostat ?? null) === null}
@@ -874,7 +993,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.mirostat ?? null) !== null}
@@ -897,15 +1016,21 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.mirostatEta.label')}
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.mirostat_eta = (params?.mirostat_eta ?? null) === null ? 0.1 : null;
+						onParamChange('mirostat_eta', params.mirostat_eta);
 					}}
 				>
 					{#if (params?.mirostat_eta ?? null) === null}
@@ -914,7 +1039,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.mirostat_eta ?? null) !== null}
@@ -936,16 +1061,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.mirostatTau.label')}
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.mirostat_tau = (params?.mirostat_tau ?? null) === null ? 5.0 : null;
+						onParamChange('mirostat_tau', params.mirostat_tau);
 					}}
 				>
 					{#if (params?.mirostat_tau ?? null) === null}
@@ -954,7 +1085,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.mirostat_tau ?? null) !== null}
@@ -974,16 +1105,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.repeatLastN.label')}
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.repeat_last_n = (params?.repeat_last_n ?? null) === null ? 64 : null;
+						onParamChange('repeat_last_n', params.repeat_last_n);
 					}}
 				>
 					{#if (params?.repeat_last_n ?? null) === null}
@@ -992,7 +1129,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.repeat_last_n ?? null) !== null}
@@ -1015,16 +1152,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.tfsZ.label')}
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.tfs_z = (params?.tfs_z ?? null) === null ? 1 : null;
+						onParamChange('tfs_z', params.tfs_z);
 					}}
 				>
 					{#if (params?.tfs_z ?? null) === null}
@@ -1033,7 +1176,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.tfs_z ?? null) !== null}
@@ -1055,16 +1198,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.repeatPenalty.label')}
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded transition flex-shrink-0 outline-none font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.repeat_penalty = (params?.repeat_penalty ?? null) === null ? 1.1 : null;
+						onParamChange('repeat_penalty', params.repeat_penalty);
 					}}
 				>
 					{#if (params?.repeat_penalty ?? null) === null}
@@ -1073,7 +1222,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.repeat_penalty ?? null) !== null}
@@ -1096,15 +1245,21 @@
 				placement="top-start"
 				className="inline-tooltip"
 			>
-				<div class="flex w-full justify-between">
-					<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+				<UserSettingRow
+					let:labelId
+					className="w-full py-0.5"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				>
+					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.useMmap.label')}
-					</div>
+					</span>
 					<button
+						id={`${labelId}-control`}
 						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 						type="button"
 						on:click={() => {
 							params.use_mmap = (params?.use_mmap ?? null) === null ? true : null;
+							onParamChange('use_mmap', params.use_mmap);
 						}}
 					>
 						{#if (params?.use_mmap ?? null) === null}
@@ -1113,21 +1268,23 @@
 							<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 						{/if}
 					</button>
-				</div>
+				</UserSettingRow>
 			</Tooltip>
 
 			{#if (params?.use_mmap ?? null) !== null}
-				<div class="flex justify-between items-center mt-1">
-					<div class="text-xs text-gray-500">
+				<UserSettingRow let:labelId className="mt-1">
+					<span slot="label">
 						{params.use_mmap ? $i18n.t('Enabled') : $i18n.t('Disabled')}
-					</div>
+					</span>
 					<div class=" pr-2">
 						<Switch
+							ariaLabelledbyId={labelId}
 							bind:state={params.use_mmap}
+							on:change={(event) => onParamChange('use_mmap', event.detail)}
 							ariaLabel={$i18n.t('settings.personal.general.parameters.useMmap.label')}
 						/>
-					</div>
-				</div>
+					</div></UserSettingRow
+				>
 			{/if}
 		</div>
 
@@ -1139,16 +1296,22 @@
 				placement="top-start"
 				className="inline-tooltip"
 			>
-				<div class="flex w-full justify-between">
-					<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+				<UserSettingRow
+					let:labelId
+					className="w-full py-0.5"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				>
+					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.useMlock.label')}
-					</div>
+					</span>
 
 					<button
+						id={`${labelId}-control`}
 						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 						type="button"
 						on:click={() => {
 							params.use_mlock = (params?.use_mlock ?? null) === null ? true : null;
+							onParamChange('use_mlock', params.use_mlock);
 						}}
 					>
 						{#if (params?.use_mlock ?? null) === null}
@@ -1157,22 +1320,24 @@
 							<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 						{/if}
 					</button>
-				</div>
+				</UserSettingRow>
 			</Tooltip>
 
 			{#if (params?.use_mlock ?? null) !== null}
-				<div class="flex justify-between items-center mt-1">
-					<div class="text-xs text-gray-500">
+				<UserSettingRow let:labelId className="mt-1">
+					<span slot="label">
 						{params.use_mlock ? $i18n.t('Enabled') : $i18n.t('Disabled')}
-					</div>
+					</span>
 
 					<div class=" pr-2">
 						<Switch
+							ariaLabelledbyId={labelId}
 							bind:state={params.use_mlock}
+							on:change={(event) => onParamChange('use_mlock', event.detail)}
 							ariaLabel={$i18n.t('settings.personal.general.parameters.useMlock.label')}
 						/>
-					</div>
-				</div>
+					</div></UserSettingRow
+				>
 			{/if}
 		</div>
 	{/if}
@@ -1183,13 +1348,18 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class=" py-0.5 flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.think.label')} ({$i18n.t(
 						'settings.personal.general.parameters.ollama.label'
 					)})
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-gray-900 dark:text-gray-100"
 					on:click={() => {
 						if ((params?.think ?? null) === null) {
@@ -1201,6 +1371,7 @@
 						} else {
 							params.think = null;
 						}
+						onParamChange('think', params.think);
 					}}
 					type="button"
 				>
@@ -1214,7 +1385,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Default')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if typeof params.think === 'string'}
@@ -1226,6 +1397,7 @@
 						aria-label={`${$i18n.t('settings.personal.general.parameters.think.label')} (${$i18n.t('settings.personal.general.parameters.ollama.label')})`}
 						placeholder={$i18n.t("e.g. 'low', 'medium', 'high'")}
 						bind:value={params.think}
+						on:change={() => onParamChange('think', params.think ?? null)}
 						autocomplete="off"
 					/>
 				</div>
@@ -1239,16 +1411,22 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class=" py-0.5 flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.format.label')} ({$i18n.t(
 						'settings.personal.general.parameters.ollama.label'
 					)})
-				</div>
+				</span>
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-gray-900 dark:text-gray-100"
 					on:click={() => {
 						params.format = (params?.format ?? null) === null ? 'json' : null;
+						onParamChange('format', params.format);
 					}}
 					type="button"
 				>
@@ -1258,7 +1436,7 @@
 						<span class="ml-2 self-center">{$i18n.t('JSON')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.format ?? null) !== null}
@@ -1268,6 +1446,7 @@
 					ariaLabel={`${$i18n.t('settings.personal.general.parameters.format.label')} (${$i18n.t('settings.personal.general.parameters.ollama.label')})`}
 					placeholder={$i18n.t('e.g. "json" or a JSON schema')}
 					bind:value={params.format}
+					on:change={() => onParamChange('format', params.format ?? null)}
 				/>
 			</div>
 		{/if}
@@ -1281,18 +1460,24 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.numKeep.label')} ({$i18n.t(
 						'settings.personal.general.parameters.ollama.label'
 					)})
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.num_keep = (params?.num_keep ?? null) === null ? 24 : null;
+						onParamChange('num_keep', params.num_keep);
 					}}
 				>
 					{#if (params?.num_keep ?? null) === null}
@@ -1301,7 +1486,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.num_keep ?? null) !== null}
@@ -1323,18 +1508,24 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.numCtx.label')} ({$i18n.t(
 						'settings.personal.general.parameters.ollama.label'
 					)})
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.num_ctx = (params?.num_ctx ?? null) === null ? 2048 : null;
+						onParamChange('num_ctx', params.num_ctx);
 					}}
 				>
 					{#if (params?.num_ctx ?? null) === null}
@@ -1343,7 +1534,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.num_ctx ?? null) !== null}
@@ -1367,18 +1558,24 @@
 			placement="top-start"
 			className="inline-tooltip"
 		>
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+			<UserSettingRow
+				let:labelId
+				className="w-full py-0.5"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+			>
+				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.numBatch.label')} ({$i18n.t(
 						'settings.personal.general.parameters.ollama.label'
 					)})
-				</div>
+				</span>
 
 				<button
+					id={`${labelId}-control`}
 					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 					type="button"
 					on:click={() => {
 						params.num_batch = (params?.num_batch ?? null) === null ? 512 : null;
+						onParamChange('num_batch', params.num_batch);
 					}}
 				>
 					{#if (params?.num_batch ?? null) === null}
@@ -1387,7 +1584,7 @@
 						<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 					{/if}
 				</button>
-			</div>
+			</UserSettingRow>
 		</Tooltip>
 
 		{#if (params?.num_batch ?? null) !== null}
@@ -1412,18 +1609,24 @@
 				placement="top-start"
 				className="inline-tooltip"
 			>
-				<div class="flex w-full justify-between">
-					<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+				<UserSettingRow
+					let:labelId
+					className="w-full py-0.5"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				>
+					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.numThread.label')} ({$i18n.t(
 							'settings.personal.general.parameters.ollama.label'
 						)})
-					</div>
+					</span>
 
 					<button
+						id={`${labelId}-control`}
 						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 						type="button"
 						on:click={() => {
 							params.num_thread = (params?.num_thread ?? null) === null ? 2 : null;
+							onParamChange('num_thread', params.num_thread);
 						}}
 					>
 						{#if (params?.num_thread ?? null) === null}
@@ -1432,7 +1635,7 @@
 							<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 						{/if}
 					</button>
-				</div>
+				</UserSettingRow>
 			</Tooltip>
 
 			{#if (params?.num_thread ?? null) !== null}
@@ -1455,18 +1658,24 @@
 				placement="top-start"
 				className="inline-tooltip"
 			>
-				<div class="flex w-full justify-between">
-					<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+				<UserSettingRow
+					let:labelId
+					className="w-full py-0.5"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				>
+					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.numGpu.label')} ({$i18n.t(
 							'settings.personal.general.parameters.ollama.label'
 						)})
-					</div>
+					</span>
 
 					<button
+						id={`${labelId}-control`}
 						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
 						type="button"
 						on:click={() => {
 							params.num_gpu = (params?.num_gpu ?? null) === null ? 0 : null;
+							onParamChange('num_gpu', params.num_gpu);
 						}}
 					>
 						{#if (params?.num_gpu ?? null) === null}
@@ -1475,7 +1684,7 @@
 							<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 						{/if}
 					</button>
-				</div>
+				</UserSettingRow>
 			</Tooltip>
 
 			{#if (params?.num_gpu ?? null) !== null}
@@ -1498,16 +1707,22 @@
 				placement="top-start"
 				className="inline-tooltip"
 			>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div class="self-center text-xs font-normal text-gray-600 dark:text-gray-400">
+				<UserSettingRow
+					let:labelId
+					className="w-full py-0.5"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				>
+					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.keepAlive.label')} ({$i18n.t(
 							'settings.personal.general.parameters.ollama.label'
 						)})
-					</div>
+					</span>
 					<button
+						id={`${labelId}-control`}
 						class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-gray-900 dark:text-gray-100"
 						on:click={() => {
 							params.keep_alive = (params?.keep_alive ?? null) === null ? '5m' : null;
+							onParamChange('keep_alive', params.keep_alive);
 						}}
 						type="button"
 					>
@@ -1517,7 +1732,7 @@
 							<span class="ml-2 self-center">{$i18n.t('Custom')}</span>
 						{/if}
 					</button>
-				</div>
+				</UserSettingRow>
 			</Tooltip>
 
 			{#if (params?.keep_alive ?? null) !== null}
@@ -1528,13 +1743,17 @@
 						aria-label={`${$i18n.t('settings.personal.general.parameters.keepAlive.label')} (${$i18n.t('settings.personal.general.parameters.ollama.label')})`}
 						placeholder={$i18n.t("e.g. '30s','10m'. Valid time units are 's', 'm', 'h'.")}
 						bind:value={params.keep_alive}
+						on:change={() => onParamChange('keep_alive', params.keep_alive ?? null)}
 					/>
 				</div>
 			{/if}
 		</div>
 
 		{#if custom && admin}
-			<CustomParams bind:value={params.custom_params} />
+			<CustomParams
+				bind:value={params.custom_params}
+				onChange={(value) => onParamChange('custom_params', value)}
+			/>
 		{/if}
 	{/if}
 </div>

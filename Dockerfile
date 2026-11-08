@@ -44,7 +44,8 @@ WORKDIR /app
 RUN apk add --no-cache git
 
 COPY package.json package-lock.json ./
-RUN npm ci --force
+# the frontend build never uses onnxruntime-node's CUDA binaries
+RUN ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci --force
 
 COPY . .
 ENV APP_BUILD_HASH=${BUILD_HASH}
@@ -59,7 +60,7 @@ RUN chown -R $UID:$GID /app/backend && \
     chmod -R g=u /app/backend/open_webui/static
 
 ######## WebUI backend ########
-FROM python:3.11-slim-bookworm AS base
+FROM python:3.12-slim-trixie AS base
 
 # Use args
 ARG USE_CUDA
