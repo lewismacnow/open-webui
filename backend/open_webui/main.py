@@ -2054,8 +2054,10 @@ async def chat_completion(
                 # entries for newly-active connections) and the chain looks
                 # empty when it shouldn't.
                 try:
-                    from open_webui.routers.models import get_all_models
-
+                    # NOTE: no local import here - a local import of
+                    # get_all_models would shadow the module-level import for
+                    # the WHOLE function and break the earlier
+                    # `if not request.app.state.MODELS` refresh below.
                     await get_all_models(request, user=user)
                 except Exception as refresh_exc:
                     log.warning(
