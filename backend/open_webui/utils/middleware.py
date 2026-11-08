@@ -2741,6 +2741,37 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     is_note_chat = bool(chat and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note')
 
+    # Fork: stash the API Tools state in metadata so the downstream Path C
+    # branches can detect it.
+    #
+    # The v0.13.2 sync dropped this block (it sat between upstream's
+    # `if api_tools_active:` feature block and the fork's tool_ids block, so
+    # the conflict resolution took upstream's shape and the fork's lines were
+    # never re-applied). The readers were left in place, so the writes simply
+    # went missing: `metadata['api_tools_active']` was always falsy and the
+    # API Tools path never ran.
+    metadata['api_tools_active'] = api_tools_active
+    # API caller may pre-supply answers to ``ask_user`` tool calls so the
+    # chat can continue without a downstream UI socket. Format:
+    # ``{question_id: selected_option_label}``. Carried through to
+    # ``stage_ask_user_tool_calls`` which validates coverage and emits
+    # the resolved function_call_output immediately.
+    metadata['ask_user_answers'] = form_data.get('ask_user_answers')
+
+    internal_note = (
+        chat is not None and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note'
+    )
+
+    # Fork: superset of upstream's use_builtin_tools gate — internal notes and
+    # UI sessions enable builtin tools exactly as upstream, and api_tools_active
+    # (stateless API callers on models with the API Tools capability) unlocks
+    # them for the API Tools wrapper path.
+    use_builtin_tools = (
+        (internal_note or bool(metadata.get('session_id')) or api_tools_active)
+        and (metadata.get('params', {}).get('function_calling') != 'legacy')
+        and bool(model_capabilities.get('builtin_tools', True))
+    )
+
     if api_tools_active:
         if not tool_ids:
             model_tool_ids = (model.get('info', {}).get('meta', {}) or {}).get('toolIds', [])
