@@ -101,7 +101,44 @@ No schema conflicts: upstream's chain adds indexes on channel tables; the fork's
 - Frontend build green.
 - The fork's context-management test suites (threshold resolution, retention, budget enforcement, base-model repair) were re-run against the merged code.
 
-## 8. Known follow-ups
+## 8. Pre-existing fork bugs found by the post-merge review and test deployment
+
+A full review (static audit + shadowing scan + a Docker test deployment) found two real
+defects that **the merge did not introduce** — both pre-date the v0.13.2 sync and are
+the fork's own code. They are fixed here. Neither exists in upstream v0.13.2.
+
+### 8.1 Duplicated `get_file_content_by_id` endpoint — `routers/files.py`
+**Pre-existing fork bug** — the fork's `routers/files.py` already carried two
+definitions of the same route before this sync. Python kept the second, so the first
+was dead code: the `?attachment=` parameter never had any effect and the
+content-type-aware `Content-Disposition` never applied. (Upstream's v0.13.2 is
+unaffected — it has a single definition.)
+
+Merged into one endpoint carrying upstream's `attachment` parameter and
+`Content-Disposition` handling **plus** the fork's legacy fallback (records whose
+stored path has gone missing serve their indexed text instead of 404).
+
+### 8.2 `UnboundLocalError` on every chat request — `main.py`
+**Pre-existing fork bug** — `main.py`'s `chat_completion()` has a local
+`from open_webui.routers.models import get_all_models` inside a try block. A local
+import makes the name local for the **whole** function, so the earlier
+`if not request.app.state.MODELS: await get_all_models(...)` raised
+`UnboundLocalError` instead of refreshing the registry.
+
+It only bites when the model registry is empty (no connection configured yet, or a
+connection disabled) — which is exactly the state of a fresh deployment. Every chat
+request then failed with a 500. The local import came in with the fork's failover
+refresh block and predates this sync; **upstream's v0.13.2 has a single module-level
+import and is not affected**. The local import was pointless (`routers.models`
+re-exports the same function from `utils.models`) and has been removed.
+
+*Found by the test deployment:* `POST /api/v1/chat/completions` returned
+`500 UnboundLocalError`; it now returns a clean `400 Model not found`.
+
+A scan for the same pattern — a local import shadowing a module-level name that is
+used earlier in the same function — now reports **zero** hazards across the backend.
+
+## 9. Known follow-ups
 
 - Re-check upstream's intent on the two restored blocks (note-files injection, `ast` fallback).
 - Upstream's ModelEditor / ToolkitEditor deltas still to be ported.
