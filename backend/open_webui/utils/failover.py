@@ -19,7 +19,7 @@ from collections import deque
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from types import SimpleNamespace
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import HTTPException, Request
 
@@ -37,12 +37,19 @@ class RetryableProviderError(Exception):
     error, 5xx, 429). The fields carry enough context for health-cache
     updates (retry_after) and, if every candidate fails, for the final
     HTTPException surfaced to the user.
+
+    ``detail`` is the provider's failure body. It is a plain string when the
+    provider answered with something that is not JSON, and the *parsed* body
+    (dict / list) when the provider answered with JSON — a provider error is
+    structured data, so it is passed on as such instead of as a JSON string
+    embedded in a string. Consumers must therefore treat ``detail`` as
+    "string or parsed body".
     """
 
     def __init__(
         self,
         status_code: Optional[int] = None,
-        detail: Optional[str] = None,
+        detail: Optional[Union[str, dict, list]] = None,
         retry_after: Optional[int] = None,
         provider_url: Optional[str] = None,
     ):
