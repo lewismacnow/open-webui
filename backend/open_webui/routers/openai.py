@@ -5,7 +5,7 @@ import hashlib
 import logging
 import re
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from urllib.parse import quote, urlparse
 
@@ -276,6 +276,7 @@ async def clear_models_cache(request: Request):
         await redis.delete(BASE_MODELS_CACHE_KEY)
     request.app.state.BASE_MODELS = []
     request.app.state.OPENAI_MODELS = {}
+    request.app.state.OPENAI_MODELS_BASE_URLS = []
     models = getattr(request.app.state, 'MODELS', None)
     if hasattr(models, 'clear'):
         models.clear()
@@ -727,6 +728,7 @@ async def get_all_models(request: Request, user: UserModel) -> dict[str, list]:
     enable_openai_api, api_base_urls, _, api_configs = await get_openai_runtime_config()
     if not enable_openai_api:
         request.app.state.OPENAI_MODELS = {}
+        request.app.state.OPENAI_MODELS_BASE_URLS = []
         return {'data': []}
 
     responses = await get_all_models_responses(request, user=user)
@@ -786,6 +788,13 @@ async def get_all_models(request: Request, user: UserModel) -> dict[str, list]:
     log.debug('models: %s', models)
 
     request.app.state.OPENAI_MODELS = models
+    # The connection list this snapshot was built from. Every entry carries
+    # a 'urlIdx' - an index into THAT list - so once the admin edits the
+    # connections (add / remove / reorder) the index can point at a
+    # DIFFERENT connection than the one that actually serves the model.
+    # Keeping the list next to the snapshot lets the failover resolver
+    # resolve the URL instead of trusting the bare index.
+    request.app.state.OPENAI_MODELS_BASE_URLS = list(api_base_urls)
     return {'data': list(models.values())}
 
 
@@ -1461,7 +1470,6 @@ async def generate_chat_completion(
 
     # Let DB helpers own short-lived sessions so remote calls and streams do not hold pool connections.
 
-
     # bypass_filter and bypass_system_prompt are read from request.state to prevent
     # external clients from setting them via query parameter. Only internal
     # server-side callers (e.g. utils/chat.py) should set
@@ -1645,6 +1653,67 @@ async def generate_chat_completion(
     )
 
 
+# The provider's error body is all the user gets to see when every candidate
+# failed, so it is kept as small as the flat string it used to be.
+_PROVIDER_DETAIL_MAX_CHARS = 500
+
+
+async def _decode_provider_body(response) -> Union[dict, list, str, None]:
+    """Decode a provider response body, tolerating a wrong/missing Content-Type.
+
+    aiohttp's ``resp.json()`` refuses to decode anything that is not
+    ``application/json`` and raises ``ContentTypeError`` instead. Some
+    providers answer a JSON error payload with a blank or ``text/plain``
+    Content-Type (z.ai does), which used to be logged as an application error
+    and then handed on as an opaque string.
+
+    The body is authoritative: decode it as JSON whenever it parses and keep
+    the raw text only when it really is not JSON.
+    """
+    content_type = response.headers.get('Content-Type', '')
+    body = await response.text()
+    if not body.strip():
+        # Same as ``resp.json()`` on an empty body.
+        return None
+    try:
+        decoded = JSONCodec.loads(body)
+    except ValueError:
+        log.debug(
+            'Provider %s returned a body that is not JSON (Content-Type %r); keeping it as text',
+            response.url,
+            content_type,
+        )
+        return body
+    if 'json' not in content_type.lower():
+        log.debug(
+            'Provider %s returned a JSON body with an unexpected Content-Type %r; parsed it anyway',
+            response.url,
+            content_type,
+        )
+    return decoded
+
+
+def _provider_error_detail(body: Union[dict, list, str, None]) -> Union[str, dict, list]:
+    """Shape a decoded provider body into the ``detail`` of a provider failure.
+
+    A JSON body stays structured, so the failure detail is a parsed object
+    instead of a JSON string embedded in a string. Anything else stays text.
+    Both are bounded to ``_PROVIDER_DETAIL_MAX_CHARS`` so a huge upstream
+    payload cannot flood the client or the provider-health cache.
+    """
+    if body is None:
+        return ''
+    if isinstance(body, str):
+        return body[:_PROVIDER_DETAIL_MAX_CHARS]
+    try:
+        serialized = JSONCodec.dumps(body)
+    except (TypeError, ValueError):
+        return str(body)[:_PROVIDER_DETAIL_MAX_CHARS]
+    if len(serialized) > _PROVIDER_DETAIL_MAX_CHARS:
+        return serialized[:_PROVIDER_DETAIL_MAX_CHARS]
+    return body
+
+
 async def _try_provider_candidate(
     request: Request,
     candidate: ProviderCandidate,
@@ -1669,7 +1738,6 @@ async def _try_provider_candidate(
     url = candidate.url
     key = candidate.key
     api_config = candidate.api_config
-    idx = candidate.url_idx
 
     # Capacity accounting: mark this request as in-flight against the
     # provider BEFORE anything else, so the resolver's capacity tier (and any
@@ -1701,7 +1769,16 @@ async def _try_provider_candidate(
     # them (they expect a string for ``user``).
     models_state = request.app.state.OPENAI_MODELS or {}
     cache_entry = models_state.get(candidate.model_name)
-    if cache_entry and cache_entry.get('pipeline') and cache_entry.get('urlIdx') == idx:
+    # The candidate is routed by URL - it follows the connection the model
+    # snapshot recorded for this model, even after the connection list has
+    # been reordered - so it is always the connection the snapshot recorded.
+    # The old `cache_entry.get('urlIdx') == idx` guard compared the snapshot's
+    # index with the candidate's own index, which was the SAME value (the
+    # candidate's url_idx came from that very entry) and therefore never
+    # filtered anything. It is not repeated here: with the candidate routed
+    # by URL the two indices legitimately differ once the list is edited, and
+    # comparing them would silently drop the injection for a real pipeline.
+    if cache_entry and cache_entry.get('pipeline'):
         attempt_payload['user'] = {
             'name': user.name,
             'id': user.id,
@@ -1809,49 +1886,55 @@ async def _try_provider_candidate(
             # SSE with error status: read body and treat as non-stream response.
             if r.status >= 400:
                 retry_headers = {k: v for k, v in r.headers.items() if k.lower() in ('retry-after', 'retry-after-ms')}
-                error_body = await r.text()
-                log.error(
+                error_body = await _decode_provider_body(r)
+                if error_body is None:
+                    error_body = ''
+                error_text = error_body if isinstance(error_body, str) else JSONCodec.dumps(error_body)
+                log.warning(
                     'Provider %s returned HTTP %d with SSE content-type: %s',
                     url,
                     r.status,
-                    error_body[:1000],
+                    error_text[:1000],
                 )
                 if is_retryable_error(r.status, None):
                     raise RetryableProviderError(
                         status_code=r.status,
-                        detail=error_body[:500],
+                        detail=_provider_error_detail(error_body),
                         retry_after=parse_retry_after(r.headers.get('Retry-After')),
                         provider_url=url,
                     )
-                try:
-                    error_json = JSONCodec.loads(error_body)
-                    await publish_model_provider_request_failed(
-                        request,
-                        actor=user,
-                        provider='openai-compatible',
-                        base_url=url,
-                        api_key=key,
-                        status=r.status,
-                        requested_model=requested_model,
-                        upstream_error=error_json,
-                    )
-                    return JSONResponse(status_code=r.status, content=error_json, headers=retry_headers)
-                except JSONCodec.JSONDecodeError:
-                    await publish_model_provider_request_failed(
-                        request,
-                        actor=user,
-                        provider='openai-compatible',
-                        base_url=url,
-                        api_key=key,
-                        status=r.status,
-                        requested_model=requested_model,
-                        upstream_error=error_body,
-                    )
-                    return JSONResponse(
-                        status_code=r.status,
-                        content={'error': {'message': error_body, 'code': r.status}},
-                        headers=retry_headers,
-                    )
+                if isinstance(error_body, (dict, list)):
+                    error_json = error_body
+                else:
+                    try:
+                        error_json = JSONCodec.loads(error_body)
+                    except JSONCodec.JSONDecodeError:
+                        await publish_model_provider_request_failed(
+                            request,
+                            actor=user,
+                            provider='openai-compatible',
+                            base_url=url,
+                            api_key=key,
+                            status=r.status,
+                            requested_model=requested_model,
+                            upstream_error=error_body,
+                        )
+                        return JSONResponse(
+                            status_code=r.status,
+                            content={'error': {'message': error_body, 'code': r.status}},
+                            headers=retry_headers,
+                        )
+                await publish_model_provider_request_failed(
+                    request,
+                    actor=user,
+                    provider='openai-compatible',
+                    base_url=url,
+                    api_key=key,
+                    status=r.status,
+                    requested_model=requested_model,
+                    upstream_error=error_json,
+                )
+                return JSONResponse(status_code=r.status, content=error_json, headers=retry_headers)
 
             # Phase 2: buffer window. Pre-read up to 2KB / 500ms so a provider
             # that 200s-then-dies becomes a retryable failure.
@@ -1910,19 +1993,16 @@ async def _try_provider_candidate(
                 headers=response_headers,
             )
 
-        # Non-SSE response
-        try:
-            response = await r.json(loads=JSONCodec.loads)
-        except Exception as e:
-            log.error(e)
-            response = await r.text()
+        # Non-SSE response. The body decides what it is, not the Content-Type:
+        # some providers answer a JSON payload with a blank or text/plain
+        # Content-Type, which aiohttp's ``json()`` refuses to decode.
+        response = await _decode_provider_body(r)
 
         if r.status >= 400:
             if is_retryable_error(r.status, None):
-                detail = response if isinstance(response, str) else JSONCodec.dumps(response)
                 raise RetryableProviderError(
                     status_code=r.status,
-                    detail=detail[:500],
+                    detail=_provider_error_detail(response),
                     retry_after=parse_retry_after(r.headers.get('Retry-After')),
                     provider_url=url,
                 )

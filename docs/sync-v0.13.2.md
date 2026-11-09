@@ -361,6 +361,141 @@ heuristic-only file (5 failures) and passes on this one.
   removed the `resolve_system_prompt()` call site in its own refactor (`8e2ba2937`), so the
   name was dead. The fork's line is removed; upstream's line is left as the single import.
 
+### 9.7 The failover resolver could not explain itself — `utils/failover.py`
+
+Reported in production as:
+
+```
+WARNING | resolve_failover_candidates:377 - wrapper 'minimax.MiniMax-M3.1-Flash'
+(failover_source='custom') resolved to 1 candidate(s)
+[zai.glm-5.3-flash@https://api.z.ai/api/coding/paas/v4]. Failover will NOT be possible for
+this request - check the chain configuration and that chain entries resolve against current
+connections (OPENAI_MODELS).
+```
+
+"Check the chain configuration" without saying **which** entry vanished or **why** is not
+actionable, and one whole failure mode was completely silent: a wrapper whose
+`failover_source` is `custom` but whose chain is **empty** fell back to the legacy
+single-provider path with the source toggle read and then silently ignored.
+
+Three fixes:
+
+1. **Every dropped chain entry now carries a reason** — unknown model id, an unusable
+   `urlIdx`, an index out of range for the snapshot, a connection removed since the snapshot
+   was taken, or a connection the request skipped — and the summary warning repeats the
+   dropped entries and their reasons.
+2. **An empty custom chain now says so explicitly** instead of degrading silently.
+3. **Correctness.** A chain entry's `urlIdx` is an index into the connection list the
+   `OPENAI_MODELS` snapshot was built from, but the resolver indexed the **current** list with
+   it. Removing a connection shifts every later index, so an entry could be dropped — or
+   worse, routed to a **different provider with a different API key**. The entry now follows
+   its URL to the connection that actually serves it and takes that connection's key and
+   config; the snapshot's connection list is recorded alongside the model cache.
+
+That last change also retired a guard that had never done anything:
+`cache_entry.get('urlIdx') == idx` compared the snapshot's index with the candidate's own
+index, and the candidate's index came from that very entry — so it was always `True`. With the
+candidate routed by URL the two indices legitimately differ once the connection list is
+edited, so keeping the comparison would have silently dropped the pipeline user-info injection
+for a real pipeline.
+
+`backend/open_webui/test/test_failover_resolve.py` — 8 tests; 7 fail on the pre-fix code, the
+8th pins that configured order and health ranking must not change.
+
+### 9.8 A provider's JSON error body was discarded because of its Content-Type — `routers/openai.py`
+
+```
+ERROR | open_webui.routers.openai:_try_provider_candidate:1917 -
+  500, message='Attempt to decode JSON with unexpected mimetype: ', url='...'
+```
+
+The provider answered with HTTP 500 and a JSON body but a Content-Type that is not
+`application/json` (`api.z.ai` sends none at all). aiohttp's `resp.json()` refuses to decode
+anything else and raises `ContentTypeError`, whose `str()` is the odd
+`500, message=..., url=...` line above.
+
+The body was recovered as text, but the provider's structured error was never parsed, so the
+failure detail reached the client as a JSON string embedded in a string:
+
+```json
+{ "detail": "{\"error\": {\"code\": \"1234\", \"message\": \"Internal network failure...\"}}" }
+```
+
+and a handled condition was logged at ERROR.
+
+The body is authoritative, not the Content-Type. `_decode_provider_body()` now decodes it as
+JSON whenever it parses — whatever the header says — and keeps the raw text only when it
+really is not JSON. The mismatched-Content-Type case is logged at DEBUG ("parsed it anyway"),
+and a genuinely non-JSON body likewise. The SSE branch uses the same helper.
+
+`RetryableProviderError.detail` now carries the **parsed** body when the provider answered
+with JSON and a string otherwise. Which errors are retryable is unchanged.
+
+Verified against a running container with a mock provider that fails the way `api.z.ai` does:
+
+| case                       | before                                                | after                                            |
+| -------------------------- | ----------------------------------------------------- | ------------------------------------------------ |
+| JSON body, no Content-Type | `{"detail":"{\"error\": {...}}"}` + an ERROR log line | `{"detail":{"error":{...}}}` + no ERROR log line |
+| HTML body, no Content-Type | `{"detail":"<html>…</html>"}`                         | unchanged                                        |
+| healthy provider           | 200                                                   | 200                                              |
+
+`backend/open_webui/test/test_provider_error_body.py` — 15 tests; 14 fail on the pre-fix code.
+
+### 9.9 A transient provider failure killed the tool-call continuation
+
+```
+ERROR | open_webui.utils.middleware:response_handler:7644 - Tool-call continuation failed:
+  {"error":{"code":"1234","message":"Internal network failure, error id: ... please try again later."}}
+  + a 30-line traceback
+```
+
+The tool-call continuation is the turn that turns tool results into the model's final
+answer. The tool has **already run** by then — only the final answer is missing — yet a
+transient provider failure ended the turn outright.
+
+Three fixes:
+
+1. **The continuation is retried** on a transient failure (5xx / 429), up to twice with a
+   short backoff. A 4xx is _not_ retried: the request shape or the credentials are wrong and
+   the same call would fail identically.
+2. **The provider's message is no longer hidden.** The chat UI renders `error.content` as a
+   _string_ — the frontend's `getErrorMessage()` takes the first string candidate and falls
+   back to a generic "Server connection failed" when it finds none. A provider body that was
+   still a dict therefore made the UI show "Server connection failed" instead of the
+   provider's actual message. `utils/misc.py:extract_error_message()` now drills down to the
+   first useful string (`error` → `message` → `detail`) and is used by **both** places that
+   put a provider failure into the chat: the tool-call continuation
+   (`utils/middleware.py`) and the top-level chat handler (`main.py`).
+
+   This also repairs a regression from the previous commit: parsing the provider's JSON body
+   turned `detail` into a dict, and that dict then reached the chat UI as `error.content`,
+   where it matched no string candidate and the provider's message was replaced by
+   "Server connection failed".
+
+3. **No traceback for a provider failure.** The provider's message is the information; the
+   stack is noise on top of it. An unexpected exception still logs the full traceback.
+
+Verified against a running container with a mock provider that fails the continuation round
+once, then recovers:
+
+```
+mock:  POST #1 roles=['user']                     -> emitting tool_call
+       POST #2 roles=['user','assistant','tool']  -> failing with HTTP 500 (JSON body, no Content-Type)
+       POST #3 roles=['user','assistant','tool']  -> replying with text
+app:   WARNING | Tool-call continuation hit a transient provider error (HTTP 500);
+                retrying in 1.0s (attempt 1 of 2).
+       -> the chat completes: "Tool executed successfully after a retry."
+```
+
+With the provider failing every time, the turn ends with the readable message and no
+traceback:
+
+```
+ERROR | Tool-call continuation failed: Internal network failure, error id: ... please try again later.
+```
+
+`backend/open_webui/test/test_tool_continuation.py` — 27 tests; 24 fail on the pre-fix code.
+
 ## 10. Known follow-ups
 
 - The fork's note-files injection in `process_chat_payload` was **not** restored — upstream
