@@ -796,6 +796,10 @@ app.state.OLLAMA_MODELS = {}
 
 
 app.state.OPENAI_MODELS = {}
+# Connection list the OPENAI_MODELS snapshot was built from (see
+# routers/openai.py::get_all_models) - lets the failover resolver detect a
+# stale 'urlIdx' after the admin edits the connections.
+app.state.OPENAI_MODELS_BASE_URLS = []
 
 # Tool servers
 

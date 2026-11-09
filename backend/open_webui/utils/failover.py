@@ -161,6 +161,90 @@ async def resolve_failover_chain_model_ids(model_info, requested_model_id: str) 
     return chain_ids
 
 
+def _resolve_chain_entry(
+    model_id: str,
+    position: int,
+    max_concurrent: Optional[int],
+    *,
+    models_state: dict,
+    snapshot_urls: list[str],
+    base_urls: list[str],
+    keys: list[str],
+    configs: dict,
+    skip_set: set[str],
+) -> tuple[Optional[ProviderCandidate], Optional[str]]:
+    """Resolve a `$models`-style id into a concrete (url, key, ...) candidate.
+
+    Returns ``(candidate, None)`` when the entry resolves, or
+    ``(None, reason)`` with a short, human-readable reason when it does
+    not. The reason is logged per entry and repeated in the summary
+    warning, so a dropped chain entry always says WHY it was dropped
+    instead of a bare "not resolvable".
+
+    ``snapshot_urls`` is the connection list the OPENAI_MODELS snapshot was
+    built from and ``base_urls`` the CURRENT one. A snapshot entry only
+    stores 'urlIdx' - an index into the snapshot's list - so after the
+    admin edits the connections the index can point at a DIFFERENT
+    connection than the one that actually serves the model. Following the
+    URL instead of the bare index keeps the routing correct (and the key /
+    config of the connection that really serves the model).
+    """
+    model_entry = models_state.get(model_id)
+    if not model_entry:
+        return None, (
+            'model id is not in the current OPENAI_MODELS snapshot '
+            '(the connection does not offer it, is unreachable, or the model was renamed)'
+        )
+
+    idx = model_entry.get('urlIdx')
+    if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0:
+        return None, f'OPENAI_MODELS entry has no usable urlIdx ({idx!r})'
+    if idx >= len(snapshot_urls):
+        return None, (
+            f'urlIdx {idx} is out of range for the {len(snapshot_urls)} connection(s) '
+            'the OPENAI_MODELS snapshot was built from'
+        )
+
+    # The connection that actually served this model when the snapshot was
+    # taken. Follow the URL, not the raw index: the index moves when a
+    # connection before it is added or removed.
+    url = snapshot_urls[idx]
+    try:
+        cur_idx = base_urls.index(url)
+    except ValueError:
+        return None, (
+            f'connection {url} was removed from the connection list since the OPENAI_MODELS snapshot was taken'
+        )
+    if cur_idx != idx:
+        log.debug(
+            'resolve_failover_candidates: model_id=%s connection index moved %s -> %s; following the URL.',
+            model_id,
+            idx,
+            cur_idx,
+        )
+    if url in skip_set:
+        return None, f'connection {url} was skipped by the request (X-Skip-Provider-URLs)'
+
+    key = keys[cur_idx] if cur_idx < len(keys) else ''
+    api_config = configs.get(str(cur_idx), configs.get(url, {}))
+    return (
+        ProviderCandidate(
+            url=url,
+            url_idx=cur_idx,
+            key=key,
+            # Pass the prefixed id through; _try_provider_candidate strips
+            # the prefix_id before it goes on the wire, matching legacy
+            # single-provider behavior.
+            model_name=model_id,
+            api_config=api_config,
+            prefix_id=api_config.get('prefix_id'),
+            max_concurrent=max_concurrent if isinstance(max_concurrent, int) and max_concurrent > 0 else None,
+            position=position,
+        ),
+        None,
+    )
+
+
 async def resolve_failover_candidates(
     request: Request,
     model_info,
@@ -188,6 +272,12 @@ async def resolve_failover_candidates(
       remain present, so an all-unhealthy chain still degrades rather
       than hard-failing.
 
+    Every chain entry that cannot be resolved is logged with the REASON
+    (unknown model id / stale connection index / removed connection /
+    skipped URL) and the summary warning names the dropped entries — a
+    bare "resolved to 1 candidate(s)" left the operator guessing which
+    entry vanished and why.
+
     Note: per-provider capability tags (tools/vision) were removed — the
     wrapper model's own capability settings (inherited from the base model)
     govern routing; providers no longer carry redundant capability asserts.
@@ -201,38 +291,29 @@ async def resolve_failover_candidates(
     keys = _rt.get('openai.api_keys') or []
     configs = _rt.get('openai.api_configs') or {}
     models_state = request.app.state.OPENAI_MODELS or {}
+    # The connection list the OPENAI_MODELS snapshot was built from. A
+    # snapshot entry only stores 'urlIdx' - an index into THAT list - so
+    # once the admin edits the connections (add / remove / reorder) the
+    # index can point at a DIFFERENT connection than the one that actually
+    # serves the model, and the request would be routed to the wrong
+    # provider (with the wrong API key). Resolving the URL through the
+    # snapshot's own list and then looking that URL up in the CURRENT list
+    # keeps the routing correct and tells us when the connection is gone.
+    snapshot_urls = list(getattr(request.app.state, 'OPENAI_MODELS_BASE_URLS', None) or base_urls)
 
     def _build_candidate(
         model_id: str, position: int, max_concurrent: Optional[int] = None
-    ) -> Optional[ProviderCandidate]:
-        """Resolve a `$models`-style id into a concrete (url, key, ...) candidate.
-
-        Returns None if the model isn't in the OPENAI_MODELS cache (stale or
-        unknown), or if its connection has been skipped.
-        """
-        model_entry = models_state.get(model_id)
-        if not model_entry:
-            return None
-        idx = model_entry.get('urlIdx')
-        if idx is None or idx >= len(base_urls):
-            return None
-        url = base_urls[idx]
-        if url in skip_set:
-            return None
-        key = keys[idx] if idx < len(keys) else ''
-        api_config = configs.get(str(idx), configs.get(url, {}))
-        return ProviderCandidate(
-            url=url,
-            url_idx=idx,
-            key=key,
-            # Pass the prefixed id through; _try_provider_candidate strips
-            # the prefix_id before it goes on the wire, matching legacy
-            # single-provider behavior.
-            model_name=model_id,
-            api_config=api_config,
-            prefix_id=api_config.get('prefix_id'),
-            max_concurrent=max_concurrent if isinstance(max_concurrent, int) and max_concurrent > 0 else None,
-            position=position,
+    ) -> tuple[Optional[ProviderCandidate], Optional[str]]:
+        return _resolve_chain_entry(
+            model_id,
+            position,
+            max_concurrent,
+            models_state=models_state,
+            snapshot_urls=snapshot_urls,
+            base_urls=base_urls,
+            keys=keys,
+            configs=configs,
+            skip_set=skip_set,
         )
 
     # Chain source resolution:
@@ -247,8 +328,13 @@ async def resolve_failover_candidates(
     # the caller when this is a wrapper — global chains are keyed by the
     # WRAPPER id, so key off model_info.id, never the payload.
     failover = None
+    # Why the chain ended up empty - feeds the summary warning so an
+    # operator sees WHAT was configured, not just how many candidates
+    # survived.
+    chain_empty_reason = None
     if model_info and model_info.meta:
-        if getattr(model_info.meta, 'failover_source', None) == 'global':
+        source = getattr(model_info.meta, 'failover_source', None)
+        if source == 'global':
             chains_data = await Config.get('models.wrapper_provider_chains') or []
             # Backwards compat: an earlier fork version stored this as
             # ``{wrapper_id: [entries]}`` keyed by wrapper id. Prefer THIS
@@ -300,21 +386,43 @@ async def resolve_failover_candidates(
                 else SimpleNamespace(model_id=entry.get('model_id'), max_concurrent=entry.get('max_concurrent'))
                 for entry in chains_data
             ]
+            if not failover:
+                chain_empty_reason = 'the admin-configured global chain (models.wrapper_provider_chains) is EMPTY'
         elif getattr(model_info.meta, 'failover_providers', None):
             failover = model_info.meta.failover_providers
+        elif source:
+            # The model declares a failover source but carries NO chain
+            # entries at all (e.g. the model editor saved the source but
+            # the provider list was empty). The resolver used to fall back
+            # to the legacy single-provider path SILENTLY, so the operator
+            # saw "resolved to 1 candidate(s)" with no explanation.
+            chain_empty_reason = (
+                f"the model's failover chain is EMPTY (meta.failover_providers has no "
+                f'entries) even though failover_source={source!r}'
+            )
 
     candidates: list[ProviderCandidate] = []
+    # Every chain entry that could not be resolved, with the reason. The
+    # summary warning repeats them so the operator sees WHICH entry
+    # vanished and WHY instead of a bare "not resolvable".
+    dropped: list[str] = []
+    # The legacy base-model primary (no chain configured) that could not be
+    # resolved - reported separately so it is not mistaken for a chain
+    # entry.
+    dropped_base: list[str] = []
 
     if failover:
         # Workspace-level (custom) or admin global chain wins entirely.
         # Entries are FailoverProvider (Pydantic) or SimpleNamespace (global
         # chain dicts) — both carry max_concurrent via getattr.
         for position, entry in enumerate(failover):
-            candidate = _build_candidate(entry.model_id, position, getattr(entry, 'max_concurrent', None))
+            candidate, reason = _build_candidate(entry.model_id, position, getattr(entry, 'max_concurrent', None))
             if candidate is None:
+                dropped.append(f'{entry.model_id} ({reason})')
                 log.warning(
-                    'Workspace failover provider model_id=%s not resolvable against current OPENAI_MODELS / config; skipping.',
+                    'Workspace failover provider model_id=%s not resolvable: %s; skipping.',
                     entry.model_id,
+                    reason,
                 )
                 continue
             candidates.append(candidate)
@@ -323,9 +431,11 @@ async def resolve_failover_candidates(
         # implicit primary, then expand from the global base-model map if
         # an entry exists for that id.
         requested_id = payload.get('model')
-        primary = _build_candidate(requested_id, 0)
+        primary, reason = _build_candidate(requested_id, 0)
         if primary is not None:
             candidates.append(primary)
+        else:
+            dropped_base.append(f'{requested_id} ({reason})')
 
         global_map = (await Config.get('models.failover_map')) or {}
         # PersistentConfig deserialises to plain dicts/lists, not Pydantic
@@ -336,12 +446,14 @@ async def resolve_failover_candidates(
             target_id = entry.get('model_id')
             if not target_id:
                 continue
-            candidate = _build_candidate(target_id, offset + 1, entry.get('max_concurrent'))
+            candidate, reason = _build_candidate(target_id, offset + 1, entry.get('max_concurrent'))
             if candidate is None:
+                dropped.append(f'{target_id} ({reason})')
                 log.warning(
-                    'Base-model failover entry model_id=%s (parent=%s) not resolvable; skipping.',
+                    'Base-model failover entry model_id=%s (parent=%s) not resolvable: %s; skipping.',
                     target_id,
                     requested_id,
+                    reason,
                 )
                 continue
             candidates.append(candidate)
@@ -373,16 +485,41 @@ async def resolve_failover_candidates(
     # Stable sort preserves configured order within each health tier.
     candidates.sort(key=health_rank)
 
+    # An empty chain is a misconfiguration, not a runtime condition: the
+    # operator believes they configured a chain and the resolver silently
+    # degraded to a single provider. Say so on its own line so it is not
+    # buried in the summary below.
+    if chain_empty_reason:
+        log.warning(
+            'resolve_failover_candidates: wrapper %r - %s; falling back to the '
+            'base-model chain, so this request has NO failover.',
+            getattr(model_info, 'id', None) if model_info else None,
+            chain_empty_reason,
+        )
+
     if len(candidates) < 2 and model_info and getattr(model_info.meta, 'failover_source', None):
+        # Name the entries that were dropped and why - "check the chain
+        # configuration" alone left the operator guessing which entry
+        # vanished and what made it unresolvable.
+        details = []
+        if chain_empty_reason:
+            details.append(chain_empty_reason)
+        if dropped:
+            details.append('dropped chain entries: ' + '; '.join(dropped))
+        if dropped_base:
+            details.append('unresolved base model: ' + '; '.join(dropped_base))
+        if not details:
+            details.append('the chain resolved to a single provider')
         log.warning(
             'resolve_failover_candidates: wrapper %r (failover_source=%r) resolved '
             'to %d candidate(s) [%s]. Failover will NOT be possible for this '
-            'request - check the chain configuration and that chain entries '
+            'request - %s. Check the chain configuration and that chain entries '
             'resolve against current connections (OPENAI_MODELS).',
             getattr(model_info, 'id', None),
             getattr(model_info.meta, 'failover_source', None),
             len(candidates),
             ', '.join(f'{c.model_name}@{c.url}' for c in candidates) or 'none',
+            '; '.join(details),
         )
     return candidates
 
