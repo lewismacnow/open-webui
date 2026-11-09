@@ -44,6 +44,53 @@ def merge_model_params(base: dict, override: dict) -> dict:
     return params
 
 
+def extract_error_message(body: object) -> str:
+    """A readable one-line message from a provider error body.
+
+    Provider errors arrive in several shapes: a plain string, a JSON object
+    with an ``error`` key, an object with a ``message`` key, a nested
+    ``detail`` object. Drill down to the first string that says something
+    useful so the user sees "Internal network failure" instead of a raw
+    JSON blob.
+
+    Accepts an already-decoded body (dict / list / str) or a JSON string.
+    """
+    if body is None:
+        return ''
+
+    if isinstance(body, str):
+        text = body.strip()
+        if not text:
+            return ''
+        try:
+            decoded = JSONCodec.loads(text)
+        except (JSONCodec.JSONDecodeError, ValueError):
+            return text
+        if decoded == text:
+            return text
+        body = decoded
+
+    if isinstance(body, dict):
+        for key in ('error', 'message', 'detail'):
+            if key in body:
+                nested = extract_error_message(body[key])
+                if nested:
+                    return nested
+        try:
+            return JSONCodec.dumps(body)
+        except (TypeError, ValueError):
+            return str(body)
+
+    if isinstance(body, list):
+        for item in body:
+            nested = extract_error_message(item)
+            if nested:
+                return nested
+        return ''
+
+    return str(body)
+
+
 def get_response_error_detail(response: object) -> str:
     status_code = getattr(response, 'status_code', None)
     fallback = f'Provider returned HTTP {status_code}' if status_code else 'Provider returned an error'
@@ -55,22 +102,7 @@ def get_response_error_detail(response: object) -> str:
     except Exception:
         return fallback
 
-    try:
-        detail = JSONCodec.loads(body)
-    except JSONCodec.JSONDecodeError:
-        return body.strip() or fallback
-
-    while isinstance(detail, dict):
-        next_detail = None
-        for key in ('error', 'message', 'detail'):
-            if key in detail:
-                next_detail = detail[key]
-                break
-        if next_detail is None:
-            return str(detail)
-        detail = next_detail
-
-    return detail if isinstance(detail, str) else str(detail)
+    return extract_error_message(body) or fallback
 
 
 def _strip_filter_entry(entry):

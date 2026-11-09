@@ -268,7 +268,7 @@ from open_webui.utils.middleware import (
     process_chat_response,
     publish_chat_failed_event,
 )
-from open_webui.utils.misc import get_response_error_detail, merge_model_params
+from open_webui.utils.misc import extract_error_message, get_response_error_detail, merge_model_params
 from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils.models import (
     check_model_access,
@@ -2718,7 +2718,12 @@ async def chat_completion(
                     )
                 raise  # re-raise to ensure proper task cancellation handling
             except Exception as e:
-                error_detail = e.detail if isinstance(e, HTTPException) else str(e)
+                # The chat UI renders `error.content` as a STRING, and the
+                # frontend falls back to a generic "Server connection failed"
+                # when it finds no string there. A provider body that is
+                # still a dict would therefore hide the provider's actual
+                # message - drill down to the useful string first.
+                error_detail = extract_error_message(e.detail) if isinstance(e, HTTPException) else str(e)
                 if not (metadata.get('session_id') and metadata.get('chat_id')):
                     raise
             finally:

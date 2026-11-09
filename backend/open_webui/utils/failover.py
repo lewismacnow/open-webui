@@ -562,6 +562,67 @@ def is_retryable_error(status_code: Optional[int], exc: Optional[BaseException])
     return False
 
 
+def is_transient_provider_error(status_code: Optional[int]) -> bool:
+    """Is this failure worth retrying against the SAME provider?
+
+    5xx and 429 are transient: the provider is unwell or busy and the same
+    request may succeed a moment later. A 4xx is not - a bad request shape,
+    bad credentials or a missing model fail identically on every attempt, so
+    retrying only wastes the user's time.
+
+    This is narrower than :func:`is_retryable_error`, which answers "should
+    we try the NEXT provider?" - the next provider would fail the same way
+    for a 4xx, but the SAME provider may well succeed for a 5xx.
+    """
+    if status_code is None:
+        return False
+    return status_code == 429 or 500 <= status_code < 600
+
+
+# A tool-call continuation is the turn that turns tool results into the
+# model's final answer. The tool has already run by then, so a transient
+# provider failure only costs the answer - retry it a bounded number of
+# times before giving up on the turn.
+TOOL_CONTINUATION_MAX_RETRIES = 2
+TOOL_CONTINUATION_RETRY_DELAY = 1.0  # seconds, multiplied by the attempt number
+
+
+async def call_with_transient_retry(
+    call,
+    *,
+    label: str,
+    max_retries: int = TOOL_CONTINUATION_MAX_RETRIES,
+    delay: float = TOOL_CONTINUATION_RETRY_DELAY,
+):
+    """Run ``await call()``, retrying a transient provider failure.
+
+    A 5xx / 429 / dropped connection is the provider's problem, not the
+    request's: the same call may well succeed a moment later. A 4xx is not
+    retried - the request shape or the credentials are wrong, so the same
+    call would fail identically.
+
+    Re-raises the last error once the retries are exhausted.
+    """
+    attempt = 0
+    while True:
+        try:
+            return await call()
+        except HTTPException as exc:
+            if not is_transient_provider_error(getattr(exc, 'status_code', None)) or attempt >= max_retries:
+                raise
+            attempt += 1
+            wait = delay * attempt
+            log.warning(
+                '%s hit a transient provider error (HTTP %s); retrying in %.1fs (attempt %d of %d).',
+                label,
+                getattr(exc, 'status_code', None),
+                wait,
+                attempt,
+                max_retries,
+            )
+            await asyncio.sleep(wait)
+
+
 def parse_retry_after(header_value: Optional[str]) -> Optional[int]:
     """Parse a Retry-After HTTP header into seconds-from-now.
 

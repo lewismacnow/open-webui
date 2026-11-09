@@ -441,6 +441,61 @@ Verified against a running container with a mock provider that fails the way `ap
 
 `backend/open_webui/test/test_provider_error_body.py` — 15 tests; 14 fail on the pre-fix code.
 
+### 9.9 A transient provider failure killed the tool-call continuation
+
+```
+ERROR | open_webui.utils.middleware:response_handler:7644 - Tool-call continuation failed:
+  {"error":{"code":"1234","message":"Internal network failure, error id: ... please try again later."}}
+  + a 30-line traceback
+```
+
+The tool-call continuation is the turn that turns tool results into the model's final
+answer. The tool has **already run** by then — only the final answer is missing — yet a
+transient provider failure ended the turn outright.
+
+Three fixes:
+
+1. **The continuation is retried** on a transient failure (5xx / 429), up to twice with a
+   short backoff. A 4xx is _not_ retried: the request shape or the credentials are wrong and
+   the same call would fail identically.
+2. **The provider's message is no longer hidden.** The chat UI renders `error.content` as a
+   _string_ — the frontend's `getErrorMessage()` takes the first string candidate and falls
+   back to a generic "Server connection failed" when it finds none. A provider body that was
+   still a dict therefore made the UI show "Server connection failed" instead of the
+   provider's actual message. `utils/misc.py:extract_error_message()` now drills down to the
+   first useful string (`error` → `message` → `detail`) and is used by **both** places that
+   put a provider failure into the chat: the tool-call continuation
+   (`utils/middleware.py`) and the top-level chat handler (`main.py`).
+
+   This also repairs a regression from the previous commit: parsing the provider's JSON body
+   turned `detail` into a dict, and that dict then reached the chat UI as `error.content`,
+   where it matched no string candidate and the provider's message was replaced by
+   "Server connection failed".
+
+3. **No traceback for a provider failure.** The provider's message is the information; the
+   stack is noise on top of it. An unexpected exception still logs the full traceback.
+
+Verified against a running container with a mock provider that fails the continuation round
+once, then recovers:
+
+```
+mock:  POST #1 roles=['user']                     -> emitting tool_call
+       POST #2 roles=['user','assistant','tool']  -> failing with HTTP 500 (JSON body, no Content-Type)
+       POST #3 roles=['user','assistant','tool']  -> replying with text
+app:   WARNING | Tool-call continuation hit a transient provider error (HTTP 500);
+                retrying in 1.0s (attempt 1 of 2).
+       -> the chat completes: "Tool executed successfully after a retry."
+```
+
+With the provider failing every time, the turn ends with the readable message and no
+traceback:
+
+```
+ERROR | Tool-call continuation failed: Internal network failure, error id: ... please try again later.
+```
+
+`backend/open_webui/test/test_tool_continuation.py` — 27 tests; 24 fail on the pre-fix code.
+
 ## 10. Known follow-ups
 
 - The fork's note-files injection in `process_chat_payload` was **not** restored — upstream

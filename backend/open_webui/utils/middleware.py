@@ -117,6 +117,7 @@ from open_webui.utils.misc import (
     add_or_update_system_message,
     add_or_update_user_message,
     convert_output_to_messages,
+    extract_error_message,
     extract_urls,
     get_content_from_message,
     get_last_assistant_message,
@@ -134,6 +135,7 @@ from open_webui.utils.misc import (
     set_last_user_message_content,
     strip_empty_content_blocks,
 )
+from open_webui.utils.failover import call_with_transient_retry
 from open_webui.utils.oauth import get_system_oauth_token
 from open_webui.utils.vision_rag import process_image_rag
 from open_webui.utils.payload import apply_params_to_form_data, apply_system_prompt_to_body
@@ -202,7 +204,6 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
-
 
 def _is_tool_result_error(value: Any) -> bool:
     if isinstance(value, str):
@@ -6062,8 +6063,12 @@ async def streaming_chat_response_handler(response, ctx):
                     error = error.get('detail', error)
                 else:
                     error = str(error)
-
-                return error if isinstance(error, (str, dict)) else str(error)
+                # The chat UI renders `error.content` as a STRING: the
+                # frontend's getErrorMessage() looks for the first string
+                # candidate and falls back to a generic "Server connection
+                # failed" when it finds none. A provider body that is still
+                # a dict would therefore hide the provider's actual message.
+                return extract_error_message(error)
 
             async def emit_message_error(error_content):
                 if save_to_chat:
@@ -7607,13 +7612,23 @@ async def streaming_chat_response_handler(response, ctx):
                             new_form_data = final_answer_payload(new_form_data)
                         new_form_data = normalize_messages_for_model(new_form_data)
 
-                        res = await generate_chat_completion(
-                            request,
-                            new_form_data,
-                            user,
-                            bypass_system_prompt=True,
+                        # The tool has already run and its result is in
+                        # hand - only the model's final answer is missing. A
+                        # transient provider failure (5xx / 429 / a dropped
+                        # connection) must therefore not kill the turn: retry
+                        # the continuation a bounded number of times before
+                        # giving up. A 4xx is not retried - the request
+                        # shape or the credentials are wrong and the same
+                        # call would fail identically.
+                        res = await call_with_transient_retry(
+                            lambda: generate_chat_completion(
+                                request,
+                                new_form_data,
+                                user,
+                                bypass_system_prompt=True,
+                            ),
+                            label='Tool-call continuation',
                         )
-
                         if isinstance(res, StreamingResponse):
                             # Reset response-relative output indices; keep prior output as the UI history prefix.
                             prior_output = list(full_output())
@@ -7641,7 +7656,13 @@ async def streaming_chat_response_handler(response, ctx):
                             break
                     except Exception as e:
                         error_content = get_message_error_content(e)
-                        log.exception('Tool-call continuation failed: %s', error_content)
+                        if isinstance(e, HTTPException):
+                            # A provider failure is not an application bug:
+                            # the provider's own message is the information,
+                            # and the stack is noise on top of it.
+                            log.error('Tool-call continuation failed: %s', error_content)
+                        else:
+                            log.exception('Tool-call continuation failed: %s', error_content)
                         await emit_message_error(error_content)
                         break
 
@@ -7833,7 +7854,10 @@ async def streaming_chat_response_handler(response, ctx):
                                 break
                         except Exception as e:
                             error_content = get_message_error_content(e)
-                            log.exception('Code interpreter continuation failed: %s', error_content)
+                            if isinstance(e, HTTPException):
+                                log.error('Code interpreter continuation failed: %s', error_content)
+                            else:
+                                log.exception('Code interpreter continuation failed: %s', error_content)
                             await emit_message_error(error_content)
                             break
 
