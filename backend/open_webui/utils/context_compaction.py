@@ -21,6 +21,9 @@ from open_webui.utils.task import (
 
 log = logging.getLogger(__name__)
 
+_TIKTOKEN_ENC = None
+_TIKTOKEN_AVAILABLE = None  # None = unknown, True/False after first attempt
+
 BASE64_DATA_URI_RE = re.compile(r'data:[\w/+.;=%-]*;base64,[A-Za-z0-9+/=]*')
 
 DEFAULT_CONTEXT_COMPACTION_PROMPT = """### Task:
@@ -152,6 +155,42 @@ async def compact_messages_for_request(
     checkpoint_message_id = (
         recent_messages[0].get('id') or metadata.get('user_message_id') or metadata.get('message_id')
     )
+
+    # Did the compaction actually buy us anything? If the retained window plus
+    # the summary is no smaller than what we started with, compaction cannot
+    # rescue this conversation - it will keep re-triggering on every turn and
+    # each attempt costs a full-context LLM call. Say so explicitly, because
+    # the usual causes are a retention percentage that is too high or a handful
+    # of very large messages that survive the cut.
+    pre_tokens = (
+        _estimate_tokens(system_prompt)
+        + _estimate_tokens(previous_summary or '')
+        + _estimate_messages_tokens([*compacted_messages, *recent_messages])
+    )
+    post_tokens = (
+        _estimate_tokens(system_prompt) + _estimate_tokens(summary) + _estimate_messages_tokens(recent_messages)
+    )
+    if post_tokens >= pre_tokens:
+        log.warning(
+            'Context compaction did not reduce the context (chat=%s): ~%d tokens before, ~%d after '
+            '(threshold=%d, keeping the last %d messages). The retained window is already larger '
+            'than the budget - keep fewer recent messages, lower the token threshold, or start a '
+            'new chat.',
+            chat_id,
+            pre_tokens,
+            post_tokens,
+            token_threshold,
+            config['keep_recent_messages'],
+        )
+    elif post_tokens > token_threshold:
+        log.warning(
+            'Context compaction left the context above the threshold (chat=%s): ~%d tokens after '
+            'compaction, threshold=%d. Compaction will re-run on the next turn.',
+            chat_id,
+            post_tokens,
+            token_threshold,
+        )
+
     # Only whole-turn user boundaries correspond to persisted chat checkpoints.
     if recent_messages[0].get('role') == 'user' and is_saved_chat_id(chat_id) and checkpoint_message_id:
         await Chats.upsert_message_to_chat_by_id_and_message_id(
@@ -816,6 +855,15 @@ async def _generate_summary(
     )
     context_compaction_model = task_config.get('chat.context_compaction.model')
     task_model_id = context_compaction_model if context_compaction_model in models else model_id
+    if context_compaction_model and context_compaction_model not in models:
+        # Silently falling back to the chatting model means the summarisation
+        # runs on a big (and expensive) model - and on one that may not even
+        # be able to hold the history. Say so.
+        log.warning(
+            'Context compaction model %r is not available; falling back to the chat model %r.',
+            context_compaction_model,
+            model_id,
+        )
     if task_model_id not in models:
         raise ValueError('No available model for context compaction')
 
@@ -1003,7 +1051,35 @@ def _estimate_messages_tokens(messages: list[dict]) -> int:
     return total
 
 
+def _get_tiktoken_encoder():
+    """
+    Lazily load and cache the cl100k_base tiktoken encoder.
+
+    Returns None if tiktoken is unavailable or fails to load (caller falls
+    back to char-based heuristic).
+    """
+    global _TIKTOKEN_ENC, _TIKTOKEN_AVAILABLE
+    if _TIKTOKEN_AVAILABLE is False:
+        return None
+    if _TIKTOKEN_ENC is not None:
+        return _TIKTOKEN_ENC
+    try:
+        import tiktoken
+
+        _TIKTOKEN_ENC = tiktoken.get_encoding('cl100k_base')
+        _TIKTOKEN_AVAILABLE = True
+        return _TIKTOKEN_ENC
+    except Exception as e:
+        log.warning(f'tiktoken unavailable, falling back to char-based token estimate: {e}')
+        _TIKTOKEN_AVAILABLE = False
+        return None
+
+
 def _estimate_tokens(value: Any) -> int:
+    """
+    Estimate token count for a value using tiktoken (cl100k_base encoding)
+    when available, falling back to len(str(value))//4 when not.
+    """
     if value is None:
         return 0
 
@@ -1016,4 +1092,11 @@ def _estimate_tokens(value: Any) -> int:
     if not value:
         return 0
 
+    enc = _get_tiktoken_encoder()
+    if enc is not None:
+        try:
+            return len(enc.encode(value, disallowed_special=()))
+        except Exception:
+            # encode failure on unusual content — fall through to heuristic
+            pass
     return max(1, len(value) // 4)

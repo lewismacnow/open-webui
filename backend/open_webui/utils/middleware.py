@@ -135,7 +135,6 @@ from open_webui.utils.misc import (
     strip_empty_content_blocks,
 )
 from open_webui.utils.oauth import get_system_oauth_token
-from open_webui.utils.payload import apply_params_to_form_data, apply_system_prompt_to_body, resolve_system_prompt
 from open_webui.utils.vision_rag import process_image_rag
 from open_webui.utils.payload import apply_params_to_form_data, apply_system_prompt_to_body
 from open_webui.utils.plugin import load_function_module_by_id
@@ -2741,6 +2740,37 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     is_note_chat = bool(chat and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note')
 
+    # Fork: stash the API Tools state in metadata so the downstream Path C
+    # branches can detect it.
+    #
+    # The v0.13.2 sync dropped this block (it sat between upstream's
+    # `if api_tools_active:` feature block and the fork's tool_ids block, so
+    # the conflict resolution took upstream's shape and the fork's lines were
+    # never re-applied). The readers were left in place, so the writes simply
+    # went missing: `metadata['api_tools_active']` was always falsy and the
+    # API Tools path never ran.
+    metadata['api_tools_active'] = api_tools_active
+    # API caller may pre-supply answers to ``ask_user`` tool calls so the
+    # chat can continue without a downstream UI socket. Format:
+    # ``{question_id: selected_option_label}``. Carried through to
+    # ``stage_ask_user_tool_calls`` which validates coverage and emits
+    # the resolved function_call_output immediately.
+    metadata['ask_user_answers'] = form_data.get('ask_user_answers')
+
+    internal_note = (
+        chat is not None and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note'
+    )
+
+    # Fork: superset of upstream's use_builtin_tools gate — internal notes and
+    # UI sessions enable builtin tools exactly as upstream, and api_tools_active
+    # (stateless API callers on models with the API Tools capability) unlocks
+    # them for the API Tools wrapper path.
+    use_builtin_tools = (
+        (internal_note or bool(metadata.get('session_id')) or api_tools_active)
+        and (metadata.get('params', {}).get('function_calling') != 'legacy')
+        and bool(model_capabilities.get('builtin_tools', True))
+    )
+
     if api_tools_active:
         if not tool_ids:
             model_tool_ids = (model.get('info', {}).get('meta', {}) or {}).get('toolIds', [])
@@ -4827,6 +4857,43 @@ def build_x_open_webui_summary(rag_sources, tool_events):
     return {'sources': all_sources, 'tools_used': tools_used}
 
 
+async def _extract_non_stream_content(response):
+    """Pull the assistant text (and usage) out of a non-streaming provider response.
+
+    The tool loop's follow-up round trip asks the provider for ``stream=True``,
+    but a provider (or an OpenAI-compatible proxy) may answer with a plain
+    ``chat.completion`` body instead.  That body still carries the model's
+    final answer, so it must not be thrown away.
+
+    Accepts a plain dict or a starlette ``Response`` (JSONResponse).  Returns
+    ``(text, usage)``; ``text`` is ``''`` when nothing usable was found.
+    """
+    data = response
+    if isinstance(response, Response):
+        try:
+            body = response.body
+            if isinstance(body, (bytes, bytearray)):
+                body = body.decode('utf-8', 'replace')
+            data = json.loads(body)
+        except Exception:
+            # Not a JSON payload (e.g. a provider error string) — nothing to surface.
+            return '', None
+    if not isinstance(data, dict):
+        return '', None
+
+    choices = data.get('choices') or []
+    if not choices:
+        return '', None
+
+    message = choices[0].get('message') or {}
+    content = message.get('content')
+    if isinstance(content, list):
+        content = ''.join(part.get('text', '') or '' for part in content if isinstance(part, dict))
+    if not isinstance(content, str):
+        content = ''
+    return content, data.get('usage')
+
+
 async def api_tool_stream_wrapper(response, ctx, events):
     """Path C — server-side tool execution loop for API callers with the
     ``api_tools`` capability.
@@ -5478,6 +5545,25 @@ async def api_tool_stream_wrapper(response, ctx, events):
             # Provider returned a non-streaming response — can't continue the
             # loop cleanly. Surface a stop, break to the terminal summary.
             log.warning('api_tool_stream_wrapper: next response was not a StreamingResponse; ending tool loop.')
+            # Fork: the follow-up round trip can come back as a plain
+            # chat.completion body (a provider/proxy that ignores
+            # stream=true).  That body carries the model's final answer —
+            # emitting only the synthetic stop chunk dropped it on the floor,
+            # so the client saw an empty assistant message.  Surface the text
+            # as a regular content chunk before the stop chunk.
+            final_text, final_usage = await _extract_non_stream_content(new_response)
+            if final_text:
+                final_chunk = base_chunk(
+                    upstream_id,
+                    upstream_created,
+                    upstream_model,
+                    upstream_system_fingerprint,
+                    finish_reason=None,
+                )
+                final_chunk['choices'][0]['delta'] = {'role': 'assistant', 'content': final_text}
+                if final_usage:
+                    final_chunk['usage'] = final_usage
+                yield wrap_item(json.dumps(final_chunk))
             yield wrap_item(
                 json.dumps(
                     base_chunk(
@@ -7094,13 +7180,6 @@ async def streaming_chat_response_handler(response, ctx):
                     if not round_error:
                         tool_call_iterations += 1
 
-                    response_tool_calls = tool_calls.pop(0)
-                    ask_user_staged, ask_user_error = stage_ask_user_tool_calls(
-                        response_tool_calls,
-                        output,
-                        output_id,
-                        answers=metadata.get('ask_user_answers'),
-                    )
                     # Resolve dispatch before approvals and special handling such as ask_user.
                     response_tool_calls = []
                     output_by_call_id = {
@@ -7163,7 +7242,14 @@ async def streaming_chat_response_handler(response, ctx):
                         else:
                             response_tool_calls.append(tool_call)
 
-                    ask_user_staged, ask_user_error = stage_ask_user_tool_calls(response_tool_calls, output, output_id)
+                    # Fork: stage the ask_user tool call (Pattern B) once the
+                    # dispatch has resolved the individual calls.
+                    ask_user_staged, ask_user_error = stage_ask_user_tool_calls(
+                        response_tool_calls,
+                        output,
+                        output_id,
+                        answers=metadata.get('ask_user_answers'),
+                    )
                     if ask_user_error:
                         response_tool_calls = [
                             tool_call

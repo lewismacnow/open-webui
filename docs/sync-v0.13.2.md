@@ -108,6 +108,7 @@ defects that **the merge did not introduce** — both pre-date the v0.13.2 sync 
 the fork's own code. They are fixed here. Neither exists in upstream v0.13.2.
 
 ### 8.1 Duplicated `get_file_content_by_id` endpoint — `routers/files.py`
+
 **Pre-existing fork bug** — the fork's `routers/files.py` already carried two
 definitions of the same route before this sync. Python kept the second, so the first
 was dead code: the `?attachment=` parameter never had any effect and the
@@ -119,6 +120,7 @@ Merged into one endpoint carrying upstream's `attachment` parameter and
 stored path has gone missing serve their indexed text instead of 404).
 
 ### 8.2 `UnboundLocalError` on every chat request — `main.py`
+
 **Pre-existing fork bug** — `main.py`'s `chat_completion()` has a local
 `from open_webui.routers.models import get_all_models` inside a try block. A local
 import makes the name local for the **whole** function, so the earlier
@@ -132,15 +134,239 @@ refresh block and predates this sync; **upstream's v0.13.2 has a single module-l
 import and is not affected**. The local import was pointless (`routers.models`
 re-exports the same function from `utils.models`) and has been removed.
 
-*Found by the test deployment:* `POST /api/v1/chat/completions` returned
+_Found by the test deployment:_ `POST /api/v1/chat/completions` returned
 `500 UnboundLocalError`; it now returns a clean `400 Model not found`.
 
 A scan for the same pattern — a local import shadowing a module-level name that is
 used earlier in the same function — now reports **zero** hazards across the backend.
 
-## 9. Known follow-ups
+## 9. Production errors found after the release
 
-- Re-check upstream's intent on the two restored blocks (note-files injection, `ast` fallback).
+### 9.1 `pop from empty list` on every tool call — `utils/middleware.py`
+
+**Introduced by this merge** (unlike §8, which was pre-existing).
+
+The `utils/middleware.py` conflict was resolved by keeping both sides, and the two sides
+each consumed the tool-call list:
+
+```python
+response_tool_calls = tool_calls.pop(0)                              # the fork's ask_user block
+...
+for tool_call in split_tool_call_batches(tool_calls.pop(0), ...):    # upstream's dispatch
+```
+
+The first pop removed the batch; the second popped from an empty list. Every tool call
+raised `IndexError: pop from empty list` before a single tool ran, which surfaced in the
+log as `Error processing chat payload: pop from empty list`.
+
+The keep-both also left `response_tool_calls = []` between the two blocks — discarding the
+ask_user staging the fork's block had just produced — and dropped the
+`answers=metadata.get('ask_user_answers')` argument that the API Tools path (ask_user
+Pattern B) depends on. Without `answers=` a staged question waits on a socket that never
+answers and the request deadlocks.
+
+The dispatch now matches upstream v0.13.2's structure — one pop, then the dispatch loop,
+then the fork's ask_user staging — with the fork's `answers=` argument restored:
+
+```python
+for tool_call in split_tool_call_batches(tool_calls.pop(0), metadata.get('tools', {})):
+    ...
+ask_user_staged, ask_user_error = stage_ask_user_tool_calls(
+    response_tool_calls,
+    output,
+    output_id,
+    answers=metadata.get('ask_user_answers'),
+)
+```
+
+Upstream's ordering (resolve the dispatch before approvals and special handling) is kept.
+The fork's lenient ask_user validation still applies: upstream's `prepare_tool_call` only
+_coerces_ arguments against the tool schema, it does not validate them, so a malformed
+ask_user payload still reaches the fork's validator instead of being rejected outright.
+
+**Regression guard:** `backend/open_webui/test/test_tool_call_dispatch.py` asserts that a
+dispatch function index-pops the tool-call list exactly once, that
+`stage_ask_user_tool_calls()` is called exactly once and with `answers=`, and — repo-wide —
+that no function index-pops the same name twice. Against the pre-fix file the guard fails
+with the exact diagnosis (`pops 'tool_calls' at lines [7097, 7109]`); against the fixed file
+it passes.
+
+### 9.2 `405 Method Not Allowed` on the MCP GET stream — expected, not a defect
+
+```
+INFO | httpx2._client - HTTP Request: GET https://api.z.ai/api/mcp/web_reader/mcp "HTTP/1.1 405 Method Not Allowed"
+```
+
+The MCP Streamable HTTP transport opens a **GET** SSE stream alongside the POST channel so
+the server can push messages to the client. The GET stream is optional in the spec, and
+`api.z.ai` does not implement it: once the request is authenticated it reaches the MCP
+route, which only handles POST and answers `405`.
+
+Confirmed directly against the endpoint:
+
+| Request                      | Result                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| `GET` without credentials    | `200` + `{"code":1001,"msg":"Authentication parameter not received in Header"}` |
+| `GET` with an invalid token  | `200` + `{"code":401,"msg":"token expired or incorrect"}`                       |
+| `GET` with valid credentials | `405 Method Not Allowed`                                                        |
+
+The gateway answers `GET` before routing while unauthenticated; with valid credentials the
+request reaches the MCP handler, which only implements POST.
+
+**Impact: none on tool calls.** All client→server traffic — including every tool call —
+goes over POST, which the server accepts; the session initialises, tools list, tools run,
+and the session terminates cleanly with `DELETE`. What is lost is server→client
+notification delivery for such servers (e.g. `notifications/tools/list_changed`).
+
+**This is not a regression from the sync.** The MCP SDK's `handle_get_stream()` behaves
+identically in `mcp==1.27.2` (the version the fork used before the sync) and
+`mcp==2.3.0`: a failed GET is caught, logged at DEBUG and retried once, then the SDK gives
+up. It costs two extra GET requests per session and one INFO log line each. `mcp==2.3.0`
+is the latest release, so there is no upstream SDK fix to pull in.
+
+Deliberately **not** worked around: suppressing the GET would disable server→client
+notifications for _every_ server, including the ones that do support it. The cost of the
+noise is lower than the cost of that.
+
+### 9.3 The API Tools block was dropped by the sync — `utils/middleware.py`
+
+**Introduced by this merge.**
+
+The `utils/middleware.py` conflict was resolved by taking upstream's shape, and the fork's
+API Tools block went with it. It sat between upstream's `if api_tools_active:` feature
+block and the fork's `tool_ids` block, so nothing marked it as a conflict. Three lines
+were lost from `process_chat_payload`:
+
+```python
+metadata['api_tools_active'] = api_tools_active
+metadata['ask_user_answers'] = form_data.get('ask_user_answers')
+use_builtin_tools = (
+    (internal_note or bool(metadata.get('session_id')) or api_tools_active)
+    and (metadata.get('params', {}).get('function_calling') != 'legacy')
+    and bool(model_capabilities.get('builtin_tools', True))
+)
+```
+
+Every **reader** of those keys survived the merge — the Path C branch in
+`non_streaming_chat_response_handler`, the Path C branch in `streaming_chat_response_handler`,
+the ask_user answers lookup in `api_tool_stream_wrapper`, and the `answers=` argument in the
+tool-call dispatch. Only the **writes** went missing, so:
+
+- `metadata['api_tools_active']` was always falsy → the API Tools path never ran. A
+  stateless API call returned the provider's `tool_calls` unexecuted, with no
+  `x_open_webui.tool_events`.
+- `metadata['ask_user_answers']` was always `None` → ask_user Pattern B (an API caller
+  supplying the answers) could never resolve, and the `answers=` argument restored in
+  §9.1 was correct but inert.
+
+The block is re-applied verbatim, in the position it held before the sync. The ordering
+relative to upstream's early `use_builtin_tools` definition is unchanged: the early uses
+(`include_file_context`, the memory branch, `can_author_skills`) keep upstream's value, and
+the later uses (the skills block, the tool filter) get the fork's superset — exactly as
+before the merge.
+
+**Not restored:** upstream's `b34885efc` deliberately removed the fork's note-files
+injection from the same region and replaced it with the `view_note` builtin tool. Re-adding
+it would double-inject note content, so it stays out. Flagged for a decision: if you want a
+note chat to auto-include the note's attached files again, that needs a deliberate design
+call, not a merge resolution.
+
+**Verified against a running container** with a mock OpenAI-compatible provider:
+
+| check                                            | result                                                                                                                                                                           |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| API Tools, stateless request, `stream:false`     | tools execute server-side; `x_open_webui.tool_events` carries `tool_call_start`/`tool_call_end` per tool; `tools_used` populated; final message built on the real tool output    |
+| ask_user Pattern B (`ask_user_answers` supplied) | the question resolves server-side (`{"status":"ok","answers":{"q1":"Blue"},"responder":"api-supplied"}`) and the resolved answer is fed back to the model on the next round trip |
+| UI/streaming tool path                           | unchanged — tools execute, container log free of `pop from empty list`                                                                                                           |
+
+### 9.4 The API Tools loop dropped the model's final text — `utils/middleware.py`
+
+**Pre-existing fork bug** (not merge-introduced), but only reachable once §9.3 restored the
+API Tools path.
+
+The tool loop asks the provider for `stream=true` on the follow-up round trip that carries
+the tool result back to the model. A provider — or an OpenAI-compatible proxy — may answer
+with a plain `chat.completion` body instead. `api_tool_stream_wrapper` then took the
+"not a `StreamingResponse`" branch, emitted a synthetic stop chunk and **never read the
+body**, so the model's final answer was thrown away: the client got an empty assistant
+message with `finish_reason: stop`, even though the tool had run and the provider had
+answered with text.
+
+The body is now parsed and the assistant text is emitted as a regular content chunk before
+the stop chunk, with the usage carried over when the body has it.
+
+This is tool-agnostic and was never specific to `ask_user`. Measured on the running
+container:
+
+| case                                 | before            | after      |
+| ------------------------------------ | ----------------- | ---------- |
+| `ask_user`, streaming follow-up      | content OK        | content OK |
+| `ask_user`, non-streaming follow-up  | content **empty** | content OK |
+| normal tool, streaming follow-up     | content OK        | content OK |
+| normal tool, non-streaming follow-up | content **empty** | content OK |
+
+The branch is byte-identical in the fork's pre-merge tree
+(`8b8d2527d:backend/open_webui/utils/middleware.py:5695-5710`) and came in with the fork's
+own `fb4d350ba` ("feat(server): API Tools, response summaries, context pruning"). The
+v0.13.2 sync did not touch it.
+
+### 9.5 The tiktoken token estimator was lost — `utils/context_compaction.py`
+
+**Introduced by this merge** — the only genuinely fork-authored loss found by the
+provenance sweep.
+
+The sync rewrote `context_compaction.py` on top of upstream's file and re-applied the fork's
+features, but the fork's **tiktoken-based estimator** was missed and the merge shipped the
+bare `len(text) // 4` heuristic.
+
+The heuristic is not a rough approximation of tiktoken — it is wrong in the direction that
+matters:
+
+| content           | `len//4` | tiktoken | error |
+| ----------------- | -------: | -------: | ----: |
+| English prose     |      225 |      201 |  −11% |
+| JSON tool payload |       95 |  **369** |  −74% |
+| non-ASCII text    |       40 |  **160** |  −75% |
+
+A tool-heavy chat was counted at roughly a quarter of its real size, so **compaction fired
+several turns later than configured** — on exactly the content the fork's compaction work
+exists to bound. The module's own docstring still claimed _"falls back to a tiktoken
+estimate"_ while the code did no such thing, and `tiktoken==0.13.0` is a hard dependency in
+both `requirements.txt` and `requirements-slim.txt`.
+
+Restored verbatim from the fork's pre-merge tree:
+
+- `_get_tiktoken_encoder()` — lazily loads and caches `cl100k_base`, with a char-heuristic
+  fallback when tiktoken cannot be loaded;
+- the tiktoken branch in `_estimate_tokens()`;
+- the **"compaction did not reduce the context"** diagnostic — it reports when a compaction
+  cannot shrink the context and will therefore re-trigger every turn at the cost of a
+  full-context LLM call each time. That is the exact failure mode the fork's budget
+  enforcement targets, and it was silent;
+- the "summariser model is unavailable, falling back to the chat model" warning.
+
+`backend/open_webui/test/test_context_compaction.py` pins the estimator: it fails on the
+heuristic-only file (5 failures) and passes on this one.
+
+### 9.6 Two cosmetic losses
+
+- **`Models.svelte` — the global-failover wrapper label.** The fork's `modelBaseLabel()`
+  helper was lost, so a global-failover wrapper now shows "No description" where it used to
+  show "Global failover chain". The backend support is intact (`meta.failover_source` is
+  still modelled and still set by the Model Editor) — only the label was lost. Restored, with
+  the translation string added to `en-US` (it was never in the catalogue, so the fork was
+  showing the raw key).
+- **`utils/middleware.py` — a dead import.** Two `from open_webui.utils.payload import ...`
+  lines were kept: the fork's, which named `resolve_system_prompt`, and upstream's. Upstream
+  removed the `resolve_system_prompt()` call site in its own refactor (`8e2ba2937`), so the
+  name was dead. The fork's line is removed; upstream's line is left as the single import.
+
+## 10. Known follow-ups
+
+- The fork's note-files injection in `process_chat_payload` was **not** restored — upstream
+  replaced it with the `view_note` builtin tool (§9.3). Decide whether a note chat should
+  auto-include the note's attached files again.
+- Upstream's intent on the restored `ast.literal_eval` tool-arg fallback.
 - Upstream's ModelEditor / ToolkitEditor deltas still to be ported.
 - `mcp==2.3.0` must be installed on the deployment (the merged `backend/requirements.txt` pins it).
 - The fork's MCP cleanup filter is gone from `utils/mcp/client.py`; confirm the ASGI-level suppression is sufficient.
